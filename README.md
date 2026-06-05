@@ -152,6 +152,46 @@ Then inspect Coordinator state:
 curl -s http://localhost:6121/v1/groups/<groupId>/state
 ```
 
+## Agent local manifest examples
+
+The Agent can scan a local Minecraft server directory and generate manifests for one artifact kind at a time. This is local manifest generation only; it does not upload files and it is not RCON safe sync.
+
+Generate a world snapshot manifest. World snapshots include `world-runtime` and `plugin-runtime-data` files. Deleted entries from the previous manifest are written with `deleted: true`, `size: 0`, and an empty `sha256`.
+
+```bash
+cd agent
+go run . scan \
+  --server-dir C:/minecraft/server \
+  --artifact-kind world-snapshot \
+  --artifact-id snap_000001 \
+  --server-pack-version pack_000001 \
+  --group-id <groupId> \
+  --creator-host-id <hostId> \
+  --output ./snap_000001.manifest.json
+```
+
+Generate a server pack manifest:
+
+```bash
+go run . scan \
+  --server-dir C:/minecraft/server \
+  --artifact-kind server-pack \
+  --artifact-id pack_000001 \
+  --group-id <groupId> \
+  --creator-host-id <hostId> \
+  --output ./pack_000001.manifest.json
+```
+
+Validate, inspect, and diff manifests:
+
+```bash
+go run . manifest validate --file ./snap_000001.manifest.json
+go run . manifest inspect --file ./snap_000001.manifest.json
+go run . manifest diff --old ./snap_000001.manifest.json --new ./snap_000002.manifest.json
+```
+
+If the Agent config already exists, `scan` can read the group ID and creator host ID from local config. Explicit flags override config values. Unknown and ignored files are counted in the scan report but are never included in manifests.
+
 ## Documentation
 
 - `docs/architecture.md`

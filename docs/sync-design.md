@@ -84,9 +84,21 @@ A snapshot is valid only when:
 
 Rejected or partial snapshots must never become the latest snapshot.
 
-## Future file classes
+## Local manifest scanner
 
-Future scanners should classify files before deciding which artifact namespace they belong to:
+The first Agent manifest scanner is local only. It classifies files, hashes included files, validates manifest shape, compares manifests, and records deleted files when a previous manifest is provided. It does not upload objects, does not create Coordinator snapshot metadata, and does not make a running Minecraft server safe to copy.
+
+Deleted manifest entries use:
+
+- `deleted: true`
+- `size: 0`
+- `sha256: ""`
+
+Future safe sync must still run `save-all flush` through RCON before producing a world snapshot from a live server.
+
+## File classes
+
+Scanners classify files before deciding which artifact namespace they belong to:
 
 - `world-runtime`
 - `server-pack`
@@ -95,4 +107,10 @@ Future scanners should classify files before deciding which artifact namespace t
 - `ignored`
 - `unknown`
 
-The classifier is not implemented yet. Future work must avoid mixing server-pack changes with world snapshots, and unknown files should not be silently promoted into an approved artifact.
+Artifact kinds stay separate:
+
+- `world-snapshot` includes `world-runtime` and `plugin-runtime-data`.
+- `server-pack` includes `server-pack`.
+- `admin-state` includes `admin-state`.
+
+Ignored and unknown files are counted for diagnostics but are not included in manifests. Server-pack, admin-state, and world snapshot changes must not be mixed into one artifact.
