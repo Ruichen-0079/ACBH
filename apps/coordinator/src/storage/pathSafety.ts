@@ -70,15 +70,24 @@ export function validateManifest(manifest: ArtifactManifest): ArtifactManifest {
 
   for (const file of manifest.files) {
     validateManifestPath(file.path);
-    validateSha256(file.sha256);
     if (!Number.isSafeInteger(file.size) || file.size < 0) {
       throw new StorageValidationError("manifest file size must be a non-negative safe integer");
     }
-    if (Number.isNaN(Date.parse(file.modifiedAt))) {
+    if (!file.deleted && Number.isNaN(Date.parse(file.modifiedAt))) {
       throw new StorageValidationError("manifest file modifiedAt must be a valid timestamp");
     }
     if (typeof file.deleted !== "boolean") {
       throw new StorageValidationError("manifest file deleted must be a boolean");
+    }
+    if (file.deleted) {
+      if (file.size !== 0 || file.sha256 !== "") {
+        throw new StorageValidationError("deleted manifest files must use size 0 and empty sha256");
+      }
+    } else {
+      validateSha256(file.sha256);
+    }
+    if (file.class !== undefined && !fileClasses.has(file.class)) {
+      throw new StorageValidationError("manifest file class is not supported");
     }
     if (file.fileClass !== undefined && !fileClasses.has(file.fileClass)) {
       throw new StorageValidationError("manifest file fileClass is not supported");
