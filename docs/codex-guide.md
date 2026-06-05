@@ -39,6 +39,9 @@ Create a runnable repository skeleton:
 - Do not mix server-pack changes with world snapshots.
 - Do not auto-accept local Host changes to mods, plugins, config, or launch metadata.
 - Do not treat all server files as one snapshot.
+- Do not add a snapshot upload API while working on Agent-local manifest generation.
+- Do not include `ignored` or `unknown` files in generated manifests.
+- Do not mix artifact kinds in one manifest; scan `world-snapshot`, `server-pack`, and `admin-state` separately.
 
 ## Useful issues
 
