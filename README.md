@@ -1,4 +1,4 @@
-# ACBH — Anyone Can Be Host
+# ACBH 鈥?Anyone Can Be Host
 
 ACBH is a distributed Minecraft host handoff platform.
 
@@ -14,7 +14,7 @@ Host B starts the Minecraft server.
 Players reconnect.
 ```
 
-Target V1 recovery time: **10–30 seconds**.
+Target V1 recovery time: **10鈥?0 seconds**.
 
 ## Non-goals
 
@@ -28,12 +28,12 @@ Target V1 recovery time: **10–30 seconds**.
 
 ```text
 ACBH/
-├── apps/
-│   └── coordinator/      # TypeScript Coordinator service
-├── agent/                # Go cross-platform Agent CLI
-├── docs/                 # Architecture and protocol documents
-├── examples/             # Local demo and deployment examples
-└── .github/workflows/    # CI
+鈹溾攢鈹€ apps/
+鈹?  鈹斺攢鈹€ coordinator/      # TypeScript Coordinator service
+鈹溾攢鈹€ agent/                # Go cross-platform Agent CLI
+鈹溾攢鈹€ docs/                 # Architecture and protocol documents
+鈹溾攢鈹€ examples/             # Local demo and deployment examples
+鈹斺攢鈹€ .github/workflows/    # CI
 ```
 
 ## Main components
@@ -191,6 +191,35 @@ go run . manifest diff --old ./snap_000001.manifest.json --new ./snap_000002.man
 ```
 
 If the Agent config already exists, `scan` can read the group ID and creator host ID from local config. Explicit flags override config values. Unknown and ignored files are counted in the scan report but are never included in manifests.
+
+Push a scanned manifest and its file objects to the Coordinator local storage backend:
+
+```bash
+go run . push \
+  --manifest ./snap_000001.manifest.json \
+  --server-dir C:/minecraft/server
+```
+
+Pull the latest world snapshot and restore files into a separate directory:
+
+```bash
+go run . pull \
+  --artifact-kind world-snapshot \
+  --artifact-id latest \
+  --output-dir ./restore
+```
+
+Deleted manifest entries are reported but not applied by default. To remove files listed as deleted entries:
+
+```bash
+go run . pull \
+  --artifact-kind world-snapshot \
+  --artifact-id latest \
+  --output-dir ./restore \
+  --apply-deletes
+```
+
+The current push path uploads objects as JSON/base64 and is intended for small V1 test artifacts. Large streaming or multipart upload is future work.
 
 ## Documentation
 
