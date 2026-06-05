@@ -19,6 +19,7 @@ jobs:
           node-version: 20
       - run: pnpm install --frozen-lockfile=false
       - run: pnpm build:coordinator
+      - run: pnpm --filter @acbh/coordinator test
 
   agent:
     runs-on: ubuntu-latest

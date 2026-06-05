@@ -61,6 +61,54 @@ go run . --help
 go run . doctor
 ```
 
+## In-memory Coordinator API example
+
+The first Coordinator API keeps all state in memory. Restarting the Coordinator clears groups, members, hosts, access-key hashes, and host-token hashes.
+
+Start the Coordinator:
+
+```bash
+pnpm dev:coordinator
+```
+
+Create a group. Save the returned `groupId`, `ownerMemberId`, and one-time `accessKey`:
+
+```bash
+curl -s http://localhost:6121/v1/groups \
+  -H "content-type: application/json" \
+  -d '{"name":"Survival Server","ownerName":"Owner"}'
+```
+
+Join the group with the one-time access key value:
+
+```bash
+curl -s http://localhost:6121/v1/groups/<groupId>/join \
+  -H "content-type: application/json" \
+  -d '{"accessKey":"<accessKey>","displayName":"PlayerA"}'
+```
+
+Register a host candidate device. Save the returned one-time `hostToken`:
+
+```bash
+curl -s http://localhost:6121/v1/hosts/register \
+  -H "content-type: application/json" \
+  -d '{"groupId":"<groupId>","memberId":"<memberId>","deviceName":"PlayerA-PC","platform":"windows","agentVersion":"0.1.0"}'
+```
+
+Send a heartbeat:
+
+```bash
+curl -s http://localhost:6121/v1/hosts/heartbeat \
+  -H "content-type: application/json" \
+  -d '{"groupId":"<groupId>","hostId":"<hostId>","hostToken":"<hostToken>","status":"standby","latestLocalSnapshotId":null}'
+```
+
+Inspect debug state. This does not return access keys or host tokens:
+
+```bash
+curl -s http://localhost:6121/v1/groups/<groupId>/state
+```
+
 ## Documentation
 
 - `docs/architecture.md`
