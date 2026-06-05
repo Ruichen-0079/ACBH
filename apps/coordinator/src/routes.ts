@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import type { CoordinatorStorage } from "./storage/index.js";
 import type { InMemoryCoordinatorStore } from "./store.js";
 import { StoreError } from "./store.js";
 
@@ -40,6 +41,7 @@ const groupStateParamsSchema = z.object({
 export async function registerRoutes(
   app: FastifyInstance,
   store: InMemoryCoordinatorStore,
+  storage: CoordinatorStorage,
 ): Promise<void> {
   app.get("/health", async () => {
     return {
@@ -56,6 +58,10 @@ export async function registerRoutes(
       v1NonGoal: "hot-migration",
       persistence: "none",
     };
+  });
+
+  app.get("/v1/storage/info", async () => {
+    return storage.info();
   });
 
   app.post("/v1/groups", async (request, reply) => {
