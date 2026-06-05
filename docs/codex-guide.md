@@ -36,6 +36,9 @@ Create a runnable repository skeleton:
 - Do not upload files directly from fsnotify events.
 - Do not store secrets in plaintext.
 - Do not let stale hosts overwrite the latest snapshot.
+- Do not mix server-pack changes with world snapshots.
+- Do not auto-accept local Host changes to mods, plugins, config, or launch metadata.
+- Do not treat all server files as one snapshot.
 
 ## Useful issues
 
