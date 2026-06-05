@@ -28,7 +28,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-          cache-dependency-path: agent/go.sum
       - working-directory: agent
         run: go mod tidy
       - working-directory: agent
