@@ -42,6 +42,9 @@ Create a runnable repository skeleton:
 - Do not add a snapshot upload API while working on Agent-local manifest generation.
 - Do not include `ignored` or `unknown` files in generated manifests.
 - Do not mix artifact kinds in one manifest; scan `world-snapshot`, `server-pack`, and `admin-state` separately.
+- Do not implement RCON while working on manifest/object push-pull.
+- Do not start or stop Minecraft while working on manifest/object push-pull.
+- Do not add host election while working on manifest/object push-pull.
 
 ## Useful issues
 
