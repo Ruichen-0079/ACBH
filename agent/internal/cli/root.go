@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,23 +15,35 @@ import (
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
+	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
+	"github.com/Ruichen-0079/ACBH/agent/internal/scanner"
 	"github.com/spf13/cobra"
 )
 
 const defaultHeartbeatInterval = 10 * time.Second
 
-var rootCmd = &cobra.Command{
-	Use:   "acbh-agent",
-	Short: "ACBH Agent controls Minecraft host handoff on candidate devices",
-	Long:  "ACBH Agent joins ACBH groups, registers host candidates, and reports heartbeat state to the Coordinator.",
-}
-
 func Execute() {
-	rootCmd.AddCommand(newDoctorCmd(), newLoginCmd(), newHeartbeatCmd(), newDaemonCmd())
-	if err := rootCmd.Execute(); err != nil {
+	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func newRootCmd() *cobra.Command {
+	rootCmd := &cobra.Command{
+		Use:   "acbh-agent",
+		Short: "ACBH Agent controls Minecraft host handoff on candidate devices",
+		Long:  "ACBH Agent joins ACBH groups, registers host candidates, reports heartbeat state, and generates local manifests.",
+	}
+	rootCmd.AddCommand(
+		newDoctorCmd(),
+		newLoginCmd(),
+		newHeartbeatCmd(),
+		newDaemonCmd(),
+		newScanCmd(),
+		newManifestCmd(),
+	)
+	return rootCmd
 }
 
 func newDoctorCmd() *cobra.Command {
@@ -121,6 +134,149 @@ func newDaemonCmd() *cobra.Command {
 	return cmd
 }
 
+func newScanCmd() *cobra.Command {
+	var opts scanOptions
+	cmd := &cobra.Command{
+		Use:   "scan",
+		Short: "Scan a local server directory and generate an ACBH manifest",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runScan(cmd, opts)
+		},
+	}
+
+	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Minecraft server directory to scan")
+	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, or admin-state")
+	cmd.Flags().StringVar(&opts.artifactID, "artifact-id", "", "Artifact ID for the generated manifest")
+	cmd.Flags().StringVar(&opts.serverPackVersion, "server-pack-version", "", "Server pack version for world snapshots")
+	cmd.Flags().StringVar(&opts.parentArtifactID, "parent-artifact-id", "", "Parent artifact ID")
+	cmd.Flags().StringVar(&opts.groupID, "group-id", "", "Coordinator group ID")
+	cmd.Flags().StringVar(&opts.creatorHostID, "creator-host-id", "", "Creator host ID")
+	cmd.Flags().StringVar(&opts.previousManifest, "previous-manifest", "", "Previous manifest used to emit deleted entries")
+	cmd.Flags().StringVar(&opts.output, "output", "", "Path to write manifest JSON")
+	cmd.Flags().BoolVar(&opts.jsonOutput, "json", false, "Print JSON output")
+	_ = cmd.MarkFlagRequired("server-dir")
+	_ = cmd.MarkFlagRequired("artifact-kind")
+	_ = cmd.MarkFlagRequired("artifact-id")
+	return cmd
+}
+
+func newManifestCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "manifest",
+		Short: "Validate, diff, and inspect local ACBH manifests",
+	}
+	cmd.AddCommand(newManifestValidateCmd(), newManifestDiffCmd(), newManifestInspectCmd())
+	return cmd
+}
+
+func newManifestValidateCmd() *cobra.Command {
+	var file string
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Validate a manifest JSON file",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := manifest.LoadFile(file)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(cmd, map[string]any{"ok": true, "file": file})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Manifest is valid: %s\n", file)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&file, "file", "", "Manifest file to validate")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON output")
+	_ = cmd.MarkFlagRequired("file")
+	return cmd
+}
+
+func newManifestDiffCmd() *cobra.Command {
+	var oldPath string
+	var newPath string
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "diff",
+		Short: "Compare two validated manifests",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			oldManifest, err := manifest.LoadFile(oldPath)
+			if err != nil {
+				return fmt.Errorf("load old manifest: %w", err)
+			}
+			newManifest, err := manifest.LoadFile(newPath)
+			if err != nil {
+				return fmt.Errorf("load new manifest: %w", err)
+			}
+			diff, err := manifest.Diff(oldManifest, newManifest)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(cmd, diff)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Manifest diff: %s -> %s\n", diff.OldArtifactID, diff.NewArtifactID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind: %s\n", diff.ArtifactKind)
+			fmt.Fprintf(cmd.OutOrStdout(), "Added: %d\n", diff.Added)
+			fmt.Fprintf(cmd.OutOrStdout(), "Modified: %d\n", diff.Modified)
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleted: %d\n", diff.Deleted)
+			fmt.Fprintf(cmd.OutOrStdout(), "Unchanged: %d\n", diff.Unchanged)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&oldPath, "old", "", "Old manifest file")
+	cmd.Flags().StringVar(&newPath, "new", "", "New manifest file")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON output")
+	_ = cmd.MarkFlagRequired("old")
+	_ = cmd.MarkFlagRequired("new")
+	return cmd
+}
+
+func newManifestInspectCmd() *cobra.Command {
+	var file string
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "inspect",
+		Short: "Print a manifest summary",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			loaded, err := manifest.LoadFile(file)
+			if err != nil {
+				return err
+			}
+			inspection, err := manifest.Inspect(loaded)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(cmd, inspection)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Manifest: %s\n", file)
+			fmt.Fprintf(cmd.OutOrStdout(), "Version: %d\n", inspection.ManifestVersion)
+			fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind: %s\n", inspection.ArtifactKind)
+			fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID: %s\n", inspection.ArtifactID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Group ID: %s\n", inspection.GroupID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Creator host ID: %s\n", inspection.CreatorHostID)
+			if inspection.ServerPackVersion != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Server pack version: %s\n", *inspection.ServerPackVersion)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Created at: %s\n", inspection.CreatedAt)
+			fmt.Fprintf(cmd.OutOrStdout(), "Files: %d\n", inspection.FileCount)
+			fmt.Fprintf(cmd.OutOrStdout(), "Deleted files: %d\n", inspection.DeletedCount)
+			fmt.Fprintf(cmd.OutOrStdout(), "Total bytes: %d\n", inspection.TotalBytes)
+			fmt.Fprintln(cmd.OutOrStdout(), "File classes:")
+			for class, count := range inspection.ClassCounts {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s: %d\n", class, count)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&file, "file", "", "Manifest file to inspect")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print JSON output")
+	_ = cmd.MarkFlagRequired("file")
+	return cmd
+}
+
 type loginOptions struct {
 	coordinatorURL string
 	groupID        string
@@ -128,6 +284,97 @@ type loginOptions struct {
 	displayName    string
 	deviceName     string
 	platform       string
+}
+
+type scanOptions struct {
+	serverDir         string
+	artifactKind      string
+	artifactID        string
+	serverPackVersion string
+	parentArtifactID  string
+	groupID           string
+	creatorHostID     string
+	previousManifest  string
+	output            string
+	jsonOutput        bool
+}
+
+func runScan(cmd *cobra.Command, opts scanOptions) error {
+	groupID, creatorHostID, err := resolveScanIdentity(opts.groupID, opts.creatorHostID)
+	if err != nil {
+		return err
+	}
+
+	artifactKind := manifest.ArtifactKind(opts.artifactKind)
+	manifestData, report, err := scanner.Scan(scanner.Options{
+		ServerDir:            opts.serverDir,
+		ArtifactKind:         artifactKind,
+		ArtifactID:           opts.artifactID,
+		GroupID:              groupID,
+		CreatorHostID:        creatorHostID,
+		ServerPackVersion:    opts.serverPackVersion,
+		ParentArtifactID:     opts.parentArtifactID,
+		PreviousManifestPath: opts.previousManifest,
+		OutputPath:           opts.output,
+	})
+	if err != nil {
+		return err
+	}
+
+	if opts.output != "" {
+		if err := manifest.SaveFile(opts.output, manifestData); err != nil {
+			return err
+		}
+	}
+
+	if opts.jsonOutput {
+		if opts.output == "" {
+			return printJSON(cmd, manifestData)
+		}
+		return printJSON(cmd, report)
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), "Scan complete.")
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind: %s\n", report.ArtifactKind)
+	fmt.Fprintf(cmd.OutOrStdout(), "Server dir: %s\n", report.ServerDir)
+	if opts.output != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Manifest written: %s\n", opts.output)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Included files: %d\n", report.IncludedFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Ignored files: %d\n", report.IgnoredFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Unknown files: %d\n", report.UnknownFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Deleted files: %d\n", report.DeletedFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes: %d\n", report.TotalBytes)
+	printSamples(cmd, "Ignored sample", report.IgnoredSample)
+	printSamples(cmd, "Unknown sample", report.UnknownSample)
+	return nil
+}
+
+func resolveScanIdentity(groupID string, creatorHostID string) (string, string, error) {
+	if groupID != "" && creatorHostID != "" {
+		return groupID, creatorHostID, nil
+	}
+
+	cfg, _, err := loadConfig()
+	if err != nil {
+		missing := make([]string, 0, 2)
+		if groupID == "" {
+			missing = append(missing, "--group-id")
+		}
+		if creatorHostID == "" {
+			missing = append(missing, "--creator-host-id")
+		}
+		return "", "", fmt.Errorf("local config unavailable; pass %s explicitly: %w", strings.Join(missing, " and "), err)
+	}
+
+	if groupID == "" {
+		groupID = cfg.GroupID
+	}
+	if creatorHostID == "" {
+		creatorHostID = cfg.HostID
+	}
+
+	return groupID, creatorHostID, nil
 }
 
 func runLogin(ctx context.Context, cmd *cobra.Command, opts loginOptions) error {
@@ -296,4 +543,24 @@ func sendHeartbeat(ctx context.Context, cfg agentconfig.Config, status string) (
 	}
 
 	return client.SendHeartbeat(ctx, req)
+}
+
+func printJSON(cmd *cobra.Command, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode JSON output: %w", err)
+	}
+	data = append(data, '\n')
+	_, err = cmd.OutOrStdout().Write(data)
+	return err
+}
+
+func printSamples(cmd *cobra.Command, label string, samples []string) {
+	if len(samples) == 0 {
+		return
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "%s:\n", label)
+	for _, sample := range samples {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", sample)
+	}
 }
