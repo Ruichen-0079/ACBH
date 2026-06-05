@@ -6,10 +6,20 @@ export type SnapshotManifestFile = {
   sha256: string;
   modifiedAt: string;
   deleted: boolean;
+  class?: FileClass;
   fileClass?: FileClass;
 };
 
+export type ArtifactManifestSummary = {
+  includedFiles: number;
+  ignoredFiles: number;
+  unknownFiles: number;
+  deletedFiles: number;
+  totalBytes: number;
+};
+
 export type ArtifactManifest = {
+  manifestVersion?: number;
   artifactKind: ArtifactKind;
   artifactId: string;
   groupId: string;
@@ -18,6 +28,7 @@ export type ArtifactManifest = {
   parentArtifactId: string | null;
   serverPackVersion: string | null;
   files: SnapshotManifestFile[];
+  summary?: ArtifactManifestSummary;
 };
 
 export type SaveObjectParams = {
