@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { ArtifactKind } from "../domain/artifacts.js";
 import {
+  type ArtifactManifest,
   StorageNotFoundError,
   StorageValidationError,
   type CoordinatorStorage,
@@ -10,11 +12,12 @@ import {
   type ReadObjectParams,
   type SaveManifestParams,
   type SaveObjectParams,
-  type SnapshotManifest,
   type StorageInfo,
 } from "./types.js";
 import {
+  artifactKindDirectory,
   resolveUnderRoot,
+  validateArtifactKind,
   validateManifest,
   validateSha256,
   validateStorageId,
@@ -82,22 +85,28 @@ export class LocalFilesystemStorage implements CoordinatorStorage {
 
   async saveManifest(params: SaveManifestParams): Promise<void> {
     const groupId = validateStorageId("groupId", params.groupId);
-    const snapshotId = validateStorageId("snapshotId", params.snapshotId);
+    const artifactKind = validateArtifactKind(params.artifactKind);
+    const artifactId = validateStorageId("artifactId", params.artifactId);
     const manifest = validateManifest(params.manifest);
 
-    if (manifest.groupId !== groupId || manifest.snapshotId !== snapshotId) {
+    if (
+      manifest.groupId !== groupId ||
+      manifest.artifactKind !== artifactKind ||
+      manifest.artifactId !== artifactId
+    ) {
       throw new StorageValidationError("manifest IDs must match storage path IDs");
     }
 
-    const manifestPath = this.manifestPath(groupId, snapshotId);
+    const manifestPath = this.manifestPath(groupId, artifactKind, artifactId);
     await mkdir(path.dirname(manifestPath), { recursive: true });
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   }
 
-  async readManifest(params: ReadManifestParams): Promise<SnapshotManifest> {
+  async readManifest(params: ReadManifestParams): Promise<ArtifactManifest> {
     const groupId = validateStorageId("groupId", params.groupId);
-    const snapshotId = validateStorageId("snapshotId", params.snapshotId);
-    const manifestPath = this.manifestPath(groupId, snapshotId);
+    const artifactKind = validateArtifactKind(params.artifactKind);
+    const artifactId = validateStorageId("artifactId", params.artifactId);
+    const manifestPath = this.manifestPath(groupId, artifactKind, artifactId);
 
     let raw: string;
     try {
@@ -109,7 +118,7 @@ export class LocalFilesystemStorage implements CoordinatorStorage {
       throw error;
     }
 
-    const parsed = JSON.parse(raw) as SnapshotManifest;
+    const parsed = JSON.parse(raw) as ArtifactManifest;
     return validateManifest(parsed);
   }
 
@@ -133,8 +142,15 @@ export class LocalFilesystemStorage implements CoordinatorStorage {
     );
   }
 
-  private manifestPath(groupId: string, snapshotId: string): string {
-    return resolveUnderRoot(this.root, "groups", groupId, "snapshots", snapshotId, "manifest.json");
+  private manifestPath(groupId: string, artifactKind: ArtifactKind, artifactId: string): string {
+    return resolveUnderRoot(
+      this.root,
+      "groups",
+      groupId,
+      artifactKindDirectory(artifactKind),
+      artifactId,
+      "manifest.json",
+    );
   }
 }
 
