@@ -109,6 +109,49 @@ Inspect debug state. This does not return access keys or host tokens:
 curl -s http://localhost:6121/v1/groups/<groupId>/state
 ```
 
+## Agent CLI example
+
+The Agent can join the in-memory Coordinator, register the local device, store its local config, and send heartbeats.
+
+Check local diagnostics:
+
+```bash
+cd agent
+go run . doctor
+```
+
+After creating a group with the Coordinator API, log in with the returned one-time access key:
+
+```bash
+go run . login \
+  --coordinator http://localhost:6121 \
+  --group-id <groupId> \
+  --access-key <accessKey> \
+  --name PlayerA \
+  --device-name PlayerA-PC \
+  --platform windows
+```
+
+The Agent stores config at `<user config dir>/acbh/config.yaml`. It does not print the host token after storing it.
+
+Send one heartbeat:
+
+```bash
+go run . heartbeat --status standby
+```
+
+Run the heartbeat loop:
+
+```bash
+go run . daemon --interval 10s --status standby
+```
+
+Then inspect Coordinator state:
+
+```bash
+curl -s http://localhost:6121/v1/groups/<groupId>/state
+```
+
 ## Documentation
 
 - `docs/architecture.md`
