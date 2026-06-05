@@ -1,8 +1,18 @@
 import path from "node:path";
-import { StorageValidationError, type SnapshotManifest } from "./types.js";
+import type { ArtifactKind, FileClass } from "../domain/artifacts.js";
+import { StorageValidationError, type ArtifactManifest } from "./types.js";
 
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
+const artifactKinds = new Set<ArtifactKind>(["server-pack", "world-snapshot", "admin-state"]);
+const fileClasses = new Set<FileClass>([
+  "world-runtime",
+  "server-pack",
+  "admin-state",
+  "plugin-runtime-data",
+  "ignored",
+  "unknown",
+]);
 
 export function validateStorageId(label: string, value: string): string {
   if (!idPattern.test(value) || value === "." || value === "..") {
@@ -21,13 +31,35 @@ export function validateSha256(value: string): string {
   return normalized;
 }
 
-export function validateManifest(manifest: SnapshotManifest): SnapshotManifest {
-  validateStorageId("manifest snapshotId", manifest.snapshotId);
+export function validateArtifactKind(value: string): ArtifactKind {
+  if (!artifactKinds.has(value as ArtifactKind)) {
+    throw new StorageValidationError("artifactKind is not supported");
+  }
+
+  return value as ArtifactKind;
+}
+
+export function artifactKindDirectory(kind: ArtifactKind): string {
+  switch (kind) {
+    case "server-pack":
+      return "server-packs";
+    case "world-snapshot":
+      return "world-snapshots";
+    case "admin-state":
+      return "admin-states";
+  }
+}
+
+export function validateManifest(manifest: ArtifactManifest): ArtifactManifest {
+  validateArtifactKind(manifest.artifactKind);
+  validateStorageId("manifest artifactId", manifest.artifactId);
   validateStorageId("manifest groupId", manifest.groupId);
-  validateStorageId("manifest serverPackVersion", manifest.serverPackVersion);
   validateStorageId("manifest creatorHostId", manifest.creatorHostId);
-  if (manifest.parentSnapshotId !== null) {
-    validateStorageId("manifest parentSnapshotId", manifest.parentSnapshotId);
+  if (manifest.parentArtifactId !== null) {
+    validateStorageId("manifest parentArtifactId", manifest.parentArtifactId);
+  }
+  if (manifest.serverPackVersion !== null) {
+    validateStorageId("manifest serverPackVersion", manifest.serverPackVersion);
   }
   if (Number.isNaN(Date.parse(manifest.createdAt))) {
     throw new StorageValidationError("manifest createdAt must be a valid timestamp");
@@ -47,6 +79,9 @@ export function validateManifest(manifest: SnapshotManifest): SnapshotManifest {
     }
     if (typeof file.deleted !== "boolean") {
       throw new StorageValidationError("manifest file deleted must be a boolean");
+    }
+    if (file.fileClass !== undefined && !fileClasses.has(file.fileClass)) {
+      throw new StorageValidationError("manifest file fileClass is not supported");
     }
   }
 
