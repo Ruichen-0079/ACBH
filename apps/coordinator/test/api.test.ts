@@ -99,3 +99,22 @@ test("in-memory group join, host registration, heartbeat, and debug state", asyn
     await app.close();
   }
 });
+
+test("storage info endpoint reports local backend", async () => {
+  const app = await buildApp({ logger: false });
+
+  try {
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/storage/info",
+    });
+
+    assert.equal(response.statusCode, 200);
+    const info = response.json<{ backend: string; root: string; ready: boolean }>();
+    assert.equal(info.backend, "local");
+    assert.equal(typeof info.root, "string");
+    assert.equal(info.ready, true);
+  } finally {
+    await app.close();
+  }
+});
