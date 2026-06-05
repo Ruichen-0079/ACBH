@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
+	"github.com/Ruichen-0079/ACBH/agent/internal/artifactsync"
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
 	"github.com/Ruichen-0079/ACBH/agent/internal/scanner"
@@ -41,6 +42,8 @@ func newRootCmd() *cobra.Command {
 		newHeartbeatCmd(),
 		newDaemonCmd(),
 		newScanCmd(),
+		newPushCmd(),
+		newPullCmd(),
 		newManifestCmd(),
 	)
 	return rootCmd
@@ -166,6 +169,40 @@ func newManifestCmd() *cobra.Command {
 		Short: "Validate, diff, and inspect local ACBH manifests",
 	}
 	cmd.AddCommand(newManifestValidateCmd(), newManifestDiffCmd(), newManifestInspectCmd())
+	return cmd
+}
+
+func newPushCmd() *cobra.Command {
+	var opts pushOptions
+	cmd := &cobra.Command{
+		Use:   "push",
+		Short: "Upload manifest file objects and manifest metadata to the Coordinator",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPush(cmd.Context(), cmd, opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.manifestPath, "manifest", "", "Manifest JSON to push")
+	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Server directory containing manifest files")
+	_ = cmd.MarkFlagRequired("manifest")
+	_ = cmd.MarkFlagRequired("server-dir")
+	return cmd
+}
+
+func newPullCmd() *cobra.Command {
+	var opts pullOptions
+	cmd := &cobra.Command{
+		Use:   "pull",
+		Short: "Download an artifact manifest and restore its file objects",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPull(cmd.Context(), cmd, opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, or admin-state")
+	cmd.Flags().StringVar(&opts.artifactID, "artifact-id", "latest", "Artifact ID to pull, or latest")
+	cmd.Flags().StringVar(&opts.outputDir, "output-dir", "", "Directory to restore files into")
+	cmd.Flags().BoolVar(&opts.applyDeletes, "apply-deletes", false, "Apply deleted manifest entries to local files")
+	_ = cmd.MarkFlagRequired("artifact-kind")
+	_ = cmd.MarkFlagRequired("output-dir")
 	return cmd
 }
 
@@ -297,6 +334,82 @@ type scanOptions struct {
 	previousManifest  string
 	output            string
 	jsonOutput        bool
+}
+
+type pushOptions struct {
+	manifestPath string
+	serverDir    string
+}
+
+type pullOptions struct {
+	artifactKind string
+	artifactID   string
+	outputDir    string
+	applyDeletes bool
+}
+
+func runPush(ctx context.Context, cmd *cobra.Command, opts pushOptions) error {
+	cfg, _, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return err
+	}
+
+	summary, err := artifactsync.Push(ctx, artifactsync.PushOptions{
+		ManifestPath: opts.manifestPath,
+		ServerDir:    opts.serverDir,
+		Config:       cfg,
+		Client:       client,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), "Push complete.")
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind: %s\n", summary.ArtifactKind)
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID: %s\n", summary.ArtifactID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Uploaded objects: %d\n", summary.UploadedObjects)
+	fmt.Fprintf(cmd.OutOrStdout(), "Skipped existing objects: %d\n", summary.SkippedObjects)
+	fmt.Fprintf(cmd.OutOrStdout(), "Deleted entries: %d\n", summary.DeletedEntries)
+	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes uploaded: %d\n", summary.TotalBytesUploaded)
+	fmt.Fprintf(cmd.OutOrStdout(), "Coordinator status: %s\n", summary.CoordinatorStatus)
+	return nil
+}
+
+func runPull(ctx context.Context, cmd *cobra.Command, opts pullOptions) error {
+	cfg, _, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return err
+	}
+
+	summary, err := artifactsync.Pull(ctx, artifactsync.PullOptions{
+		ArtifactKind: manifest.ArtifactKind(opts.artifactKind),
+		ArtifactID:   opts.artifactID,
+		OutputDir:    opts.outputDir,
+		ApplyDeletes: opts.applyDeletes,
+		Config:       cfg,
+		Client:       client,
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), "Pull complete.")
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind: %s\n", summary.ArtifactKind)
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID: %s\n", summary.ArtifactID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Written files: %d\n", summary.WrittenFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Skipped files: %d\n", summary.SkippedFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Pending deletes: %d\n", summary.PendingDeletes)
+	fmt.Fprintf(cmd.OutOrStdout(), "Applied deletes: %d\n", summary.AppliedDeletes)
+	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes restored: %d\n", summary.TotalBytes)
+	return nil
 }
 
 func runScan(cmd *cobra.Command, opts scanOptions) error {
