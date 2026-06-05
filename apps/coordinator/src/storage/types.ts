@@ -1,18 +1,22 @@
+import type { ArtifactKind, FileClass } from "../domain/artifacts.js";
+
 export type SnapshotManifestFile = {
   path: string;
   size: number;
   sha256: string;
   modifiedAt: string;
   deleted: boolean;
+  fileClass?: FileClass;
 };
 
-export type SnapshotManifest = {
-  snapshotId: string;
+export type ArtifactManifest = {
+  artifactKind: ArtifactKind;
+  artifactId: string;
   groupId: string;
-  serverPackVersion: string;
-  parentSnapshotId: string | null;
   createdAt: string;
   creatorHostId: string;
+  parentArtifactId: string | null;
+  serverPackVersion: string | null;
   files: SnapshotManifestFile[];
 };
 
@@ -34,13 +38,15 @@ export type ObjectExistsParams = {
 
 export type SaveManifestParams = {
   groupId: string;
-  snapshotId: string;
-  manifest: SnapshotManifest;
+  artifactKind: ArtifactKind;
+  artifactId: string;
+  manifest: ArtifactManifest;
 };
 
 export type ReadManifestParams = {
   groupId: string;
-  snapshotId: string;
+  artifactKind: ArtifactKind;
+  artifactId: string;
 };
 
 export type StorageInfo = {
@@ -54,7 +60,7 @@ export interface CoordinatorStorage {
   readObject(params: ReadObjectParams): Promise<Buffer>;
   objectExists(params: ObjectExistsParams): Promise<boolean>;
   saveManifest(params: SaveManifestParams): Promise<void>;
-  readManifest(params: ReadManifestParams): Promise<SnapshotManifest>;
+  readManifest(params: ReadManifestParams): Promise<ArtifactManifest>;
   info(): StorageInfo;
 }
 
