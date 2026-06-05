@@ -83,3 +83,16 @@ A snapshot is valid only when:
 - Coordinator marks the snapshot `available`.
 
 Rejected or partial snapshots must never become the latest snapshot.
+
+## Future file classes
+
+Future scanners should classify files before deciding which artifact namespace they belong to:
+
+- `world-runtime`
+- `server-pack`
+- `admin-state`
+- `plugin-runtime-data`
+- `ignored`
+- `unknown`
+
+The classifier is not implemented yet. Future work must avoid mixing server-pack changes with world snapshots, and unknown files should not be silently promoted into an approved artifact.
