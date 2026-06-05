@@ -86,7 +86,7 @@ Rejected or partial snapshots must never become the latest snapshot.
 
 ## Local manifest scanner
 
-The first Agent manifest scanner is local only. It classifies files, hashes included files, validates manifest shape, compares manifests, and records deleted files when a previous manifest is provided. It does not upload objects, does not create Coordinator snapshot metadata, and does not make a running Minecraft server safe to copy.
+The first Agent manifest scanner is local only. It classifies files, hashes included files, validates manifest shape, compares manifests, and records deleted files when a previous manifest is provided. It does not make a running Minecraft server safe to copy.
 
 Deleted manifest entries use:
 
@@ -95,6 +95,20 @@ Deleted manifest entries use:
 - `sha256: ""`
 
 Future safe sync must still run `save-all flush` through RCON before producing a world snapshot from a live server.
+
+## Push and pull
+
+The first networked artifact sync step separates scan, push, and pull:
+
+1. `acbh-agent scan` generates a local manifest.
+2. `acbh-agent push` uploads referenced file objects, then uploads the manifest.
+3. Coordinator verifies that every non-deleted file object exists before marking the artifact `available`.
+4. Coordinator updates the latest pointer only for available artifacts.
+5. `acbh-agent pull` downloads the manifest and file objects, verifies SHA256, and restores under the requested output directory.
+
+Pull does not apply deleted entries unless `--apply-deletes` is set.
+
+RCON safe sync is still future work. A future world-snapshot workflow must wrap `scan` with `save-all flush` before files are hashed and pushed.
 
 ## File classes
 
