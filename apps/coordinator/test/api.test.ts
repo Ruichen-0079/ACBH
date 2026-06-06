@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { test } from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { test, type TestContext } from "node:test";
 import { buildApp } from "../src/app.js";
 import { createInMemoryCoordinatorStore } from "../src/store.js";
-import type { ArtifactManifest } from "../src/storage/index.js";
+import { LocalFilesystemStorage, type ArtifactManifest } from "../src/storage/index.js";
 
-test("in-memory group join, host registration, heartbeat, and debug state", async () => {
-  const app = await buildApp({ logger: false });
+test("in-memory group join, host registration, heartbeat, and debug state", async (t) => {
+  const app = await buildTestApp(t);
 
   try {
     const createResponse = await app.inject({
@@ -103,8 +106,8 @@ test("in-memory group join, host registration, heartbeat, and debug state", asyn
   }
 });
 
-test("storage info endpoint reports local backend", async () => {
-  const app = await buildApp({ logger: false });
+test("storage info endpoint reports local backend", async (t) => {
+  const app = await buildTestApp(t);
 
   try {
     const response = await app.inject({
@@ -122,8 +125,8 @@ test("storage info endpoint reports local backend", async () => {
   }
 });
 
-test("artifact object and manifest push-pull flow", async () => {
-  const app = await buildApp({ logger: false });
+test("artifact object and manifest push-pull flow", async (t) => {
+  const app = await buildTestApp(t);
 
   try {
     const { groupId, hostId, hostToken } = await createJoinedHost(app);
@@ -284,14 +287,16 @@ test("artifact object and manifest push-pull flow", async () => {
       headers: hostHeaders(hostId, hostToken),
     });
     assert.equal(objectDownload.statusCode, 200);
-    assert.equal(Buffer.from(objectDownload.json<{ contentBase64: string }>().contentBase64, "base64").toString(), "region data");
+    assert.equal(objectDownload.headers["content-type"], "application/octet-stream");
+    assert.equal(objectDownload.headers["content-length"], String(content.byteLength));
+    assert.deepEqual(objectDownload.rawPayload, content);
   } finally {
     await app.close();
   }
 });
 
-test("artifact download endpoints require host auth", async () => {
-  const app = await buildApp({ logger: false });
+test("artifact download endpoints require host auth", async (t) => {
+  const app = await buildTestApp(t);
 
   try {
     const { groupId, hostId, hostToken } = await createJoinedHost(app);
@@ -397,8 +402,8 @@ test("only available newer artifacts become latest", async () => {
   assert.equal(store.getLatestArtifact(group.groupId, "world-snapshot").artifactId, "snap_available");
 });
 
-test("zero-byte non-deleted artifact can be uploaded and downloaded", async () => {
-  const app = await buildApp({ logger: false });
+test("zero-byte non-deleted artifact can be uploaded and downloaded", async (t) => {
+  const app = await buildTestApp(t);
 
   try {
     const { groupId, hostId, hostToken } = await createJoinedHost(app);
@@ -421,11 +426,124 @@ test("zero-byte non-deleted artifact can be uploaded and downloaded", async () =
       headers: hostHeaders(hostId, hostToken),
     });
     assert.equal(objectDownload.statusCode, 200);
-    assert.equal(objectDownload.json<{ contentBase64: string }>().contentBase64, "");
+    assert.equal(objectDownload.headers["content-length"], "0");
+    assert.equal(objectDownload.rawPayload.byteLength, 0);
   } finally {
     await app.close();
   }
 });
+
+test("streaming object upload validates auth, hashes, limits, duplicates, and binary download", async (t) => {
+  const app = await buildTestApp(t, { maxObjectBytes: 11 });
+
+  try {
+    const { groupId, hostId, hostToken } = await createJoinedHost(app);
+    const content = Buffer.from("region data");
+    const objectSha = sha256(content);
+    const uploadHeaders = {
+      "content-type": "application/octet-stream",
+      "x-acbh-group-id": groupId,
+      ...hostHeaders(hostId, hostToken),
+    };
+
+    const unauthorized = await app.inject({
+      method: "PUT",
+      url: `/v1/artifacts/objects/${objectSha}`,
+      headers: {
+        ...uploadHeaders,
+        "x-acbh-host-token": "wrong",
+      },
+      payload: content,
+    });
+    assert.equal(unauthorized.statusCode, 401);
+
+    const mismatch = await app.inject({
+      method: "PUT",
+      url: `/v1/artifacts/objects/${sha256(Buffer.from("other"))}`,
+      headers: uploadHeaders,
+      payload: content,
+    });
+    assert.equal(mismatch.statusCode, 400);
+    assert.match(mismatch.body, /does not match sha256/);
+
+    const tooLarge = await app.inject({
+      method: "PUT",
+      url: `/v1/artifacts/objects/${sha256(Buffer.alloc(12))}`,
+      headers: uploadHeaders,
+      payload: Buffer.alloc(12),
+    });
+    assert.equal(tooLarge.statusCode, 413);
+
+    const uploaded = await app.inject({
+      method: "PUT",
+      url: `/v1/artifacts/objects/${objectSha}`,
+      headers: uploadHeaders,
+      payload: content,
+    });
+    assert.equal(uploaded.statusCode, 200, uploaded.body);
+    assert.deepEqual(uploaded.json(), {
+      ok: true,
+      sha256: objectSha,
+      exists: false,
+      size: content.byteLength,
+    });
+
+    const duplicate = await app.inject({
+      method: "PUT",
+      url: `/v1/artifacts/objects/${objectSha}`,
+      headers: uploadHeaders,
+      payload: content,
+    });
+    assert.equal(duplicate.statusCode, 200, duplicate.body);
+    assert.deepEqual(duplicate.json(), {
+      ok: true,
+      sha256: objectSha,
+      exists: true,
+      size: content.byteLength,
+    });
+
+    const download = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${groupId}/artifacts/objects/${objectSha}`,
+      headers: hostHeaders(hostId, hostToken),
+    });
+    assert.equal(download.statusCode, 200);
+    assert.equal(download.headers["content-type"], "application/octet-stream");
+    assert.deepEqual(download.rawPayload, content);
+
+    const emptySha = sha256(Buffer.alloc(0));
+    const emptyUpload = await app.inject({
+      method: "PUT",
+      url: `/v1/artifacts/objects/${emptySha}`,
+      headers: uploadHeaders,
+      payload: Buffer.alloc(0),
+    });
+    assert.equal(emptyUpload.statusCode, 200, emptyUpload.body);
+    assert.deepEqual(emptyUpload.json(), {
+      ok: true,
+      sha256: emptySha,
+      exists: false,
+      size: 0,
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+async function buildTestApp(
+  t: TestContext,
+  options: { maxObjectBytes?: number } = {},
+): Promise<Awaited<ReturnType<typeof buildApp>>> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "acbh-api-storage-"));
+  t.after(async () => {
+    await rm(root, { force: true, recursive: true });
+  });
+  return buildApp({
+    logger: false,
+    storage: new LocalFilesystemStorage(root),
+    ...options,
+  });
+}
 
 async function createJoinedHost(app: Awaited<ReturnType<typeof buildApp>>): Promise<{
   groupId: string;

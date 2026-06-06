@@ -34,17 +34,22 @@ objects/sha256/<first-two>/<sha256>
 
 This avoids duplicate file storage and makes integrity verification explicit.
 
-## V1 upload path
+## V1 transfer path
 
-The first networked upload path is JSON/base64:
+The default object transfer path is binary streaming:
 
-- `POST /v1/artifacts/objects` uploads one content-addressed object.
+- `PUT /v1/artifacts/objects/:sha256` streams one content-addressed object to the Coordinator.
+- `GET /v1/groups/:groupId/artifacts/objects/:sha256` streams one object to an authenticated Agent.
 - `POST /v1/artifacts/manifests` uploads a manifest after objects exist.
 - Coordinator stores objects and manifests in local filesystem storage.
 
-The JSON/base64 object endpoint has a 16 MiB decoded object limit. Manifest upload has a 1 MiB request body limit. Multipart or streaming uploads are future work for larger artifacts.
+`ACBH_MAX_OBJECT_BYTES` controls the streaming upload limit and defaults to `268435456` bytes (256 MiB). The Coordinator hashes uploads while writing a temporary file and only moves verified content into the object store.
+
+`POST /v1/artifacts/objects` remains available as a compatibility/testing-only JSON/base64 endpoint with a 16 MiB decoded object limit. It should not be used for real Minecraft region files. Manifest upload has a 1 MiB request body limit.
 
 Pull reads from Coordinator local storage through manifest and object download endpoints. Local storage remains Coordinator-side only; Agents do not write directly into `.acbh-storage`.
+
+Streaming transfers are not resumable. Interrupted objects must be uploaded or downloaded again. Resumable chunk upload and remote object storage are future work.
 
 ## Manifest metadata
 
@@ -109,4 +114,4 @@ Manifest fields reserve:
 
 For `world-snapshot`, `serverPackVersion` ties the world data to the server pack that produced it. For `server-pack`, `serverPackVersion` may equal `artifactId`. `admin-state` stays separate from world snapshots.
 
-This storage layer does not yet implement artifact approval workflow, RCON safe sync, Minecraft runtime control, host election, remote object storage, multipart upload, streaming upload, or garbage collection.
+This storage layer does not yet implement artifact approval workflow, RCON safe sync, Minecraft runtime control, host election, remote object storage, multipart upload, resumable upload, or garbage collection.

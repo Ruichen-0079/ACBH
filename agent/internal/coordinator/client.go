@@ -3,7 +3,6 @@ package coordinator
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,6 +71,7 @@ type UploadObjectResponse struct {
 	OK     bool   `json:"ok"`
 	SHA256 string `json:"sha256"`
 	Exists bool   `json:"exists"`
+	Size   int64  `json:"size"`
 }
 
 type UploadManifestRequest struct {
@@ -117,11 +117,6 @@ type DownloadManifestResponse struct {
 	Manifest manifest.Manifest `json:"manifest"`
 }
 
-type DownloadObjectResponse struct {
-	SHA256        string `json:"sha256"`
-	ContentBase64 string `json:"contentBase64"`
-}
-
 type apiError struct {
 	Message string `json:"message"`
 	Error   string `json:"error"`
@@ -137,7 +132,7 @@ func NewClient(baseURL string) (*Client, error) {
 	return &Client{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 5 * time.Minute,
 		},
 	}, nil
 }
@@ -166,6 +161,54 @@ func (c *Client) UploadObject(ctx context.Context, req UploadObjectRequest) (Upl
 	return out, err
 }
 
+func (c *Client) UploadObjectStream(
+	ctx context.Context,
+	auth ArtifactAuth,
+	sha256 string,
+	content io.Reader,
+	size int64,
+) (UploadObjectResponse, error) {
+	httpReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPut,
+		c.baseURL+"/v1/artifacts/objects/"+url.PathEscape(sha256),
+		content,
+	)
+	if err != nil {
+		return UploadObjectResponse{}, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/octet-stream")
+	httpReq.Header.Set("X-ACBH-Group-ID", auth.GroupID)
+	httpReq.Header.Set("X-ACBH-Host-ID", auth.HostID)
+	httpReq.Header.Set("X-ACBH-Host-Token", auth.HostToken)
+	if size >= 0 {
+		httpReq.ContentLength = size
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return UploadObjectResponse{}, fmt.Errorf("coordinator request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCoordinatorResponseBytes))
+	if err != nil {
+		return UploadObjectResponse{}, fmt.Errorf("read coordinator response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return UploadObjectResponse{}, responseError(resp.StatusCode, body)
+	}
+
+	var out UploadObjectResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return UploadObjectResponse{}, fmt.Errorf("decode coordinator response: %w", err)
+	}
+	if out.SHA256 != sha256 {
+		return UploadObjectResponse{}, fmt.Errorf("coordinator returned object sha256 %q, want %q", out.SHA256, sha256)
+	}
+	return out, nil
+}
+
 func (c *Client) UploadManifest(ctx context.Context, req UploadManifestRequest) (UploadManifestResponse, error) {
 	var out UploadManifestResponse
 	err := c.post(ctx, "/v1/artifacts/manifests", req, &out)
@@ -184,19 +227,37 @@ func (c *Client) DownloadManifest(ctx context.Context, auth ArtifactAuth, artifa
 	return out, err
 }
 
-func (c *Client) DownloadObject(ctx context.Context, auth ArtifactAuth, sha256 string) ([]byte, error) {
-	var out DownloadObjectResponse
-	if err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/artifacts/objects/"+url.PathEscape(sha256), auth, &out); err != nil {
-		return nil, err
-	}
-	if out.SHA256 != sha256 {
-		return nil, fmt.Errorf("coordinator returned object sha256 %q, want %q", out.SHA256, sha256)
-	}
-	content, err := base64.StdEncoding.DecodeString(out.ContentBase64)
+func (c *Client) DownloadObjectStream(
+	ctx context.Context,
+	auth ArtifactAuth,
+	sha256 string,
+) (io.ReadCloser, int64, error) {
+	httpReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		c.baseURL+"/v1/groups/"+url.PathEscape(auth.GroupID)+"/artifacts/objects/"+url.PathEscape(sha256),
+		nil,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("decode object content: %w", err)
+		return nil, 0, fmt.Errorf("create request: %w", err)
 	}
-	return content, nil
+	httpReq.Header.Set("X-ACBH-Host-ID", auth.HostID)
+	httpReq.Header.Set("X-ACBH-Host-Token", auth.HostToken)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, 0, fmt.Errorf("coordinator request failed: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCoordinatorResponseBytes))
+		if readErr != nil {
+			return nil, 0, fmt.Errorf("read coordinator response: %w", readErr)
+		}
+		return nil, 0, responseError(resp.StatusCode, body)
+	}
+
+	return resp.Body, resp.ContentLength, nil
 }
 
 func (c *Client) post(ctx context.Context, path string, in any, out any) error {
