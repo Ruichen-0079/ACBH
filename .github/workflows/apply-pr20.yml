@@ -21,7 +21,7 @@ jobs:
           base64 --decode .github/pr20-files.tar.gz.b64 > /tmp/pr20-files.tar.gz
           echo "4e08de5c2b92101334b30dcd2460bd8995d854e1059d6f36e21a9fbe2d5c41d3  /tmp/pr20-files.tar.gz" | sha256sum --check
           tar --extract --gzip --file /tmp/pr20-files.tar.gz
-          rm .github/pr20-files.tar.gz.b64 .github/workflows/apply-pr20.yml
+          rm .github/pr20-files.tar.gz.b64 .github/workflows/apply-pr20.yml .github/pr20-trigger
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
