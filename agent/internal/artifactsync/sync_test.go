@@ -67,6 +67,48 @@ func TestPushUploadsObjectsBeforeManifestAndHandlesDeletes(t *testing.T) {
 	}
 }
 
+func TestPushAndPullZeroByteNonDeletedFile(t *testing.T) {
+	serverDir := t.TempDir()
+	writeFile(t, serverDir, "world/data/empty.dat", "")
+	m := testManifest(sha256Hex(nil))
+	m.Files[0].Path = "world/data/empty.dat"
+	m.Files[0].Size = 0
+	m.Summary.TotalBytes = 0
+	manifestPath := writeManifest(t, t.TempDir(), m)
+
+	client := &fakeClient{}
+	pushed, err := Push(context.Background(), PushOptions{
+		ManifestPath: manifestPath,
+		ServerDir:    serverDir,
+		Config:       testConfig(),
+		Client:       client,
+	})
+	if err != nil {
+		t.Fatalf("Push() error = %v", err)
+	}
+	if pushed.UploadedObjects != 1 || pushed.TotalBytesUploaded != 0 {
+		t.Fatalf("push summary = %#v", pushed)
+	}
+
+	outputDir := t.TempDir()
+	pulled, err := Pull(context.Background(), PullOptions{
+		ArtifactKind: manifest.WorldSnapshot,
+		ArtifactID:   "snap_000001",
+		OutputDir:    outputDir,
+		Config:       testConfig(),
+		Client:       client,
+	})
+	if err != nil {
+		t.Fatalf("Pull() error = %v", err)
+	}
+	if pulled.WrittenFiles != 1 || pulled.TotalBytes != 0 {
+		t.Fatalf("pull summary = %#v", pulled)
+	}
+	if data := readFile(t, outputDir, "world/data/empty.dat"); len(data) != 0 {
+		t.Fatalf("restored file length = %d, want 0", len(data))
+	}
+}
+
 func TestPullWritesFilesUnderOutputDir(t *testing.T) {
 	outputDir := t.TempDir()
 	content := []byte("region data")
@@ -209,18 +251,18 @@ func (c *fakeClient) UploadManifest(ctx context.Context, req coordinator.UploadM
 	return coordinator.UploadManifestResponse{OK: true, ArtifactKind: req.ArtifactKind, ArtifactID: req.ArtifactID, Status: "available"}, nil
 }
 
-func (c *fakeClient) GetLatestArtifact(ctx context.Context, groupID string, artifactKind manifest.ArtifactKind) (coordinator.ArtifactMetadata, error) {
-	return coordinator.ArtifactMetadata{GroupID: groupID, ArtifactKind: artifactKind, ArtifactID: "snap_000001", Status: "available"}, nil
+func (c *fakeClient) GetLatestArtifact(ctx context.Context, auth coordinator.ArtifactAuth, artifactKind manifest.ArtifactKind) (coordinator.ArtifactMetadata, error) {
+	return coordinator.ArtifactMetadata{GroupID: auth.GroupID, ArtifactKind: artifactKind, ArtifactID: "snap_000001", Status: "available"}, nil
 }
 
-func (c *fakeClient) DownloadManifest(ctx context.Context, groupID string, artifactKind manifest.ArtifactKind, artifactID string) (coordinator.DownloadManifestResponse, error) {
+func (c *fakeClient) DownloadManifest(ctx context.Context, auth coordinator.ArtifactAuth, artifactKind manifest.ArtifactKind, artifactID string) (coordinator.DownloadManifestResponse, error) {
 	return coordinator.DownloadManifestResponse{
-		Metadata: coordinator.ArtifactMetadata{GroupID: groupID, ArtifactKind: artifactKind, ArtifactID: artifactID, Status: "available"},
+		Metadata: coordinator.ArtifactMetadata{GroupID: auth.GroupID, ArtifactKind: artifactKind, ArtifactID: artifactID, Status: "available"},
 		Manifest: c.manifest,
 	}, nil
 }
 
-func (c *fakeClient) DownloadObject(ctx context.Context, groupID string, sha256 string) ([]byte, error) {
+func (c *fakeClient) DownloadObject(ctx context.Context, auth coordinator.ArtifactAuth, sha256 string) ([]byte, error) {
 	return c.objects[sha256], nil
 }
 
