@@ -301,6 +301,62 @@ Object uploads and downloads use binary streaming by default. `ACBH_MAX_OBJECT_B
 
 Current transfers are not resumable. Interrupted objects must be transferred again; resumable chunks and remote object storage remain future work.
 
+## Election and takeover
+
+ACBH V1 takeover is file restore followed by a new server process start. It is not hot migration. JVM memory, live player sessions, ticks, entities, redstone state, and mod runtime objects are not transferred. Players must reconnect after takeover.
+
+Heartbeats may advertise the artifacts already available on a host, basic score hints, and connection metadata:
+
+```bash
+go run . heartbeat \
+  --status standby \
+  --latest-world-snapshot snap_000001 \
+  --latest-server-pack pack_000001 \
+  --latest-admin-state admin_000001 \
+  --java-available true \
+  --connection-host 100.64.0.10 \
+  --connection-port 25565 \
+  --connection-network tailscale
+```
+
+The Coordinator uses a deterministic score and only considers fresh `online` or `standby` hosts. `ACBH_HOST_HEARTBEAT_TIMEOUT_MS` controls freshness and defaults to `30000`. An available latest world snapshot must already be reported locally when one exists, and `javaAvailable: false` makes a host ineligible.
+
+Election and assignment commands:
+
+```bash
+go run . election status
+go run . election check-timeout
+
+go run . takeover poll
+go run . takeover accept
+go run . takeover complete
+go run . takeover fail --reason pull-failed
+```
+
+`takeover poll` stores the one-time takeover token at `<user config dir>/acbh/runtime/takeover-assignment.json` without printing it. The Coordinator stores only its SHA256 hash. Assignment completion, not election, finalizes `currentHostId` and increments `currentHostGeneration`.
+
+Execute an assigned takeover:
+
+```bash
+go run . takeover run \
+  --server-dir C:/minecraft/server \
+  --command "java -Xmx4G -jar server.jar nogui" \
+  --log-dir C:/minecraft/server/.acbh/logs \
+  --stop-timeout 30s
+```
+
+The Agent accepts the assignment, restores assigned artifacts in `server-pack`, `admin-state`, then `world-snapshot` order, applies deleted manifest entries by default, starts the configured local process, sends a `hosting` heartbeat, and completes the assignment. Use `--dry-run` to inspect the plan without accepting, restoring, starting, or completing. The Coordinator never runs Minecraft.
+
+## Local two-host demo
+
+The reproducible fake-server demo is under `examples/two-host-takeover-demo/`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File examples/two-host-takeover-demo/demo.ps1
+```
+
+It proves Host A timeout detection, Host B selection, one-time assignment acceptance, streaming artifact restore, fake server start, assignment completion, current-host change, and generation advancement without requiring Minecraft.
+
 ## Documentation
 
 - `docs/architecture.md`

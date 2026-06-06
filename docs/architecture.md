@@ -40,6 +40,12 @@ The Agent process manager starts and stops a user-provided command in a configur
 
 Process control remains entirely on the Agent device. The Coordinator does not launch, stop, or supervise Minecraft. The process manager does not select hosts or perform automatic takeover.
 
+### Takeover executor
+
+The Agent polls a Coordinator assignment, stores its one-time token in local runtime state, restores assigned artifacts, starts the local server process, reports `hosting`, and completes the assignment. Artifact restore order is server pack, admin state, then world snapshot.
+
+The Coordinator only manages control-plane records. It never runs Minecraft. Takeover transfers files and starts a new process; it does not transfer JVM memory or live player sessions, so players reconnect.
+
 ## Storage
 
 Storage contains server packs, snapshot manifests, and file blobs.
@@ -69,10 +75,13 @@ Standby hosts may keep synchronized local copies but must not run writable serve
 1. Coordinator detects missing heartbeat.
 2. Coordinator marks the current host unhealthy.
 3. Coordinator selects an eligible candidate.
-4. Candidate pulls the latest verified snapshot.
-5. Candidate starts Minecraft.
-6. Candidate reports `hosting`.
-7. Coordinator updates `current_host_id`.
+4. Coordinator offers a generation-scoped takeover assignment.
+5. Candidate accepts and pulls assigned artifacts.
+6. Candidate starts Minecraft.
+7. Candidate reports `hosting` and completes the assignment.
+8. Coordinator updates `currentHostId` and increments `currentHostGeneration`.
+
+Election does not change the current host. Only successful assignment completion does.
 
 ## V1 network model
 
