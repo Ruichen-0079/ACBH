@@ -162,6 +162,38 @@ test("artifact object and manifest push-pull flow", async () => {
     });
     assert.equal(badObject.statusCode, 400);
 
+    const malformedBase64 = await app.inject({
+      method: "POST",
+      url: "/v1/artifacts/objects",
+      payload: {
+        groupId,
+        hostId,
+        hostToken,
+        sha256: objectSha,
+        contentBase64: "not base64!?",
+      },
+    });
+    assert.equal(malformedBase64.statusCode, 400);
+
+    const emptyObjectSha = sha256(Buffer.alloc(0));
+    const emptyObject = await app.inject({
+      method: "POST",
+      url: "/v1/artifacts/objects",
+      payload: {
+        groupId,
+        hostId,
+        hostToken,
+        sha256: emptyObjectSha,
+        contentBase64: "",
+      },
+    });
+    assert.equal(emptyObject.statusCode, 200);
+    assert.deepEqual(emptyObject.json(), {
+      ok: true,
+      sha256: emptyObjectSha,
+      exists: false,
+    });
+
     const missingManifest = await app.inject({
       method: "POST",
       url: "/v1/artifacts/manifests",
@@ -232,6 +264,7 @@ test("artifact object and manifest push-pull flow", async () => {
     const latest = await app.inject({
       method: "GET",
       url: `/v1/groups/${groupId}/artifacts/latest?artifactKind=world-snapshot`,
+      headers: hostHeaders(hostId, hostToken),
     });
     assert.equal(latest.statusCode, 200);
     assert.equal(latest.json<{ artifactId: string; status: string }>().artifactId, "snap_000001");
@@ -240,6 +273,7 @@ test("artifact object and manifest push-pull flow", async () => {
     const manifestDownload = await app.inject({
       method: "GET",
       url: `/v1/groups/${groupId}/artifacts/world-snapshot/snap_000001/manifest`,
+      headers: hostHeaders(hostId, hostToken),
     });
     assert.equal(manifestDownload.statusCode, 200);
     assert.deepEqual(manifestDownload.json<{ manifest: ArtifactManifest }>().manifest, manifest);
@@ -247,6 +281,7 @@ test("artifact object and manifest push-pull flow", async () => {
     const objectDownload = await app.inject({
       method: "GET",
       url: `/v1/groups/${groupId}/artifacts/objects/${objectSha}`,
+      headers: hostHeaders(hostId, hostToken),
     });
     assert.equal(objectDownload.statusCode, 200);
     assert.equal(Buffer.from(objectDownload.json<{ contentBase64: string }>().contentBase64, "base64").toString(), "region data");
@@ -255,7 +290,45 @@ test("artifact object and manifest push-pull flow", async () => {
   }
 });
 
-test("only available artifacts become latest", async () => {
+test("artifact download endpoints require host auth", async () => {
+  const app = await buildApp({ logger: false });
+
+  try {
+    const { groupId, hostId, hostToken } = await createJoinedHost(app);
+    const content = Buffer.from("region data");
+    const objectSha = sha256(content);
+    const manifest = sampleManifest({
+      groupId,
+      creatorHostId: hostId,
+      sha256: objectSha,
+      size: content.byteLength,
+    });
+
+    await uploadObject(app, { groupId, hostId, hostToken, sha256: objectSha, content });
+    await uploadManifest(app, { groupId, hostId, hostToken, manifest });
+
+    for (const url of [
+      `/v1/groups/${groupId}/artifacts`,
+      `/v1/groups/${groupId}/artifacts/latest?artifactKind=world-snapshot`,
+      `/v1/groups/${groupId}/artifacts/world-snapshot/snap_000001/manifest`,
+      `/v1/groups/${groupId}/artifacts/objects/${objectSha}`,
+    ]) {
+      const missingAuth = await app.inject({ method: "GET", url });
+      assert.equal(missingAuth.statusCode, 401, url);
+
+      const badAuth = await app.inject({
+        method: "GET",
+        url,
+        headers: hostHeaders(hostId, "wrong"),
+      });
+      assert.equal(badAuth.statusCode, 401, url);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("only available newer artifacts become latest", async () => {
   const store = createInMemoryCoordinatorStore();
   const group = store.createGroup({ name: "Survival Server", ownerName: "Owner" });
 
@@ -306,6 +379,52 @@ test("only available artifacts become latest", async () => {
     totalBytes: 10,
   });
   assert.equal(store.getLatestArtifact(group.groupId, "world-snapshot").artifactId, "snap_available");
+
+  store.recordArtifact({
+    groupId: group.groupId,
+    artifactKind: "world-snapshot",
+    artifactId: "snap_older_available",
+    parentArtifactId: null,
+    serverPackVersion: "pack_000001",
+    creatorHostId: "host_123",
+    createdAt: "2026-06-05T00:00:01Z",
+    status: "available",
+    manifestSha256: sha256(Buffer.from("older available")),
+    manifestObjectPath: "manifest-older-available",
+    fileCount: 1,
+    totalBytes: 10,
+  });
+  assert.equal(store.getLatestArtifact(group.groupId, "world-snapshot").artifactId, "snap_available");
+});
+
+test("zero-byte non-deleted artifact can be uploaded and downloaded", async () => {
+  const app = await buildApp({ logger: false });
+
+  try {
+    const { groupId, hostId, hostToken } = await createJoinedHost(app);
+    const content = Buffer.alloc(0);
+    const objectSha = sha256(content);
+    const manifest = sampleManifest({
+      groupId,
+      creatorHostId: hostId,
+      sha256: objectSha,
+      size: 0,
+    });
+    manifest.files[0].path = "world/data/empty.dat";
+
+    await uploadObject(app, { groupId, hostId, hostToken, sha256: objectSha, content });
+    await uploadManifest(app, { groupId, hostId, hostToken, manifest });
+
+    const objectDownload = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${groupId}/artifacts/objects/${objectSha}`,
+      headers: hostHeaders(hostId, hostToken),
+    });
+    assert.equal(objectDownload.statusCode, 200);
+    assert.equal(objectDownload.json<{ contentBase64: string }>().contentBase64, "");
+  } finally {
+    await app.close();
+  }
 });
 
 async function createJoinedHost(app: Awaited<ReturnType<typeof buildApp>>): Promise<{
@@ -398,4 +517,48 @@ function sampleManifest(input: {
 
 function sha256(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function hostHeaders(hostId: string, hostToken: string): Record<string, string> {
+  return {
+    "x-acbh-host-id": hostId,
+    "x-acbh-host-token": hostToken,
+  };
+}
+
+async function uploadObject(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  input: { groupId: string; hostId: string; hostToken: string; sha256: string; content: Buffer },
+): Promise<void> {
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/objects",
+    payload: {
+      groupId: input.groupId,
+      hostId: input.hostId,
+      hostToken: input.hostToken,
+      sha256: input.sha256,
+      contentBase64: input.content.toString("base64"),
+    },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+}
+
+async function uploadManifest(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  input: { groupId: string; hostId: string; hostToken: string; manifest: ArtifactManifest },
+): Promise<void> {
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    payload: {
+      groupId: input.groupId,
+      hostId: input.hostId,
+      hostToken: input.hostToken,
+      artifactKind: input.manifest.artifactKind,
+      artifactId: input.manifest.artifactId,
+      manifest: input.manifest,
+    },
+  });
+  assert.equal(response.statusCode, 200, response.body);
 }
