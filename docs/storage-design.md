@@ -34,6 +34,18 @@ objects/sha256/<first-two>/<sha256>
 
 This avoids duplicate file storage and makes integrity verification explicit.
 
+## V1 upload path
+
+The first networked upload path is JSON/base64:
+
+- `POST /v1/artifacts/objects` uploads one content-addressed object.
+- `POST /v1/artifacts/manifests` uploads a manifest after objects exist.
+- Coordinator stores objects and manifests in local filesystem storage.
+
+The JSON/base64 object endpoint has a 16 MiB decoded object limit. Manifest upload has a 1 MiB request body limit. Multipart or streaming uploads are future work for larger artifacts.
+
+Pull reads from Coordinator local storage through manifest and object download endpoints. Local storage remains Coordinator-side only; Agents do not write directly into `.acbh-storage`.
+
 ## Manifest metadata
 
 Coordinator owns artifact validity. Storage only stores bytes.
@@ -97,4 +109,4 @@ Manifest fields reserve:
 
 For `world-snapshot`, `serverPackVersion` ties the world data to the server pack that produced it. For `server-pack`, `serverPackVersion` may equal `artifactId`. `admin-state` stays separate from world snapshots.
 
-This storage layer does not yet implement snapshot upload APIs, artifact approval workflow, RCON safe sync, Minecraft runtime control, host election, remote object storage, or garbage collection.
+This storage layer does not yet implement artifact approval workflow, RCON safe sync, Minecraft runtime control, host election, remote object storage, multipart upload, streaming upload, or garbage collection.

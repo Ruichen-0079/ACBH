@@ -1,8 +1,27 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { ArtifactKind } from "./domain/artifacts.js";
 
 export type MemberRole = "owner" | "member";
 
 export type HostStatus = "online" | "standby" | "hosting" | "unhealthy" | "offline";
+
+export type ArtifactStatus = "uploading" | "available" | "rejected";
+
+export type ArtifactMetadata = {
+  groupId: string;
+  artifactKind: ArtifactKind;
+  artifactId: string;
+  parentArtifactId: string | null;
+  serverPackVersion: string | null;
+  creatorHostId: string;
+  createdAt: string;
+  updatedAt: string;
+  status: ArtifactStatus;
+  manifestSha256: string;
+  manifestObjectPath: string;
+  fileCount: number;
+  totalBytes: number;
+};
 
 export type GroupState = {
   groupId: string;
@@ -62,6 +81,8 @@ type GroupRecord = {
   updatedAt: string;
   members: Map<string, MemberRecord>;
   hosts: Map<string, HostRecord>;
+  artifacts: Map<ArtifactKind, Map<string, ArtifactMetadata>>;
+  latestArtifacts: Map<ArtifactKind, string>;
 };
 
 export class StoreError extends Error {
@@ -107,6 +128,8 @@ export class InMemoryCoordinatorStore {
         ],
       ]),
       hosts: new Map(),
+      artifacts: new Map(),
+      latestArtifacts: new Map(),
     });
 
     return { groupId, ownerMemberId, accessKey };
@@ -228,6 +251,82 @@ export class InMemoryCoordinatorStore {
     };
   }
 
+  verifyHost(input: { groupId: string; hostId: string; hostToken: string }): void {
+    const group = this.requireGroup(input.groupId);
+    const host = group.hosts.get(input.hostId);
+
+    if (!host) {
+      throw new StoreError(404, "Host does not exist in group");
+    }
+
+    if (!verifySecret(input.hostToken, host.hostTokenHash)) {
+      throw new StoreError(401, "Invalid host token");
+    }
+  }
+
+  recordArtifact(metadata: Omit<ArtifactMetadata, "updatedAt">): ArtifactMetadata {
+    const group = this.requireGroup(metadata.groupId);
+
+    if (metadata.status === "available" && metadata.artifactKind === "world-snapshot" && !metadata.serverPackVersion) {
+      throw new StoreError(400, "serverPackVersion is required for world-snapshot artifacts");
+    }
+
+    const now = new Date().toISOString();
+    const artifact = {
+      ...metadata,
+      updatedAt: now,
+    };
+
+    let artifactsByKind = group.artifacts.get(metadata.artifactKind);
+    if (!artifactsByKind) {
+      artifactsByKind = new Map();
+      group.artifacts.set(metadata.artifactKind, artifactsByKind);
+    }
+    artifactsByKind.set(metadata.artifactId, artifact);
+
+    if (artifact.status === "available" && this.shouldAdvanceLatest(group, artifact)) {
+      group.latestArtifacts.set(artifact.artifactKind, artifact.artifactId);
+      if (artifact.artifactKind === "world-snapshot") {
+        group.latestSnapshotId = artifact.artifactId;
+      }
+    }
+
+    group.updatedAt = now;
+    return artifact;
+  }
+
+  listArtifacts(groupId: string, artifactKind?: ArtifactKind): ArtifactMetadata[] {
+    const group = this.requireGroup(groupId);
+    const maps = artifactKind ? [group.artifacts.get(artifactKind)] : Array.from(group.artifacts.values());
+
+    return maps
+      .filter((artifacts): artifacts is Map<string, ArtifactMetadata> => artifacts !== undefined)
+      .flatMap((artifacts) => Array.from(artifacts.values()))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.artifactId.localeCompare(b.artifactId));
+  }
+
+  getArtifact(groupId: string, artifactKind: ArtifactKind, artifactId: string): ArtifactMetadata {
+    const group = this.requireGroup(groupId);
+    const artifact = group.artifacts.get(artifactKind)?.get(artifactId);
+
+    if (!artifact) {
+      throw new StoreError(404, "Artifact does not exist");
+    }
+
+    return artifact;
+  }
+
+  getLatestArtifact(groupId: string, artifactKind: ArtifactKind): ArtifactMetadata {
+    const group = this.requireGroup(groupId);
+    const artifactId = group.latestArtifacts.get(artifactKind);
+
+    if (!artifactId) {
+      throw new StoreError(404, "No available artifact exists for this kind");
+    }
+
+    return this.getArtifact(groupId, artifactKind, artifactId);
+  }
+
   private requireGroup(groupId: string): GroupRecord {
     const group = this.groups.get(groupId);
 
@@ -236,6 +335,20 @@ export class InMemoryCoordinatorStore {
     }
 
     return group;
+  }
+
+  private shouldAdvanceLatest(group: GroupRecord, artifact: ArtifactMetadata): boolean {
+    const currentLatestId = group.latestArtifacts.get(artifact.artifactKind);
+    if (!currentLatestId) {
+      return true;
+    }
+
+    const currentLatest = group.artifacts.get(artifact.artifactKind)?.get(currentLatestId);
+    if (!currentLatest) {
+      return true;
+    }
+
+    return artifact.createdAt > currentLatest.createdAt;
   }
 }
 

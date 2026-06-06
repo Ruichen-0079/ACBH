@@ -1,8 +1,16 @@
+import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import type { ArtifactKind } from "./domain/artifacts.js";
 import type { CoordinatorStorage } from "./storage/index.js";
+import { StorageError } from "./storage/index.js";
+import type { ArtifactManifest } from "./storage/index.js";
 import type { InMemoryCoordinatorStore } from "./store.js";
 import { StoreError } from "./store.js";
+
+const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
+const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
+const manifestUploadBodyLimitBytes = 1024 * 1024;
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -38,6 +46,49 @@ const groupStateParamsSchema = z.object({
   groupId: z.string().min(1),
 });
 
+const artifactKinds = ["server-pack", "world-snapshot", "admin-state"] as const;
+
+const uploadObjectSchema = z.object({
+  groupId: z.string().min(1),
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  contentBase64: z.string(),
+});
+
+const uploadManifestSchema = z.object({
+  groupId: z.string().min(1),
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  artifactKind: z.enum(artifactKinds),
+  artifactId: z.string().min(1),
+  manifest: z.object({}).passthrough(),
+});
+
+const groupArtifactsParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const latestArtifactQuerySchema = z.object({
+  artifactKind: z.enum(artifactKinds),
+});
+
+const artifactManifestParamsSchema = z.object({
+  groupId: z.string().min(1),
+  artifactKind: z.enum(artifactKinds),
+  artifactId: z.string().min(1),
+});
+
+const objectParamsSchema = z.object({
+  groupId: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+const hostAuthHeaderSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+});
+
 export async function registerRoutes(
   app: FastifyInstance,
   store: InMemoryCoordinatorStore,
@@ -62,6 +113,137 @@ export async function registerRoutes(
 
   app.get("/v1/storage/info", async () => {
     return storage.info();
+  });
+
+  app.post(
+    "/v1/artifacts/objects",
+    { bodyLimit: jsonObjectUploadBodyLimitBytes },
+    async (request, reply) => {
+      const body = parseBody(uploadObjectSchema, request, reply);
+      if (!body) {
+        return reply;
+      }
+
+      return handleStoreCall(reply, () => {
+        store.verifyHost(body);
+        const content = decodeBase64(body.contentBase64, reply);
+        if (!content) {
+          return reply;
+        }
+        if (content.length > jsonObjectUploadDecodedLimitBytes) {
+          return reply.code(413).send({
+            error: "Payload Too Large",
+            message: "Object upload exceeds 16 MiB JSON/base64 limit",
+          });
+        }
+
+        const actual = sha256(content);
+        if (actual !== body.sha256) {
+          return reply.code(400).send({
+            error: "Bad Request",
+            message: "Object content does not match declared sha256",
+          });
+        }
+
+        return handleStorageCall(reply, async () => {
+          const exists = await storage.objectExists({
+            groupId: body.groupId,
+            sha256: body.sha256,
+          });
+          if (!exists) {
+            await storage.saveObject({
+              groupId: body.groupId,
+              sha256: body.sha256,
+              content,
+            });
+          }
+
+          return {
+            ok: true,
+            sha256: body.sha256,
+            exists,
+          };
+        });
+      });
+    },
+  );
+
+  app.post("/v1/artifacts/manifests", { bodyLimit: manifestUploadBodyLimitBytes }, async (request, reply) => {
+    const body = parseBody(uploadManifestSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      store.verifyHost(body);
+
+      if (
+        body.manifest.groupId !== body.groupId ||
+        body.manifest.artifactKind !== body.artifactKind ||
+        body.manifest.artifactId !== body.artifactId
+      ) {
+        return reply.code(400).send({
+          error: "Bad Request",
+          message: "Manifest IDs must match upload request",
+        });
+      }
+      if (body.artifactKind === "world-snapshot" && !body.manifest.serverPackVersion) {
+        return reply.code(400).send({
+          error: "Bad Request",
+          message: "serverPackVersion is required for world-snapshot artifacts",
+        });
+      }
+      const uploadedManifest = body.manifest as unknown as ArtifactManifest;
+
+      return handleStorageCall(reply, async () => {
+        for (const file of uploadedManifest.files ?? []) {
+          if (file.deleted) {
+            continue;
+          }
+          const exists = await storage.objectExists({
+            groupId: body.groupId,
+            sha256: file.sha256,
+          });
+          if (!exists) {
+            return reply.code(400).send({
+              error: "Bad Request",
+              message: `Missing object ${file.sha256} for ${file.path}`,
+            });
+          }
+        }
+
+        await storage.saveManifest({
+          groupId: body.groupId,
+          artifactKind: body.artifactKind,
+          artifactId: body.artifactId,
+          manifest: uploadedManifest,
+        });
+
+        const manifestSha256 = sha256(Buffer.from(JSON.stringify(uploadedManifest), "utf8"));
+        const metadata = store.recordArtifact({
+          groupId: body.groupId,
+          artifactKind: body.artifactKind,
+          artifactId: body.artifactId,
+          parentArtifactId: uploadedManifest.parentArtifactId ?? null,
+          serverPackVersion:
+            uploadedManifest.serverPackVersion ?? (body.artifactKind === "server-pack" ? body.artifactId : null),
+          creatorHostId: uploadedManifest.creatorHostId,
+          createdAt: uploadedManifest.createdAt,
+          status: "available",
+          manifestSha256,
+          manifestObjectPath: manifestStorageKey(body.groupId, body.artifactKind, body.artifactId),
+          fileCount: countIncludedFiles(uploadedManifest),
+          totalBytes: totalManifestBytes(uploadedManifest),
+        });
+
+        return {
+          ok: true,
+          artifactKind: metadata.artifactKind,
+          artifactId: metadata.artifactId,
+          status: metadata.status,
+        };
+      });
+    });
   });
 
   app.post("/v1/groups", async (request, reply) => {
@@ -115,6 +297,88 @@ export async function registerRoutes(
 
     return handleStoreCall(reply, () => store.getGroupState(params.groupId));
   });
+
+  app.get("/v1/groups/:groupId/artifacts", async (request, reply) => {
+    const params = parseParams(groupArtifactsParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+
+      return {
+        groupId: params.groupId,
+        artifacts: store.listArtifacts(params.groupId),
+      };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/artifacts/latest", async (request, reply) => {
+    const params = parseParams(groupArtifactsParamsSchema, request, reply);
+    const query = parseQuery(latestArtifactQuerySchema, request, reply);
+    if (!params || !query) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+
+      return store.getLatestArtifact(params.groupId, query.artifactKind);
+    });
+  });
+
+  app.get("/v1/groups/:groupId/artifacts/:artifactKind/:artifactId/manifest", async (request, reply) => {
+    const params = parseParams(artifactManifestParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+
+      store.getArtifact(params.groupId, params.artifactKind, params.artifactId);
+      return handleStorageCall(reply, async () => ({
+        metadata: store.getArtifact(params.groupId, params.artifactKind, params.artifactId),
+        manifest: await storage.readManifest({
+          groupId: params.groupId,
+          artifactKind: params.artifactKind,
+          artifactId: params.artifactId,
+        }),
+      }));
+    });
+  });
+
+  app.get("/v1/groups/:groupId/artifacts/objects/:sha256", async (request, reply) => {
+    const params = parseParams(objectParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+
+      return handleStorageCall(reply, async () => {
+        const content = await storage.readObject({
+          groupId: params.groupId,
+          sha256: params.sha256,
+        });
+
+        return {
+          sha256: params.sha256,
+          contentBase64: content.toString("base64"),
+        };
+      });
+    });
+  });
 }
 
 function parseBody<T extends z.ZodTypeAny>(
@@ -155,6 +419,25 @@ function parseParams<T extends z.ZodTypeAny>(
   return result.data;
 }
 
+function parseQuery<T extends z.ZodTypeAny>(
+  schema: T,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): z.infer<T> | null {
+  const result = schema.safeParse(request.query);
+
+  if (!result.success) {
+    reply.code(400).send({
+      error: "Bad Request",
+      message: "Invalid query string",
+      issues: result.error.issues,
+    });
+    return null;
+  }
+
+  return result.data;
+}
+
 function handleStoreCall<T>(reply: FastifyReply, call: () => T): T | FastifyReply {
   try {
     return call();
@@ -162,6 +445,25 @@ function handleStoreCall<T>(reply: FastifyReply, call: () => T): T | FastifyRepl
     if (error instanceof StoreError) {
       return reply.code(error.statusCode).send({
         error: statusText(error.statusCode),
+        message: error.message,
+      });
+    }
+
+    throw error;
+  }
+}
+
+async function handleStorageCall<T>(
+  reply: FastifyReply,
+  call: () => Promise<T>,
+): Promise<T | FastifyReply> {
+  try {
+    return await call();
+  } catch (error) {
+    if (error instanceof StorageError) {
+      const statusCode = error.name === "StorageNotFoundError" ? 404 : 400;
+      return reply.code(statusCode).send({
+        error: statusText(statusCode),
         message: error.message,
       });
     }
@@ -178,7 +480,78 @@ function statusText(statusCode: number): string {
       return "Forbidden";
     case 404:
       return "Not Found";
+    case 413:
+      return "Payload Too Large";
     default:
       return "Error";
   }
+}
+
+function decodeBase64(value: string, reply: FastifyReply): Buffer | null {
+  if (!isStrictBase64(value)) {
+    reply.code(400).send({
+      error: "Bad Request",
+      message: "contentBase64 must be valid standard base64",
+    });
+    return null;
+  }
+
+  return Buffer.from(value, "base64");
+}
+
+function isStrictBase64(value: string): boolean {
+  if (value === "") {
+    return true;
+  }
+  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+}
+
+function verifyRequestHost(
+  store: InMemoryCoordinatorStore,
+  groupId: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): boolean {
+  const result = hostAuthHeaderSchema.safeParse({
+    hostId: request.headers["x-acbh-host-id"],
+    hostToken: request.headers["x-acbh-host-token"],
+  });
+
+  if (!result.success) {
+    reply.code(401).send({
+      error: "Unauthorized",
+      message: "Host authentication headers are required",
+      issues: result.error.issues,
+    });
+    return false;
+  }
+
+  store.verifyHost({
+    groupId,
+    hostId: result.data.hostId,
+    hostToken: result.data.hostToken,
+  });
+
+  return true;
+}
+
+function sha256(content: Uint8Array): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+function countIncludedFiles(manifest: { files?: Array<{ deleted?: boolean }> }): number {
+  return (manifest.files ?? []).filter((file) => !file.deleted).length;
+}
+
+function totalManifestBytes(manifest: { files?: Array<{ deleted?: boolean; size?: number }> }): number {
+  return (manifest.files ?? []).reduce((total, file) => {
+    if (file.deleted) {
+      return total;
+    }
+    return total + (file.size ?? 0);
+  }, 0);
+}
+
+function manifestStorageKey(groupId: string, artifactKind: ArtifactKind, artifactId: string): string {
+  return `groups/${groupId}/${artifactKind}/${artifactId}/manifest.json`;
 }

@@ -39,6 +39,10 @@ Rules:
 - Allow revocation.
 - Token must be scoped to one group and one host.
 
+## Artifact push and pull
+
+Object and manifest upload endpoints require `groupId`, `hostId`, and `hostToken`. Artifact list, latest metadata, manifest download, and object download also require host authentication. The Coordinator verifies the host token and never returns it.
+
 ## Snapshot verification
 
 Uploaded snapshots must not become latest until verified.

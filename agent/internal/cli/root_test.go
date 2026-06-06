@@ -126,6 +126,19 @@ func TestManifestCommands(t *testing.T) {
 	}
 }
 
+func TestRootIncludesPushAndPullCommands(t *testing.T) {
+	cmd := newRootCmd()
+	for _, name := range []string{"push", "pull"} {
+		found, _, err := cmd.Find([]string{name})
+		if err != nil {
+			t.Fatalf("Find(%q) error = %v", name, err)
+		}
+		if found == nil || found.Name() != name {
+			t.Fatalf("Find(%q) = %#v", name, found)
+		}
+	}
+}
+
 func executeCommand(args ...string) (string, error) {
 	cmd := newRootCmd()
 	var out bytes.Buffer

@@ -192,6 +192,35 @@ go run . manifest diff --old ./snap_000001.manifest.json --new ./snap_000002.man
 
 If the Agent config already exists, `scan` can read the group ID and creator host ID from local config. Explicit flags override config values. Unknown and ignored files are counted in the scan report but are never included in manifests.
 
+Push a scanned manifest and its file objects to the Coordinator local storage backend:
+
+```bash
+go run . push \
+  --manifest ./snap_000001.manifest.json \
+  --server-dir C:/minecraft/server
+```
+
+Pull the latest world snapshot and restore files into a separate directory:
+
+```bash
+go run . pull \
+  --artifact-kind world-snapshot \
+  --artifact-id latest \
+  --output-dir ./restore
+```
+
+Deleted manifest entries are reported but not applied by default. To remove files listed as deleted entries:
+
+```bash
+go run . pull \
+  --artifact-kind world-snapshot \
+  --artifact-id latest \
+  --output-dir ./restore \
+  --apply-deletes
+```
+
+The current push path uploads objects as JSON/base64 and is intended for small V1 test artifacts. Large streaming or multipart upload is future work. Manifest upload has a 1 MiB request body limit.
+
 ## Documentation
 
 - `docs/architecture.md`
