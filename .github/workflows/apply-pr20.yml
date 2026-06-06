@@ -1,30 +1,46 @@
 name: Apply PR 20 process manager changes
 
 on:
-  push:
-    branches:
-      - codex/minecraft-process-manager
   pull_request:
 
 permissions:
   contents: write
 
+concurrency:
+  group: pr20-payload-apply
+  cancel-in-progress: true
+
 jobs:
   apply:
-    if: github.event_name == 'push' || github.head_ref == 'codex/minecraft-process-manager'
+    if: github.head_ref == 'codex/minecraft-process-manager'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: codex/minecraft-process-manager
-      - name: Apply verified local files
+      - name: Rebuild and apply verified local files
         shell: bash
         run: |
-          base64 --decode .github/pr20-files.tar.gz.b64 > /tmp/pr20-files.tar.gz
+          python - <<'PY'
+          from pathlib import Path
+
+          damaged = Path('.github/pr20-files.tar.gz.b64').read_text().strip()
+          prefix = damaged[:21146]
+          prefix = prefix[:76] + 'V' + prefix[76:]
+          prefix = prefix[:8803] + 'U' + prefix[8804:]
+          prefix = prefix[:14784] + 'j' + prefix[14784:]
+          prefix = prefix[:18694] + '/' + prefix[18695:]
+          tail = Path('.github/pr20-payload/tail').read_text().strip()
+          rebuilt = prefix + tail
+          if len(rebuilt) != 27916:
+              raise SystemExit(f'unexpected rebuilt payload length: {len(rebuilt)}')
+          Path('/tmp/pr20-files.tar.gz.b64').write_text(rebuilt)
+          PY
+          base64 --decode /tmp/pr20-files.tar.gz.b64 > /tmp/pr20-files.tar.gz
           echo "4e08de5c2b92101334b30dcd2460bd8995d854e1059d6f36e21a9fbe2d5c41d3  /tmp/pr20-files.tar.gz" | sha256sum --check
           tar --extract --gzip --file /tmp/pr20-files.tar.gz
-          rm .github/pr20-files.tar.gz.b64 .github/workflows/apply-pr20.yml .github/pr20-trigger
+          rm -rf .github/pr20-files.tar.gz.b64 .github/pr20-trigger .github/pr20-payload .github/workflows/apply-pr20.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add --all
