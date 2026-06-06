@@ -74,3 +74,5 @@ Never print these values in logs:
 - Host Token
 - RCON password
 - storage credentials
+
+RCON passwords are runtime-only Agent inputs. `safe-sync` accepts the password from `--rcon-password` or `ACBH_RCON_PASSWORD`; it does not write the password to Agent config, manifests, Coordinator storage, or command output.

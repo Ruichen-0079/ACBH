@@ -192,6 +192,39 @@ go run . manifest diff --old ./snap_000001.manifest.json --new ./snap_000002.man
 
 If the Agent config already exists, `scan` can read the group ID and creator host ID from local config. Explicit flags override config values. Unknown and ignored files are counted in the scan report but are never included in manifests.
 
+### RCON safe sync
+
+Plain `scan` reads local files without coordinating with a running Minecraft server. Before generating a `world-snapshot` from a live server, enable RCON in `server.properties`:
+
+```properties
+enable-rcon=true
+rcon.port=25575
+rcon.password=change-me
+```
+
+Then run `safe-sync`. It authenticates to RCON, sends `save-all flush`, waits for a successful response, and only then scans the server directory:
+
+```bash
+go run . safe-sync \
+  --server-dir C:/minecraft/server \
+  --artifact-id snap_000001 \
+  --server-pack-version pack_000001 \
+  --output ./snap_000001.manifest.json \
+  --rcon-host 127.0.0.1 \
+  --rcon-port 25575 \
+  --rcon-password change-me
+```
+
+Instead of placing the password in command history, set `ACBH_RCON_PASSWORD` and omit `--rcon-password`. The flag takes precedence when both are present. The password is not saved in Agent config or printed.
+
+`safe-sync` only generates a `world-snapshot` manifest. Upload remains a separate step:
+
+```bash
+go run . push \
+  --manifest ./snap_000001.manifest.json \
+  --server-dir C:/minecraft/server
+```
+
 Push a scanned manifest and its file objects to the Coordinator local storage backend:
 
 ```bash

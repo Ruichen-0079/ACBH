@@ -2,9 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -128,7 +132,7 @@ func TestManifestCommands(t *testing.T) {
 
 func TestRootIncludesPushAndPullCommands(t *testing.T) {
 	cmd := newRootCmd()
-	for _, name := range []string{"push", "pull"} {
+	for _, name := range []string{"push", "pull", "safe-sync"} {
 		found, _, err := cmd.Find([]string{name})
 		if err != nil {
 			t.Fatalf("Find(%q) error = %v", name, err)
@@ -136,6 +140,139 @@ func TestRootIncludesPushAndPullCommands(t *testing.T) {
 		if found == nil || found.Name() != name {
 			t.Fatalf("Find(%q) = %#v", name, found)
 		}
+	}
+}
+
+func TestSafeSyncUsesEnvironmentPasswordAndGeneratesWorldSnapshot(t *testing.T) {
+	serverDir := t.TempDir()
+	writeCLITestFile(t, serverDir, "world/region/r.0.0.mca", "world-data")
+	output := filepath.Join(t.TempDir(), "manifest.json")
+	address, commands, closeServer := startCLIFakeRCONServer(t, "env-secret", "Saved the game")
+	defer closeServer()
+	host, port := splitCLIAddress(t, address)
+	t.Setenv("ACBH_RCON_PASSWORD", "env-secret")
+
+	out, err := executeCommand(
+		"safe-sync",
+		"--server-dir", serverDir,
+		"--artifact-id", "snap_safe_001",
+		"--server-pack-version", "pack_000001",
+		"--group-id", "group_abc",
+		"--creator-host-id", "host_abc",
+		"--output", output,
+		"--rcon-host", host,
+		"--rcon-port", strconv.Itoa(port),
+		"--rcon-timeout", "1s",
+	)
+	if err != nil {
+		t.Fatalf("safe-sync command error = %v", err)
+	}
+	if command := <-commands; command != "save-all flush" {
+		t.Fatalf("RCON command = %q", command)
+	}
+	if !strings.Contains(out, "RCON save-all flush succeeded.") || !strings.Contains(out, "Safe sync complete.") {
+		t.Fatalf("safe-sync output = %q", out)
+	}
+	if strings.Contains(out, "env-secret") {
+		t.Fatalf("safe-sync output exposed password: %q", out)
+	}
+
+	loaded, err := manifest.LoadFile(output)
+	if err != nil {
+		t.Fatalf("LoadFile() error = %v", err)
+	}
+	if loaded.ArtifactKind != manifest.WorldSnapshot || loaded.ArtifactID != "snap_safe_001" {
+		t.Fatalf("manifest = %#v", loaded)
+	}
+}
+
+func TestSafeSyncRCONFailurePreventsScan(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "manifest.json")
+	address, _, closeServer := startCLIFakeRCONServer(t, "correct", "Saved the game")
+	defer closeServer()
+	host, port := splitCLIAddress(t, address)
+
+	_, err := executeCommand(
+		"safe-sync",
+		"--server-dir", filepath.Join(t.TempDir(), "missing-server"),
+		"--artifact-id", "snap_safe_001",
+		"--server-pack-version", "pack_000001",
+		"--group-id", "group_abc",
+		"--creator-host-id", "host_abc",
+		"--output", output,
+		"--rcon-host", host,
+		"--rcon-port", strconv.Itoa(port),
+		"--rcon-password", "wrong",
+		"--rcon-timeout", "1s",
+	)
+	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("safe-sync error = %v, want authentication failure", err)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("manifest exists after RCON failure, stat error = %v", statErr)
+	}
+}
+
+func TestSafeSyncRejectsFailureResponseBeforeScan(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "manifest.json")
+	address, _, closeServer := startCLIFakeRCONServer(t, "secret", "Error: rejected secret")
+	defer closeServer()
+	host, port := splitCLIAddress(t, address)
+
+	_, err := executeCommand(
+		"safe-sync",
+		"--server-dir", filepath.Join(t.TempDir(), "missing-server"),
+		"--artifact-id", "snap_safe_001",
+		"--server-pack-version", "pack_000001",
+		"--group-id", "group_abc",
+		"--creator-host-id", "host_abc",
+		"--output", output,
+		"--rcon-host", host,
+		"--rcon-port", strconv.Itoa(port),
+		"--rcon-password", "secret",
+		"--rcon-timeout", "1s",
+	)
+	if err == nil || !strings.Contains(err.Error(), "returned failure") {
+		t.Fatalf("safe-sync error = %v, want command failure", err)
+	}
+	if strings.Contains(err.Error(), "secret") {
+		t.Fatalf("safe-sync error exposed password: %v", err)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("manifest exists after RCON command failure, stat error = %v", statErr)
+	}
+}
+
+func TestSafeSyncRequiresPassword(t *testing.T) {
+	t.Setenv("ACBH_RCON_PASSWORD", "")
+	_, err := executeCommand(
+		"safe-sync",
+		"--server-dir", t.TempDir(),
+		"--artifact-id", "snap_safe_001",
+		"--server-pack-version", "pack_000001",
+		"--group-id", "group_abc",
+		"--creator-host-id", "host_abc",
+		"--output", filepath.Join(t.TempDir(), "manifest.json"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "ACBH_RCON_PASSWORD") {
+		t.Fatalf("safe-sync error = %v, want password guidance", err)
+	}
+}
+
+func TestSafeSyncRejectsNonWorldSnapshot(t *testing.T) {
+	_, err := executeCommand(
+		"safe-sync",
+		"--server-dir", t.TempDir(),
+		"--artifact-kind", "server-pack",
+		"--artifact-id", "pack_001",
+		"--server-pack-version", "pack_001",
+		"--group-id", "group_abc",
+		"--creator-host-id", "host_abc",
+		"--output", filepath.Join(t.TempDir(), "manifest.json"),
+		"--rcon-password", "secret",
+	)
+	if err == nil || !strings.Contains(err.Error(), "only supports") {
+		t.Fatalf("safe-sync error = %v, want artifact kind rejection", err)
 	}
 }
 
@@ -158,4 +295,87 @@ func writeCLITestFile(t *testing.T, root, rel, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
+}
+
+func startCLIFakeRCONServer(t *testing.T, password string, response string) (string, <-chan string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	commands := make(chan string, 1)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+
+		authID, authType, authPayload, readErr := readCLIRCONPacket(conn)
+		if readErr != nil {
+			return
+		}
+		if authType != 3 || authPayload != password {
+			authID = -1
+		}
+		if writeCLIRCONPacket(conn, authID, 2, "") != nil || authID == -1 {
+			return
+		}
+
+		commandID, commandType, command, readErr := readCLIRCONPacket(conn)
+		if readErr != nil || commandType != 2 {
+			return
+		}
+		commands <- command
+		_ = writeCLIRCONPacket(conn, commandID, 0, response)
+	}()
+
+	return listener.Addr().String(), commands, func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func readCLIRCONPacket(reader io.Reader) (int32, int32, string, error) {
+	var sizeBytes [4]byte
+	if _, err := io.ReadFull(reader, sizeBytes[:]); err != nil {
+		return 0, 0, "", err
+	}
+	size := int(binary.LittleEndian.Uint32(sizeBytes[:]))
+	data := make([]byte, size)
+	if _, err := io.ReadFull(reader, data); err != nil {
+		return 0, 0, "", err
+	}
+	return int32(binary.LittleEndian.Uint32(data[0:4])),
+		int32(binary.LittleEndian.Uint32(data[4:8])),
+		string(data[8 : size-2]),
+		nil
+}
+
+func writeCLIRCONPacket(writer io.Writer, requestID int32, packetType int32, payload string) error {
+	content := []byte(payload)
+	size := 4 + 4 + len(content) + 2
+	data := make([]byte, 4+size)
+	binary.LittleEndian.PutUint32(data[0:4], uint32(size))
+	binary.LittleEndian.PutUint32(data[4:8], uint32(requestID))
+	binary.LittleEndian.PutUint32(data[8:12], uint32(packetType))
+	copy(data[12:], content)
+	_, err := writer.Write(data)
+	return err
+}
+
+func splitCLIAddress(t *testing.T, address string) (string, int) {
+	t.Helper()
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("Atoi() error = %v", err)
+	}
+	return host, port
 }

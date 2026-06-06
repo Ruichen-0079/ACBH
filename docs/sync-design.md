@@ -84,9 +84,11 @@ A snapshot is valid only when:
 
 Rejected or partial snapshots must never become the latest snapshot.
 
-## Local manifest scanner
+## Local manifest scanner and safe sync
 
-The first Agent manifest scanner is local only. It classifies files, hashes included files, validates manifest shape, compares manifests, and records deleted files when a previous manifest is provided. It does not make a running Minecraft server safe to copy.
+`acbh-agent scan` is a local file scan only. It classifies files, hashes included files, validates manifest shape, compares manifests, and records deleted files when a previous manifest is provided. It does not make a running Minecraft server safe to copy.
+
+`acbh-agent safe-sync` is restricted to `world-snapshot`. It authenticates to the configured Minecraft RCON endpoint, sends `save-all flush`, waits for a successful response, and then invokes the same scanner. If connection, authentication, command execution, or timeout fails, no scan is performed.
 
 Deleted manifest entries use:
 
@@ -94,21 +96,22 @@ Deleted manifest entries use:
 - `size: 0`
 - `sha256: ""`
 
-Future safe sync must still run `save-all flush` through RCON before producing a world snapshot from a live server.
+The RCON password comes from `--rcon-password` or `ACBH_RCON_PASSWORD`. It is not stored in Agent config or printed.
 
 ## Push and pull
 
-The first networked artifact sync step separates scan, push, and pull:
+The networked artifact sync flow separates scan, safe sync, push, and pull:
 
-1. `acbh-agent scan` generates a local manifest.
-2. `acbh-agent push` uploads referenced file objects, then uploads the manifest.
-3. Coordinator verifies that every non-deleted file object exists before marking the artifact `available`.
-4. Coordinator updates the latest pointer only for available artifacts.
-5. `acbh-agent pull` downloads the manifest and file objects, verifies SHA256, and restores under the requested output directory.
+1. `acbh-agent scan` generates a local manifest when the caller knows files are already safe to read.
+2. `acbh-agent safe-sync` runs RCON `save-all flush`, then generates a world-snapshot manifest.
+3. `acbh-agent push` uploads referenced file objects, then uploads the manifest.
+4. Coordinator verifies that every non-deleted file object exists before marking the artifact `available`.
+5. Coordinator updates the latest pointer only for available artifacts.
+6. `acbh-agent pull` downloads the manifest and file objects, verifies SHA256, and restores under the requested output directory.
 
 Pull does not apply deleted entries unless `--apply-deletes` is set.
 
-RCON safe sync is still future work. A future world-snapshot workflow must wrap `scan` with `save-all flush` before files are hashed and pushed.
+The current live-server flow is `safe-sync -> push`. These are separate commands, and this remains file-level snapshot synchronization rather than hot migration.
 
 ## File classes
 
