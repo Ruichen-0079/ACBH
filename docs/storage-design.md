@@ -114,4 +114,4 @@ Manifest fields reserve:
 
 For `world-snapshot`, `serverPackVersion` ties the world data to the server pack that produced it. For `server-pack`, `serverPackVersion` may equal `artifactId`. `admin-state` stays separate from world snapshots.
 
-This storage layer does not yet implement artifact approval workflow, RCON safe sync, Minecraft runtime control, host election, remote object storage, multipart upload, resumable upload, or garbage collection.
+This storage layer remains independent of Agent-side RCON safe sync. It does not yet implement artifact approval workflow, Minecraft runtime control, host election, remote object storage, multipart upload, resumable upload, or garbage collection.

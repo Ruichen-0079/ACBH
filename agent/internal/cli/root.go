@@ -17,11 +17,15 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/artifactsync"
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
+	"github.com/Ruichen-0079/ACBH/agent/internal/rcon"
 	"github.com/Ruichen-0079/ACBH/agent/internal/scanner"
 	"github.com/spf13/cobra"
 )
 
-const defaultHeartbeatInterval = 10 * time.Second
+const (
+	defaultHeartbeatInterval = 10 * time.Second
+	defaultRCONTimeout       = 10 * time.Second
+)
 
 func Execute() {
 	if err := newRootCmd().Execute(); err != nil {
@@ -42,6 +46,7 @@ func newRootCmd() *cobra.Command {
 		newHeartbeatCmd(),
 		newDaemonCmd(),
 		newScanCmd(),
+		newSafeSyncCmd(),
 		newPushCmd(),
 		newPullCmd(),
 		newManifestCmd(),
@@ -160,6 +165,36 @@ func newScanCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("server-dir")
 	_ = cmd.MarkFlagRequired("artifact-kind")
 	_ = cmd.MarkFlagRequired("artifact-id")
+	return cmd
+}
+
+func newSafeSyncCmd() *cobra.Command {
+	var opts safeSyncOptions
+	cmd := &cobra.Command{
+		Use:   "safe-sync",
+		Short: "Flush Minecraft through RCON, then generate a world snapshot manifest",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSafeSync(cmd.Context(), cmd, opts)
+		},
+	}
+
+	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Minecraft server directory to scan after RCON flush")
+	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", string(manifest.WorldSnapshot), "Artifact kind (must be world-snapshot)")
+	cmd.Flags().StringVar(&opts.artifactID, "artifact-id", "", "Artifact ID for the generated world snapshot")
+	cmd.Flags().StringVar(&opts.serverPackVersion, "server-pack-version", "", "Server pack version for the world snapshot")
+	cmd.Flags().StringVar(&opts.parentArtifactID, "parent-artifact-id", "", "Parent artifact ID")
+	cmd.Flags().StringVar(&opts.groupID, "group-id", "", "Coordinator group ID")
+	cmd.Flags().StringVar(&opts.creatorHostID, "creator-host-id", "", "Creator host ID")
+	cmd.Flags().StringVar(&opts.previousManifest, "previous-manifest", "", "Previous manifest used to emit deleted entries")
+	cmd.Flags().StringVar(&opts.output, "output", "", "Path to write manifest JSON")
+	cmd.Flags().StringVar(&opts.rconHost, "rcon-host", "127.0.0.1", "Minecraft RCON host")
+	cmd.Flags().IntVar(&opts.rconPort, "rcon-port", 25575, "Minecraft RCON port")
+	cmd.Flags().StringVar(&opts.rconPassword, "rcon-password", "", "Minecraft RCON password (or use ACBH_RCON_PASSWORD)")
+	cmd.Flags().DurationVar(&opts.rconTimeout, "rcon-timeout", defaultRCONTimeout, "RCON connect and command timeout")
+	_ = cmd.MarkFlagRequired("server-dir")
+	_ = cmd.MarkFlagRequired("artifact-id")
+	_ = cmd.MarkFlagRequired("server-pack-version")
+	_ = cmd.MarkFlagRequired("output")
 	return cmd
 }
 
@@ -337,6 +372,22 @@ type scanOptions struct {
 	jsonOutput        bool
 }
 
+type safeSyncOptions struct {
+	serverDir         string
+	artifactKind      string
+	artifactID        string
+	serverPackVersion string
+	parentArtifactID  string
+	groupID           string
+	creatorHostID     string
+	previousManifest  string
+	output            string
+	rconHost          string
+	rconPort          int
+	rconPassword      string
+	rconTimeout       time.Duration
+}
+
 type pushOptions struct {
 	manifestPath     string
 	serverDir        string
@@ -451,11 +502,73 @@ func runScan(cmd *cobra.Command, opts scanOptions) error {
 		return printJSON(cmd, report)
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), "Scan complete.")
+	printScanSummary(cmd, "Scan complete.", report, opts.output)
+	return nil
+}
+
+func runSafeSync(ctx context.Context, cmd *cobra.Command, opts safeSyncOptions) error {
+	if manifest.ArtifactKind(opts.artifactKind) != manifest.WorldSnapshot {
+		return fmt.Errorf("safe-sync only supports artifact kind %q", manifest.WorldSnapshot)
+	}
+
+	password := opts.rconPassword
+	if password == "" {
+		password = os.Getenv("ACBH_RCON_PASSWORD")
+	}
+	if password == "" {
+		return errors.New("RCON password is required; pass --rcon-password or set ACBH_RCON_PASSWORD")
+	}
+
+	groupID, creatorHostID, err := resolveScanIdentity(opts.groupID, opts.creatorHostID)
+	if err != nil {
+		return err
+	}
+
+	response, err := rcon.Execute(ctx, rcon.Config{
+		Host:     opts.rconHost,
+		Port:     opts.rconPort,
+		Password: password,
+		Timeout:  opts.rconTimeout,
+	}, "save-all flush")
+	if err != nil {
+		return fmt.Errorf("RCON save-all flush failed: %w", err)
+	}
+	if isRCONFailureResponse(response) {
+		return fmt.Errorf(
+			"RCON save-all flush returned failure: %s",
+			redactSecret(strings.TrimSpace(response), password),
+		)
+	}
+
+	manifestData, report, err := scanner.Scan(scanner.Options{
+		ServerDir:            opts.serverDir,
+		ArtifactKind:         manifest.WorldSnapshot,
+		ArtifactID:           opts.artifactID,
+		GroupID:              groupID,
+		CreatorHostID:        creatorHostID,
+		ServerPackVersion:    opts.serverPackVersion,
+		ParentArtifactID:     opts.parentArtifactID,
+		PreviousManifestPath: opts.previousManifest,
+		OutputPath:           opts.output,
+	})
+	if err != nil {
+		return err
+	}
+	if err := manifest.SaveFile(opts.output, manifestData); err != nil {
+		return err
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), "RCON save-all flush succeeded.")
+	printScanSummary(cmd, "Safe sync complete.", report, opts.output)
+	return nil
+}
+
+func printScanSummary(cmd *cobra.Command, heading string, report scanner.Report, output string) {
+	fmt.Fprintln(cmd.OutOrStdout(), heading)
 	fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind: %s\n", report.ArtifactKind)
 	fmt.Fprintf(cmd.OutOrStdout(), "Server dir: %s\n", report.ServerDir)
-	if opts.output != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Manifest written: %s\n", opts.output)
+	if output != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Manifest written: %s\n", output)
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Included files: %d\n", report.IncludedFiles)
 	fmt.Fprintf(cmd.OutOrStdout(), "Ignored files: %d\n", report.IgnoredFiles)
@@ -464,7 +577,33 @@ func runScan(cmd *cobra.Command, opts scanOptions) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes: %d\n", report.TotalBytes)
 	printSamples(cmd, "Ignored sample", report.IgnoredSample)
 	printSamples(cmd, "Unknown sample", report.UnknownSample)
-	return nil
+}
+
+func isRCONFailureResponse(response string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(response))
+	if normalized == "" {
+		return false
+	}
+	for _, marker := range []string{
+		"unknown command",
+		"incorrect argument",
+		"not permitted",
+		"permission denied",
+		"failed",
+		"error",
+	} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func redactSecret(value string, secret string) string {
+	if secret == "" {
+		return value
+	}
+	return strings.ReplaceAll(value, secret, "[REDACTED]")
 }
 
 func resolveScanIdentity(groupID string, creatorHostID string) (string, string, error) {
