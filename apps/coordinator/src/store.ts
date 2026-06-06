@@ -284,7 +284,7 @@ export class InMemoryCoordinatorStore {
     }
     artifactsByKind.set(metadata.artifactId, artifact);
 
-    if (artifact.status === "available") {
+    if (artifact.status === "available" && this.shouldAdvanceLatest(group, artifact)) {
       group.latestArtifacts.set(artifact.artifactKind, artifact.artifactId);
       if (artifact.artifactKind === "world-snapshot") {
         group.latestSnapshotId = artifact.artifactId;
@@ -335,6 +335,20 @@ export class InMemoryCoordinatorStore {
     }
 
     return group;
+  }
+
+  private shouldAdvanceLatest(group: GroupRecord, artifact: ArtifactMetadata): boolean {
+    const currentLatestId = group.latestArtifacts.get(artifact.artifactKind);
+    if (!currentLatestId) {
+      return true;
+    }
+
+    const currentLatest = group.artifacts.get(artifact.artifactKind)?.get(currentLatestId);
+    if (!currentLatest) {
+      return true;
+    }
+
+    return artifact.createdAt > currentLatest.createdAt;
   }
 }
 
