@@ -90,6 +90,12 @@ type UploadManifestResponse struct {
 	Status       string                `json:"status"`
 }
 
+type ArtifactAuth struct {
+	GroupID   string
+	HostID    string
+	HostToken string
+}
+
 type ArtifactMetadata struct {
 	GroupID            string                `json:"groupId"`
 	ArtifactKind       manifest.ArtifactKind `json:"artifactKind"`
@@ -166,21 +172,21 @@ func (c *Client) UploadManifest(ctx context.Context, req UploadManifestRequest) 
 	return out, err
 }
 
-func (c *Client) GetLatestArtifact(ctx context.Context, groupID string, artifactKind manifest.ArtifactKind) (ArtifactMetadata, error) {
+func (c *Client) GetLatestArtifact(ctx context.Context, auth ArtifactAuth, artifactKind manifest.ArtifactKind) (ArtifactMetadata, error) {
 	var out ArtifactMetadata
-	err := c.get(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/artifacts/latest?artifactKind="+url.QueryEscape(string(artifactKind)), &out)
+	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/artifacts/latest?artifactKind="+url.QueryEscape(string(artifactKind)), auth, &out)
 	return out, err
 }
 
-func (c *Client) DownloadManifest(ctx context.Context, groupID string, artifactKind manifest.ArtifactKind, artifactID string) (DownloadManifestResponse, error) {
+func (c *Client) DownloadManifest(ctx context.Context, auth ArtifactAuth, artifactKind manifest.ArtifactKind, artifactID string) (DownloadManifestResponse, error) {
 	var out DownloadManifestResponse
-	err := c.get(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/artifacts/"+url.PathEscape(string(artifactKind))+"/"+url.PathEscape(artifactID)+"/manifest", &out)
+	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/artifacts/"+url.PathEscape(string(artifactKind))+"/"+url.PathEscape(artifactID)+"/manifest", auth, &out)
 	return out, err
 }
 
-func (c *Client) DownloadObject(ctx context.Context, groupID string, sha256 string) ([]byte, error) {
+func (c *Client) DownloadObject(ctx context.Context, auth ArtifactAuth, sha256 string) ([]byte, error) {
 	var out DownloadObjectResponse
-	if err := c.get(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/artifacts/objects/"+url.PathEscape(sha256), &out); err != nil {
+	if err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/artifacts/objects/"+url.PathEscape(sha256), auth, &out); err != nil {
 		return nil, err
 	}
 	if out.SHA256 != sha256 {
@@ -227,11 +233,13 @@ func (c *Client) post(ctx context.Context, path string, in any, out any) error {
 	return nil
 }
 
-func (c *Client) get(ctx context.Context, path string, out any) error {
+func (c *Client) get(ctx context.Context, path string, auth ArtifactAuth, out any) error {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
+	httpReq.Header.Set("X-ACBH-Host-ID", auth.HostID)
+	httpReq.Header.Set("X-ACBH-Host-Token", auth.HostToken)
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
