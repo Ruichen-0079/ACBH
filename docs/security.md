@@ -41,9 +41,7 @@ Rules:
 
 ## Artifact push and pull
 
-Object and manifest upload endpoints require `groupId`, `hostId`, and `hostToken`. The Coordinator verifies the host token and never returns it.
-
-Current pull/download endpoints are group-scoped for the local V1 test flow. Future work should add member or host authorization for artifact metadata, manifest download, and object download.
+Object and manifest upload endpoints require `groupId`, `hostId`, and `hostToken`. Artifact list, latest metadata, manifest download, and object download also require host authentication. The Coordinator verifies the host token and never returns it.
 
 ## Snapshot verification
 
