@@ -58,6 +58,7 @@ Create a runnable repository skeleton:
 - Election must create an assignment; it must not start a server or finalize `currentHostId`.
 - Only takeover completion may increment `currentHostGeneration`.
 - Never return or log Host Tokens or stored takeover-token hashes.
+- Keep takeover dry-run read-only; it must not generate or consume the one-time token.
 - Agent takeover restores server-pack, admin-state, then world-snapshot before process start.
 - Takeover must not run RCON or safe-sync; it consumes already available artifacts.
 - Keep the local two-host demo fake-server based. Do not add a Minecraft installer.
