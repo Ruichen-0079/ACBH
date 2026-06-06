@@ -34,6 +34,12 @@ Responsibilities:
 - Execute takeover when selected
 - Report local health
 
+### Local process manager
+
+The Agent process manager starts and stops a user-provided command in a configured local server directory. A small detached local supervisor keeps the child stdin available, appends stdout and stderr to local log files, and owns the runtime state used by `server status` and `server stop`.
+
+Process control remains entirely on the Agent device. The Coordinator does not launch, stop, or supervise Minecraft. The process manager does not select hosts or perform automatic takeover.
+
 ## Storage
 
 Storage contains server packs, snapshot manifests, and file blobs.

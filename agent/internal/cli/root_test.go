@@ -8,10 +8,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
 )
 
@@ -130,9 +133,9 @@ func TestManifestCommands(t *testing.T) {
 	}
 }
 
-func TestRootIncludesPushAndPullCommands(t *testing.T) {
+func TestRootIncludesArtifactAndServerCommands(t *testing.T) {
 	cmd := newRootCmd()
-	for _, name := range []string{"push", "pull", "safe-sync"} {
+	for _, name := range []string{"push", "pull", "safe-sync", "server"} {
 		found, _, err := cmd.Find([]string{name})
 		if err != nil {
 			t.Fatalf("Find(%q) error = %v", name, err)
@@ -140,6 +143,67 @@ func TestRootIncludesPushAndPullCommands(t *testing.T) {
 		if found == nil || found.Name() != name {
 			t.Fatalf("Find(%q) = %#v", name, found)
 		}
+	}
+	for _, name := range []string{"start", "stop", "status"} {
+		found, _, err := cmd.Find([]string{"server", name})
+		if err != nil {
+			t.Fatalf("Find(server %q) error = %v", name, err)
+		}
+		if found == nil || found.Name() != name {
+			t.Fatalf("Find(server %q) = %#v", name, found)
+		}
+	}
+}
+
+func TestResolveServerStartOptionsUsesConfigAndFlags(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	if runtime.GOOS == "windows" {
+		t.Setenv("AppData", configRoot)
+	}
+	configPath, err := agentconfig.DefaultPath()
+	if err != nil {
+		t.Fatalf("DefaultPath() error = %v", err)
+	}
+	serverDir := t.TempDir()
+	if err := agentconfig.Save(configPath, agentconfig.Config{
+		CoordinatorURL: "http://127.0.0.1:6121",
+		GroupID:        "group_abc",
+		MemberID:       "member_abc",
+		HostID:         "host_abc",
+		HostToken:      "secret",
+		DisplayName:    "PlayerA",
+		DeviceName:     "PlayerA-PC",
+		Platform:       runtime.GOOS,
+		AgentVersion:   agentconfig.AgentVersion,
+		Server: agentconfig.ServerConfig{
+			Dir:         serverDir,
+			Command:     "java -jar configured.jar nogui",
+			LogDir:      "configured-logs",
+			StopTimeout: "45s",
+		},
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	resolved, err := resolveServerStartOptions(serverStartOptions{
+		command:     "java -jar override.jar nogui",
+		stopTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("resolveServerStartOptions() error = %v", err)
+	}
+	if resolved.ServerDir != serverDir {
+		t.Fatalf("ServerDir = %q, want %q", resolved.ServerDir, serverDir)
+	}
+	if resolved.Command != "java -jar override.jar nogui" {
+		t.Fatalf("Command = %q", resolved.Command)
+	}
+	if resolved.LogDir != "configured-logs" {
+		t.Fatalf("LogDir = %q", resolved.LogDir)
+	}
+	if resolved.StopTimeout != 5*time.Second {
+		t.Fatalf("StopTimeout = %s", resolved.StopTimeout)
 	}
 }
 
