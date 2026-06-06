@@ -51,6 +51,7 @@ Create a runnable repository skeleton:
 - Do not add host election while implementing RCON safe sync.
 - Never store or print the RCON password.
 - Keep the first Minecraft process manager local to the Agent.
+- Keep process state and logs local to the Agent user config directory.
 - Do not implement host election or automatic takeover while adding local process control.
 - Do not add a GUI, proxy, relay, or Coordinator-side Minecraft process control in the process-manager PR.
 
