@@ -18,9 +18,9 @@ import (
 type Client interface {
 	UploadObject(ctx context.Context, req coordinator.UploadObjectRequest) (coordinator.UploadObjectResponse, error)
 	UploadManifest(ctx context.Context, req coordinator.UploadManifestRequest) (coordinator.UploadManifestResponse, error)
-	GetLatestArtifact(ctx context.Context, groupID string, artifactKind manifest.ArtifactKind) (coordinator.ArtifactMetadata, error)
-	DownloadManifest(ctx context.Context, groupID string, artifactKind manifest.ArtifactKind, artifactID string) (coordinator.DownloadManifestResponse, error)
-	DownloadObject(ctx context.Context, groupID string, sha256 string) ([]byte, error)
+	GetLatestArtifact(ctx context.Context, auth coordinator.ArtifactAuth, artifactKind manifest.ArtifactKind) (coordinator.ArtifactMetadata, error)
+	DownloadManifest(ctx context.Context, auth coordinator.ArtifactAuth, artifactKind manifest.ArtifactKind, artifactID string) (coordinator.DownloadManifestResponse, error)
+	DownloadObject(ctx context.Context, auth coordinator.ArtifactAuth, sha256 string) ([]byte, error)
 }
 
 type PushOptions struct {
@@ -151,15 +151,20 @@ func Pull(ctx context.Context, opts PullOptions) (PullSummary, error) {
 	}
 
 	artifactID := opts.ArtifactID
+	auth := coordinator.ArtifactAuth{
+		GroupID:   opts.Config.GroupID,
+		HostID:    opts.Config.HostID,
+		HostToken: opts.Config.HostToken,
+	}
 	if artifactID == "" || artifactID == "latest" {
-		latest, err := opts.Client.GetLatestArtifact(ctx, opts.Config.GroupID, opts.ArtifactKind)
+		latest, err := opts.Client.GetLatestArtifact(ctx, auth, opts.ArtifactKind)
 		if err != nil {
 			return PullSummary{}, err
 		}
 		artifactID = latest.ArtifactID
 	}
 
-	downloaded, err := opts.Client.DownloadManifest(ctx, opts.Config.GroupID, opts.ArtifactKind, artifactID)
+	downloaded, err := opts.Client.DownloadManifest(ctx, auth, opts.ArtifactKind, artifactID)
 	if err != nil {
 		return PullSummary{}, err
 	}
@@ -200,7 +205,7 @@ func Pull(ctx context.Context, opts PullOptions) (PullSummary, error) {
 			continue
 		}
 
-		content, err := opts.Client.DownloadObject(ctx, opts.Config.GroupID, file.SHA256)
+		content, err := opts.Client.DownloadObject(ctx, auth, file.SHA256)
 		if err != nil {
 			return PullSummary{}, err
 		}
