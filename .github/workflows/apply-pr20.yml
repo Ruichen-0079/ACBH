@@ -4,17 +4,20 @@ on:
   push:
     branches:
       - codex/minecraft-process-manager
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.event_name == 'push' || github.head_ref == 'codex/minecraft-process-manager'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: codex/minecraft-process-manager
       - name: Apply verified local files
         shell: bash
         run: |
