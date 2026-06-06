@@ -1,4 +1,4 @@
-# ACBH 鈥?Anyone Can Be Host
+# ACBH — Anyone Can Be Host
 
 ACBH is a distributed Minecraft host handoff platform.
 
@@ -14,7 +14,7 @@ Host B starts the Minecraft server.
 Players reconnect.
 ```
 
-Target V1 recovery time: **10鈥?0 seconds**.
+Target V1 recovery time: **10–30 seconds**.
 
 ## Non-goals
 
@@ -28,12 +28,12 @@ Target V1 recovery time: **10鈥?0 seconds**.
 
 ```text
 ACBH/
-鈹溾攢鈹€ apps/
-鈹?  鈹斺攢鈹€ coordinator/      # TypeScript Coordinator service
-鈹溾攢鈹€ agent/                # Go cross-platform Agent CLI
-鈹溾攢鈹€ docs/                 # Architecture and protocol documents
-鈹溾攢鈹€ examples/             # Local demo and deployment examples
-鈹斺攢鈹€ .github/workflows/    # CI
+├── apps/
+│   └── coordinator/      # TypeScript Coordinator service
+├── agent/                # Go cross-platform Agent CLI
+├── docs/                 # Architecture and protocol documents
+├── examples/             # Local demo and deployment examples
+└── .github/workflows/    # CI
 ```
 
 ## Main components
@@ -219,7 +219,7 @@ go run . pull \
   --apply-deletes
 ```
 
-The current push path uploads objects as JSON/base64 and is intended for small V1 test artifacts. Large streaming or multipart upload is future work.
+The current push path uploads objects as JSON/base64 and is intended for small V1 test artifacts. Large streaming or multipart upload is future work. Manifest upload has a 1 MiB request body limit.
 
 ## Documentation
 
