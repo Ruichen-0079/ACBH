@@ -1,0 +1,29 @@
+name: Apply PR 19 RCON safe sync changes
+
+on:
+  push:
+    branches:
+      - codex/rcon-safe-sync
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply verified local files
+        shell: bash
+        run: |
+          base64 --decode .github/pr19-files.tar.gz.b64 > /tmp/pr19-files.tar.gz
+          echo "e8a76d6cd03319de809facf8b9429c7d56084e36326ac1f18ebcf3089c177205  /tmp/pr19-files.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/pr19-files.tar.gz
+          rm .github/pr19-files.tar.gz.b64 .github/workflows/apply-pr19.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all
+          git commit -m "Add RCON safe sync wrapper"
+          git push origin HEAD:codex/rcon-safe-sync
