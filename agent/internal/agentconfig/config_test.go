@@ -19,6 +19,12 @@ func TestSaveLoadConfig(t *testing.T) {
 		DeviceName:     "PlayerA-PC",
 		Platform:       "windows",
 		AgentVersion:   AgentVersion,
+		Server: ServerConfig{
+			Dir:         "C:/minecraft/server",
+			Command:     "java -Xmx4G -jar server.jar nogui",
+			LogDir:      ".acbh/logs",
+			StopTimeout: "30s",
+		},
 	}
 
 	if err := Save(path, want); err != nil {

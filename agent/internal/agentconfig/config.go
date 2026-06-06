@@ -15,24 +15,41 @@ const (
 )
 
 type Config struct {
-	CoordinatorURL string `json:"coordinatorUrl"`
-	GroupID        string `json:"groupId"`
-	MemberID       string `json:"memberId"`
-	HostID         string `json:"hostId"`
-	HostToken      string `json:"hostToken"`
-	DisplayName    string `json:"displayName"`
-	DeviceName     string `json:"deviceName"`
-	Platform       string `json:"platform"`
-	AgentVersion   string `json:"agentVersion"`
+	CoordinatorURL string       `json:"coordinatorUrl"`
+	GroupID        string       `json:"groupId"`
+	MemberID       string       `json:"memberId"`
+	HostID         string       `json:"hostId"`
+	HostToken      string       `json:"hostToken"`
+	DisplayName    string       `json:"displayName"`
+	DeviceName     string       `json:"deviceName"`
+	Platform       string       `json:"platform"`
+	AgentVersion   string       `json:"agentVersion"`
+	Server         ServerConfig `json:"server,omitempty"`
+}
+
+type ServerConfig struct {
+	Dir         string `json:"dir,omitempty"`
+	Command     string `json:"command,omitempty"`
+	LogDir      string `json:"logDir,omitempty"`
+	StopTimeout string `json:"stopTimeout,omitempty"`
 }
 
 func DefaultPath() (string, error) {
+	dir, err := DefaultDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(dir, FileName), nil
+}
+
+func DefaultDir() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("find user config directory: %w", err)
 	}
 
-	return filepath.Join(dir, DirName, FileName), nil
+	return filepath.Join(dir, DirName), nil
 }
 
 func Exists(path string) bool {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -17,6 +18,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/artifactsync"
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
+	"github.com/Ruichen-0079/ACBH/agent/internal/mcserver"
 	"github.com/Ruichen-0079/ACBH/agent/internal/rcon"
 	"github.com/Ruichen-0079/ACBH/agent/internal/scanner"
 	"github.com/spf13/cobra"
@@ -25,6 +27,7 @@ import (
 const (
 	defaultHeartbeatInterval = 10 * time.Second
 	defaultRCONTimeout       = 10 * time.Second
+	defaultServerStopTimeout = 30 * time.Second
 )
 
 func Execute() {
@@ -50,8 +53,88 @@ func newRootCmd() *cobra.Command {
 		newPushCmd(),
 		newPullCmd(),
 		newManifestCmd(),
+		newServerCmd(),
 	)
 	return rootCmd
+}
+
+func newServerCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "server",
+		Short: "Start, stop, and inspect a local Minecraft server process",
+	}
+	cmd.AddCommand(
+		newServerStartCmd(),
+		newServerStopCmd(),
+		newServerStatusCmd(),
+		newServerSuperviseCmd(),
+	)
+	return cmd
+}
+
+func newServerStartCmd() *cobra.Command {
+	var opts serverStartOptions
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "Start the configured local server process",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServerStart(cmd.Context(), cmd, opts)
+		},
+	}
+	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Minecraft server working directory")
+	cmd.Flags().StringVar(&opts.command, "command", "", "User-provided server launch command")
+	cmd.Flags().StringVar(&opts.logDir, "log-dir", "", "Directory for server stdout and stderr logs")
+	cmd.Flags().DurationVar(&opts.stopTimeout, "stop-timeout", 0, "Graceful stop timeout before forced kill")
+	return cmd
+}
+
+func newServerStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Gracefully stop the managed local server process",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServerStop(cmd)
+		},
+	}
+}
+
+func newServerStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Report managed local server process status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServerStatus(cmd)
+		},
+	}
+}
+
+func newServerSuperviseCmd() *cobra.Command {
+	var opts serverSupervisorOptions
+	cmd := &cobra.Command{
+		Use:    "supervise",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return mcserver.RunSupervisor(cmd.Context(), mcserver.SupervisorOptions{
+				StartOptions: mcserver.StartOptions{
+					ServerDir:   opts.serverDir,
+					Command:     opts.command,
+					LogDir:      opts.logDir,
+					RuntimeDir:  opts.runtimeDir,
+					StopTimeout: opts.stopTimeout,
+				},
+			})
+		},
+	}
+	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "")
+	cmd.Flags().StringVar(&opts.command, "command", "", "")
+	cmd.Flags().StringVar(&opts.logDir, "log-dir", "", "")
+	cmd.Flags().StringVar(&opts.runtimeDir, "runtime-dir", "", "")
+	cmd.Flags().DurationVar(&opts.stopTimeout, "stop-timeout", defaultServerStopTimeout, "")
+	_ = cmd.MarkFlagRequired("server-dir")
+	_ = cmd.MarkFlagRequired("command")
+	_ = cmd.MarkFlagRequired("log-dir")
+	_ = cmd.MarkFlagRequired("runtime-dir")
+	return cmd
 }
 
 func newDoctorCmd() *cobra.Command {
@@ -399,6 +482,142 @@ type pullOptions struct {
 	artifactID   string
 	outputDir    string
 	applyDeletes bool
+}
+
+type serverStartOptions struct {
+	serverDir   string
+	command     string
+	logDir      string
+	stopTimeout time.Duration
+}
+
+type serverSupervisorOptions struct {
+	serverStartOptions
+	runtimeDir string
+}
+
+func runServerStart(ctx context.Context, cmd *cobra.Command, opts serverStartOptions) error {
+	resolved, err := resolveServerStartOptions(opts)
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find Agent executable: %w", err)
+	}
+	state, err := mcserver.Start(ctx, executable, resolved)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "Server started.")
+	printServerState(cmd, state)
+	return nil
+}
+
+func runServerStop(cmd *cobra.Command) error {
+	runtimeDir, err := defaultServerRuntimeDir()
+	if err != nil {
+		return err
+	}
+	state, stopped, err := mcserver.Stop(runtimeDir)
+	if err != nil {
+		return err
+	}
+	if !stopped {
+		fmt.Fprintln(cmd.OutOrStdout(), "Server is not running.")
+		return nil
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "Server stopped.")
+	fmt.Fprintf(cmd.OutOrStdout(), "PID: %d\n", state.PID)
+	return nil
+}
+
+func runServerStatus(cmd *cobra.Command) error {
+	runtimeDir, err := defaultServerRuntimeDir()
+	if err != nil {
+		return err
+	}
+	status, err := mcserver.GetStatus(runtimeDir)
+	if err != nil {
+		return err
+	}
+	switch {
+	case status.Running:
+		fmt.Fprintln(cmd.OutOrStdout(), "Server status: running")
+		printServerState(cmd, status.State)
+	case status.Stale:
+		fmt.Fprintln(cmd.OutOrStdout(), "Server status: stale")
+		fmt.Fprintf(cmd.OutOrStdout(), "Recorded PID: %d\n", status.State.PID)
+		fmt.Fprintln(cmd.OutOrStdout(), "The supervisor cannot be verified; no process was signaled.")
+	default:
+		fmt.Fprintln(cmd.OutOrStdout(), "Server status: stopped")
+	}
+	return nil
+}
+
+func resolveServerStartOptions(opts serverStartOptions) (mcserver.StartOptions, error) {
+	configDir, err := agentconfig.DefaultDir()
+	if err != nil {
+		return mcserver.StartOptions{}, err
+	}
+	configPath := filepath.Join(configDir, agentconfig.FileName)
+	if agentconfig.Exists(configPath) {
+		cfg, loadErr := agentconfig.Load(configPath)
+		if loadErr != nil {
+			return mcserver.StartOptions{}, fmt.Errorf("load config %s: %w", configPath, loadErr)
+		}
+		if opts.serverDir == "" {
+			opts.serverDir = cfg.Server.Dir
+		}
+		if opts.command == "" {
+			opts.command = cfg.Server.Command
+		}
+		if opts.logDir == "" {
+			opts.logDir = cfg.Server.LogDir
+		}
+		if opts.stopTimeout == 0 && cfg.Server.StopTimeout != "" {
+			opts.stopTimeout, err = time.ParseDuration(cfg.Server.StopTimeout)
+			if err != nil {
+				return mcserver.StartOptions{}, fmt.Errorf("parse server stopTimeout: %w", err)
+			}
+		}
+	}
+	if opts.serverDir == "" {
+		return mcserver.StartOptions{}, errors.New("server directory is required; pass --server-dir or configure server.dir")
+	}
+	if opts.command == "" {
+		return mcserver.StartOptions{}, errors.New("server command is required; pass --command or configure server.command")
+	}
+	if opts.logDir == "" {
+		opts.logDir = filepath.Join(configDir, "logs")
+	}
+	if opts.stopTimeout == 0 {
+		opts.stopTimeout = defaultServerStopTimeout
+	}
+	return mcserver.StartOptions{
+		ServerDir:   opts.serverDir,
+		Command:     opts.command,
+		LogDir:      opts.logDir,
+		RuntimeDir:  filepath.Join(configDir, "runtime"),
+		StopTimeout: opts.stopTimeout,
+	}, nil
+}
+
+func defaultServerRuntimeDir() (string, error) {
+	configDir, err := agentconfig.DefaultDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, "runtime"), nil
+}
+
+func printServerState(cmd *cobra.Command, state mcserver.State) {
+	fmt.Fprintf(cmd.OutOrStdout(), "PID: %d\n", state.PID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Server dir: %s\n", state.ServerDir)
+	fmt.Fprintf(cmd.OutOrStdout(), "Command: %s\n", state.Command)
+	fmt.Fprintf(cmd.OutOrStdout(), "Started at: %s\n", state.StartedAt.Format(time.RFC3339))
+	fmt.Fprintf(cmd.OutOrStdout(), "Stdout log: %s\n", state.StdoutLog)
+	fmt.Fprintf(cmd.OutOrStdout(), "Stderr log: %s\n", state.StderrLog)
 }
 
 func runPush(ctx context.Context, cmd *cobra.Command, opts pushOptions) error {

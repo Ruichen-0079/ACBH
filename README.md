@@ -152,6 +152,42 @@ Then inspect Coordinator state:
 curl -s http://localhost:6121/v1/groups/<groupId>/state
 ```
 
+## Agent local server process manager
+
+The Agent can start, stop, and inspect one local server-like process. ACBH does not install Java, Minecraft, server jars, mods, or plugins. The launch command and working directory are supplied by the user and can target Vanilla, Fabric, Forge, NeoForge, Paper, Purpur, Mohist, Arclight, or another command-line server.
+
+The current `config.yaml` file is JSON-encoded. An optional server section looks like:
+
+```json
+{
+  "server": {
+    "dir": "C:/minecraft/server",
+    "command": "java -Xmx4G -jar server.jar nogui",
+    "logDir": ".acbh/logs",
+    "stopTimeout": "30s"
+  }
+}
+```
+
+Existing login fields remain in the same file. CLI flags override these server values:
+
+```bash
+go run . server start \
+  --server-dir C:/minecraft/server \
+  --command "java -Xmx4G -jar server.jar nogui" \
+  --log-dir C:/minecraft/server/.acbh/logs \
+  --stop-timeout 30s
+
+go run . server status
+go run . server stop
+```
+
+`server start` launches a detached local supervisor, records runtime state under `<user config dir>/acbh/runtime/server-state.json`, and appends stdout and stderr to separate log files. The default log directory is `<user config dir>/acbh/logs`.
+
+`server stop` asks the verified supervisor to write `stop` to the child process stdin, waits for the configured timeout, and then kills the child if it has not exited. A stale state file is reported without signaling its recorded PID. Logs are append-only and may grow until the user rotates or removes them.
+
+Launch commands are parsed into an executable and arguments without a shell. Shell operators such as pipes and redirection are not supported. Server process control is local-only; it does not elect a host, perform automatic takeover, send heartbeats, or run artifact synchronization.
+
 ## Agent local manifest examples
 
 The Agent can scan a local Minecraft server directory and generate manifests for one artifact kind at a time. This is local manifest generation only; it does not upload files and it is not RCON safe sync.
