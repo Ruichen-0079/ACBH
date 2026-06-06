@@ -42,7 +42,7 @@ The first networked upload path is JSON/base64:
 - `POST /v1/artifacts/manifests` uploads a manifest after objects exist.
 - Coordinator stores objects and manifests in local filesystem storage.
 
-The JSON/base64 object endpoint has a 16 MiB decoded object limit. Multipart or streaming uploads are future work for larger artifacts.
+The JSON/base64 object endpoint has a 16 MiB decoded object limit. Manifest upload has a 1 MiB request body limit. Multipart or streaming uploads are future work for larger artifacts.
 
 Pull reads from Coordinator local storage through manifest and object download endpoints. Local storage remains Coordinator-side only; Agents do not write directly into `.acbh-storage`.
 
