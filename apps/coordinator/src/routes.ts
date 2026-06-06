@@ -10,6 +10,7 @@ import { StoreError } from "./store.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
+const manifestUploadBodyLimitBytes = 1024 * 1024;
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -52,7 +53,7 @@ const uploadObjectSchema = z.object({
   hostId: z.string().min(1),
   hostToken: z.string().min(1),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
-  contentBase64: z.string().min(1),
+  contentBase64: z.string(),
 });
 
 const uploadManifestSchema = z.object({
@@ -81,6 +82,11 @@ const artifactManifestParamsSchema = z.object({
 const objectParamsSchema = z.object({
   groupId: z.string().min(1),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+const hostAuthHeaderSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
 });
 
 export async function registerRoutes(
@@ -120,7 +126,10 @@ export async function registerRoutes(
 
       return handleStoreCall(reply, () => {
         store.verifyHost(body);
-        const content = decodeBase64(body.contentBase64);
+        const content = decodeBase64(body.contentBase64, reply);
+        if (!content) {
+          return reply;
+        }
         if (content.length > jsonObjectUploadDecodedLimitBytes) {
           return reply.code(413).send({
             error: "Payload Too Large",
@@ -159,7 +168,7 @@ export async function registerRoutes(
     },
   );
 
-  app.post("/v1/artifacts/manifests", async (request, reply) => {
+  app.post("/v1/artifacts/manifests", { bodyLimit: manifestUploadBodyLimitBytes }, async (request, reply) => {
     const body = parseBody(uploadManifestSchema, request, reply);
     if (!body) {
       return reply;
@@ -295,10 +304,16 @@ export async function registerRoutes(
       return reply;
     }
 
-    return handleStoreCall(reply, () => ({
-      groupId: params.groupId,
-      artifacts: store.listArtifacts(params.groupId),
-    }));
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+
+      return {
+        groupId: params.groupId,
+        artifacts: store.listArtifacts(params.groupId),
+      };
+    });
   });
 
   app.get("/v1/groups/:groupId/artifacts/latest", async (request, reply) => {
@@ -308,7 +323,13 @@ export async function registerRoutes(
       return reply;
     }
 
-    return handleStoreCall(reply, () => store.getLatestArtifact(params.groupId, query.artifactKind));
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+
+      return store.getLatestArtifact(params.groupId, query.artifactKind);
+    });
   });
 
   app.get("/v1/groups/:groupId/artifacts/:artifactKind/:artifactId/manifest", async (request, reply) => {
@@ -318,6 +339,10 @@ export async function registerRoutes(
     }
 
     return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+
       store.getArtifact(params.groupId, params.artifactKind, params.artifactId);
       return handleStorageCall(reply, async () => ({
         metadata: store.getArtifact(params.groupId, params.artifactKind, params.artifactId),
@@ -336,16 +361,22 @@ export async function registerRoutes(
       return reply;
     }
 
-    return handleStorageCall(reply, async () => {
-      const content = await storage.readObject({
-        groupId: params.groupId,
-        sha256: params.sha256,
-      });
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
 
-      return {
-        sha256: params.sha256,
-        contentBase64: content.toString("base64"),
-      };
+      return handleStorageCall(reply, async () => {
+        const content = await storage.readObject({
+          groupId: params.groupId,
+          sha256: params.sha256,
+        });
+
+        return {
+          sha256: params.sha256,
+          contentBase64: content.toString("base64"),
+        };
+      });
     });
   });
 }
@@ -456,8 +487,52 @@ function statusText(statusCode: number): string {
   }
 }
 
-function decodeBase64(value: string): Buffer {
+function decodeBase64(value: string, reply: FastifyReply): Buffer | null {
+  if (!isStrictBase64(value)) {
+    reply.code(400).send({
+      error: "Bad Request",
+      message: "contentBase64 must be valid standard base64",
+    });
+    return null;
+  }
+
   return Buffer.from(value, "base64");
+}
+
+function isStrictBase64(value: string): boolean {
+  if (value === "") {
+    return true;
+  }
+  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+}
+
+function verifyRequestHost(
+  store: InMemoryCoordinatorStore,
+  groupId: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): boolean {
+  const result = hostAuthHeaderSchema.safeParse({
+    hostId: request.headers["x-acbh-host-id"],
+    hostToken: request.headers["x-acbh-host-token"],
+  });
+
+  if (!result.success) {
+    reply.code(401).send({
+      error: "Unauthorized",
+      message: "Host authentication headers are required",
+      issues: result.error.issues,
+    });
+    return false;
+  }
+
+  store.verifyHost({
+    groupId,
+    hostId: result.data.hostId,
+    hostToken: result.data.hostToken,
+  });
+
+  return true;
 }
 
 function sha256(content: Uint8Array): string {
