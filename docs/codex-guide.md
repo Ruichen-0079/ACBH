@@ -45,6 +45,8 @@ Create a runnable repository skeleton:
 - Do not implement RCON while working on manifest/object push-pull.
 - Do not start or stop Minecraft while working on manifest/object push-pull.
 - Do not add host election while working on manifest/object push-pull.
+- Do not use JSON/base64 transfer for real Minecraft region files; use the streaming object path.
+- Do not add RCON, Minecraft process control, or host election while hardening streaming transfer.
 
 ## Useful issues
 

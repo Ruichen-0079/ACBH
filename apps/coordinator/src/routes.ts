@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ArtifactKind } from "./domain/artifacts.js";
 import type { CoordinatorStorage } from "./storage/index.js";
-import { StorageError } from "./storage/index.js";
+import { StorageError, StorageObjectTooLargeError } from "./storage/index.js";
 import type { ArtifactManifest } from "./storage/index.js";
 import type { InMemoryCoordinatorStore } from "./store.js";
 import { StoreError } from "./store.js";
@@ -11,6 +12,7 @@ import { StoreError } from "./store.js";
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
 const manifestUploadBodyLimitBytes = 1024 * 1024;
+export const defaultMaxObjectBytes = 256 * 1024 * 1024;
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -84,7 +86,17 @@ const objectParamsSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
+const streamingObjectParamsSchema = z.object({
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
 const hostAuthHeaderSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+});
+
+const streamingUploadHeaderSchema = z.object({
+  groupId: z.string().min(1),
   hostId: z.string().min(1),
   hostToken: z.string().min(1),
 });
@@ -93,7 +105,9 @@ export async function registerRoutes(
   app: FastifyInstance,
   store: InMemoryCoordinatorStore,
   storage: CoordinatorStorage,
+  options?: { maxObjectBytes?: number },
 ): Promise<void> {
+  const maxObjectBytes = resolveMaxObjectBytes(options?.maxObjectBytes);
   app.get("/health", async () => {
     return {
       ok: true,
@@ -167,6 +181,80 @@ export async function registerRoutes(
       });
     },
   );
+
+  app.put("/v1/artifacts/objects/:sha256", async (request, reply) => {
+    const params = parseParams(streamingObjectParamsSchema, request, reply);
+    const authResult = streamingUploadHeaderSchema.safeParse({
+      groupId: request.headers["x-acbh-group-id"],
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!params) {
+      return reply;
+    }
+    if (!authResult.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        message: "Streaming upload authentication headers are required",
+        issues: authResult.error.issues,
+      });
+    }
+    const bodyStream = request.body;
+    if (!(bodyStream instanceof Readable)) {
+      return reply.code(400).send({
+        error: "Bad Request",
+        message: "Request body must be application/octet-stream",
+      });
+    }
+
+    const declaredLength = parseContentLength(request.headers["content-length"]);
+    if (declaredLength !== null && declaredLength > maxObjectBytes) {
+      bodyStream.resume();
+      return reply.code(413).send({
+        error: "Payload Too Large",
+        message: `Object upload exceeds configured limit of ${maxObjectBytes} bytes`,
+      });
+    }
+
+    return handleStoreCall(reply, () => {
+      store.verifyHost(authResult.data);
+
+      return handleStorageCall(reply, async () => {
+        const exists = await storage.objectExists({
+          groupId: authResult.data.groupId,
+          sha256: params.sha256,
+        });
+        if (exists) {
+          bodyStream.resume();
+          const existing = await storage.createObjectReadStream({
+            groupId: authResult.data.groupId,
+            sha256: params.sha256,
+          });
+          existing.stream.destroy();
+          return {
+            ok: true,
+            sha256: params.sha256,
+            exists: true,
+            size: existing.size,
+          };
+        }
+
+        const saved = await storage.saveObjectFromStream({
+          groupId: authResult.data.groupId,
+          sha256: params.sha256,
+          stream: bodyStream,
+          maxBytes: maxObjectBytes,
+        });
+
+        return {
+          ok: true,
+          sha256: params.sha256,
+          exists: false,
+          size: saved.size,
+        };
+      });
+    });
+  });
 
   app.post("/v1/artifacts/manifests", { bodyLimit: manifestUploadBodyLimitBytes }, async (request, reply) => {
     const body = parseBody(uploadManifestSchema, request, reply);
@@ -367,15 +455,14 @@ export async function registerRoutes(
       }
 
       return handleStorageCall(reply, async () => {
-        const content = await storage.readObject({
+        const object = await storage.createObjectReadStream({
           groupId: params.groupId,
           sha256: params.sha256,
         });
 
-        return {
-          sha256: params.sha256,
-          contentBase64: content.toString("base64"),
-        };
+        reply.type("application/octet-stream");
+        reply.header("content-length", object.size);
+        return reply.send(object.stream);
       });
     });
   });
@@ -461,7 +548,12 @@ async function handleStorageCall<T>(
     return await call();
   } catch (error) {
     if (error instanceof StorageError) {
-      const statusCode = error.name === "StorageNotFoundError" ? 404 : 400;
+      const statusCode =
+        error instanceof StorageObjectTooLargeError
+          ? 413
+          : error.name === "StorageNotFoundError"
+            ? 404
+            : 400;
       return reply.code(statusCode).send({
         error: statusText(statusCode),
         message: error.message,
@@ -470,6 +562,21 @@ async function handleStorageCall<T>(
 
     throw error;
   }
+}
+
+function resolveMaxObjectBytes(value = Number(process.env.ACBH_MAX_OBJECT_BYTES ?? defaultMaxObjectBytes)): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("ACBH_MAX_OBJECT_BYTES must be a non-negative safe integer");
+  }
+  return value;
+}
+
+function parseContentLength(value: string | undefined): number | null {
+  if (value === undefined) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function statusText(statusCode: number): string {

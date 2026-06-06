@@ -183,6 +183,7 @@ func newPushCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.manifestPath, "manifest", "", "Manifest JSON to push")
 	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Server directory containing manifest files")
+	cmd.Flags().BoolVar(&opts.legacyJSONUpload, "legacy-json-upload", false, "Use compatibility JSON/base64 object upload")
 	_ = cmd.MarkFlagRequired("manifest")
 	_ = cmd.MarkFlagRequired("server-dir")
 	return cmd
@@ -337,8 +338,9 @@ type scanOptions struct {
 }
 
 type pushOptions struct {
-	manifestPath string
-	serverDir    string
+	manifestPath     string
+	serverDir        string
+	legacyJSONUpload bool
 }
 
 type pullOptions struct {
@@ -359,10 +361,11 @@ func runPush(ctx context.Context, cmd *cobra.Command, opts pushOptions) error {
 	}
 
 	summary, err := artifactsync.Push(ctx, artifactsync.PushOptions{
-		ManifestPath: opts.manifestPath,
-		ServerDir:    opts.serverDir,
-		Config:       cfg,
-		Client:       client,
+		ManifestPath:     opts.manifestPath,
+		ServerDir:        opts.serverDir,
+		Config:           cfg,
+		Client:           client,
+		LegacyJSONUpload: opts.legacyJSONUpload,
 	})
 	if err != nil {
 		return err
@@ -405,6 +408,7 @@ func runPull(ctx context.Context, cmd *cobra.Command, opts pullOptions) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind: %s\n", summary.ArtifactKind)
 	fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID: %s\n", summary.ArtifactID)
 	fmt.Fprintf(cmd.OutOrStdout(), "Written files: %d\n", summary.WrittenFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Downloaded objects: %d\n", summary.DownloadedObjects)
 	fmt.Fprintf(cmd.OutOrStdout(), "Skipped files: %d\n", summary.SkippedFiles)
 	fmt.Fprintf(cmd.OutOrStdout(), "Pending deletes: %d\n", summary.PendingDeletes)
 	fmt.Fprintf(cmd.OutOrStdout(), "Applied deletes: %d\n", summary.AppliedDeletes)

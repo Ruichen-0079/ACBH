@@ -1,8 +1,10 @@
 package artifactsync
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,11 +61,32 @@ func TestPushUploadsObjectsBeforeManifestAndHandlesDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Push() error = %v", err)
 	}
-	if strings.Join(client.calls, ",") != "uploadObject,uploadManifest" {
+	if strings.Join(client.calls, ",") != "uploadObjectStream,uploadManifest" {
 		t.Fatalf("calls = %#v", client.calls)
 	}
 	if got.UploadedObjects != 1 || got.DeletedEntries != 1 || got.CoordinatorStatus != "available" {
 		t.Fatalf("summary = %#v", got)
+	}
+}
+
+func TestPushCanUseLegacyJSONUpload(t *testing.T) {
+	serverDir := t.TempDir()
+	writeFile(t, serverDir, "world/region/r.0.0.mca", "region data")
+	manifestPath := writeManifest(t, t.TempDir(), testManifest(sha256Hex([]byte("region data"))))
+
+	client := &fakeClient{}
+	_, err := Push(context.Background(), PushOptions{
+		ManifestPath:     manifestPath,
+		ServerDir:        serverDir,
+		Config:           testConfig(),
+		Client:           client,
+		LegacyJSONUpload: true,
+	})
+	if err != nil {
+		t.Fatalf("Push() error = %v", err)
+	}
+	if strings.Join(client.calls, ",") != "uploadObject,uploadManifest" {
+		t.Fatalf("calls = %#v", client.calls)
 	}
 }
 
@@ -133,6 +156,9 @@ func TestPullWritesFilesUnderOutputDir(t *testing.T) {
 	if got.WrittenFiles != 1 {
 		t.Fatalf("WrittenFiles = %d, want 1", got.WrittenFiles)
 	}
+	if strings.Join(client.calls, ",") != "downloadObjectStream" {
+		t.Fatalf("calls = %#v, want streaming download", client.calls)
+	}
 	if data := readFile(t, outputDir, "world/region/r.0.0.mca"); string(data) != "region data" {
 		t.Fatalf("restored content = %q", string(data))
 	}
@@ -176,6 +202,17 @@ func TestPullVerifiesSHA256(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("Pull() error = %v, want sha mismatch", err)
+	}
+	target := filepath.Join(outputDir, "world", "region", "r.0.0.mca")
+	if fileExists(target) {
+		t.Fatal("hash-mismatched object was moved into final path")
+	}
+	temporaryFiles, globErr := filepath.Glob(filepath.Join(filepath.Dir(target), ".acbh-object-*.tmp"))
+	if globErr != nil {
+		t.Fatalf("Glob() error = %v", globErr)
+	}
+	if len(temporaryFiles) != 0 {
+		t.Fatalf("temporary files remain after failed pull: %#v", temporaryFiles)
 	}
 }
 
@@ -245,6 +282,34 @@ func (c *fakeClient) UploadObject(ctx context.Context, req coordinator.UploadObj
 	return coordinator.UploadObjectResponse{OK: true, SHA256: req.SHA256, Exists: exists}, nil
 }
 
+func (c *fakeClient) UploadObjectStream(
+	ctx context.Context,
+	auth coordinator.ArtifactAuth,
+	sha256 string,
+	content io.Reader,
+	size int64,
+) (coordinator.UploadObjectResponse, error) {
+	c.calls = append(c.calls, "uploadObjectStream")
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return coordinator.UploadObjectResponse{}, err
+	}
+	if int64(len(data)) != size {
+		return coordinator.UploadObjectResponse{}, io.ErrUnexpectedEOF
+	}
+	if c.objects == nil {
+		c.objects = make(map[string][]byte)
+	}
+	_, exists := c.objects[sha256]
+	c.objects[sha256] = data
+	return coordinator.UploadObjectResponse{
+		OK:     true,
+		SHA256: sha256,
+		Exists: exists,
+		Size:   size,
+	}, nil
+}
+
 func (c *fakeClient) UploadManifest(ctx context.Context, req coordinator.UploadManifestRequest) (coordinator.UploadManifestResponse, error) {
 	c.calls = append(c.calls, "uploadManifest")
 	c.manifest = req.Manifest
@@ -262,8 +327,10 @@ func (c *fakeClient) DownloadManifest(ctx context.Context, auth coordinator.Arti
 	}, nil
 }
 
-func (c *fakeClient) DownloadObject(ctx context.Context, auth coordinator.ArtifactAuth, sha256 string) ([]byte, error) {
-	return c.objects[sha256], nil
+func (c *fakeClient) DownloadObjectStream(ctx context.Context, auth coordinator.ArtifactAuth, sha256 string) (io.ReadCloser, int64, error) {
+	c.calls = append(c.calls, "downloadObjectStream")
+	content := c.objects[sha256]
+	return io.NopCloser(bytes.NewReader(content)), int64(len(content)), nil
 }
 
 func testConfig() agentconfig.Config {

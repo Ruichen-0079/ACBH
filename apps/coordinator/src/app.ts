@@ -11,6 +11,7 @@ export async function buildApp(options?: {
   store?: InMemoryCoordinatorStore;
   storage?: CoordinatorStorage;
   logger?: boolean;
+  maxObjectBytes?: number;
 }) {
   const app = Fastify({ logger: options?.logger ?? true });
   const store = options?.store ?? createInMemoryCoordinatorStore();
@@ -20,7 +21,13 @@ export async function buildApp(options?: {
     origin: true,
   });
 
-  await registerRoutes(app, store, storage);
+  app.addContentTypeParser("application/octet-stream", (_request, payload, done) => {
+    done(null, payload);
+  });
+
+  await registerRoutes(app, store, storage, {
+    maxObjectBytes: options?.maxObjectBytes,
+  });
 
   return app;
 }

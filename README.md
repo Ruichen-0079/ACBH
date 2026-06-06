@@ -200,6 +200,15 @@ go run . push \
   --server-dir C:/minecraft/server
 ```
 
+Push streams file objects as `application/octet-stream` by default, so files are not base64-encoded or held entirely in Agent memory. The compatibility JSON/base64 upload can be selected for small test artifacts only:
+
+```bash
+go run . push \
+  --manifest ./snap_000001.manifest.json \
+  --server-dir C:/minecraft/server \
+  --legacy-json-upload
+```
+
 Pull the latest world snapshot and restore files into a separate directory:
 
 ```bash
@@ -219,7 +228,9 @@ go run . pull \
   --apply-deletes
 ```
 
-The current push path uploads objects as JSON/base64 and is intended for small V1 test artifacts. Large streaming or multipart upload is future work. Manifest upload has a 1 MiB request body limit.
+Object uploads and downloads use binary streaming by default. `ACBH_MAX_OBJECT_BYTES` sets the Coordinator upload limit in bytes and defaults to `268435456` (256 MiB). `POST /v1/artifacts/objects` remains a 16 MiB JSON/base64 compatibility endpoint for testing only. Manifest upload has a 1 MiB request body limit.
+
+Current transfers are not resumable. Interrupted objects must be transferred again; resumable chunks and remote object storage remain future work.
 
 ## Documentation
 

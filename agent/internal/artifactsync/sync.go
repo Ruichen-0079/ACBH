@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -17,17 +18,19 @@ import (
 
 type Client interface {
 	UploadObject(ctx context.Context, req coordinator.UploadObjectRequest) (coordinator.UploadObjectResponse, error)
+	UploadObjectStream(ctx context.Context, auth coordinator.ArtifactAuth, sha256 string, content io.Reader, size int64) (coordinator.UploadObjectResponse, error)
 	UploadManifest(ctx context.Context, req coordinator.UploadManifestRequest) (coordinator.UploadManifestResponse, error)
 	GetLatestArtifact(ctx context.Context, auth coordinator.ArtifactAuth, artifactKind manifest.ArtifactKind) (coordinator.ArtifactMetadata, error)
 	DownloadManifest(ctx context.Context, auth coordinator.ArtifactAuth, artifactKind manifest.ArtifactKind, artifactID string) (coordinator.DownloadManifestResponse, error)
-	DownloadObject(ctx context.Context, auth coordinator.ArtifactAuth, sha256 string) ([]byte, error)
+	DownloadObjectStream(ctx context.Context, auth coordinator.ArtifactAuth, sha256 string) (io.ReadCloser, int64, error)
 }
 
 type PushOptions struct {
-	ManifestPath string
-	ServerDir    string
-	Config       agentconfig.Config
-	Client       Client
+	ManifestPath     string
+	ServerDir        string
+	Config           agentconfig.Config
+	Client           Client
+	LegacyJSONUpload bool
 }
 
 type PushSummary struct {
@@ -50,13 +53,14 @@ type PullOptions struct {
 }
 
 type PullSummary struct {
-	ArtifactKind   manifest.ArtifactKind
-	ArtifactID     string
-	WrittenFiles   int
-	SkippedFiles   int
-	PendingDeletes int
-	AppliedDeletes int
-	TotalBytes     int64
+	ArtifactKind      manifest.ArtifactKind
+	ArtifactID        string
+	WrittenFiles      int
+	DownloadedObjects int
+	SkippedFiles      int
+	PendingDeletes    int
+	AppliedDeletes    int
+	TotalBytes        int64
 }
 
 func Push(ctx context.Context, opts PushOptions) (PushSummary, error) {
@@ -87,6 +91,11 @@ func Push(ctx context.Context, opts PushOptions) (PushSummary, error) {
 		ArtifactKind: loaded.ArtifactKind,
 		ArtifactID:   loaded.ArtifactID,
 	}
+	auth := coordinator.ArtifactAuth{
+		GroupID:   opts.Config.GroupID,
+		HostID:    opts.Config.HostID,
+		HostToken: opts.Config.HostToken,
+	}
 
 	for _, file := range loaded.Files {
 		if file.Deleted {
@@ -97,21 +106,38 @@ func Push(ctx context.Context, opts PushOptions) (PushSummary, error) {
 		if err != nil {
 			return PushSummary{}, err
 		}
-		content, err := os.ReadFile(path)
+		actual, size, err := hashFile(path)
 		if err != nil {
 			return PushSummary{}, fmt.Errorf("read manifest file %s: %w", file.Path, err)
 		}
-		actual := sha256Hex(content)
 		if actual != file.SHA256 {
 			return PushSummary{}, fmt.Errorf("local file %s sha256 mismatch: manifest=%s actual=%s", file.Path, file.SHA256, actual)
 		}
-		resp, err := opts.Client.UploadObject(ctx, coordinator.UploadObjectRequest{
-			GroupID:       opts.Config.GroupID,
-			HostID:        opts.Config.HostID,
-			HostToken:     opts.Config.HostToken,
-			SHA256:        file.SHA256,
-			ContentBase64: base64.StdEncoding.EncodeToString(content),
-		})
+		if size != file.Size {
+			return PushSummary{}, fmt.Errorf("local file %s size mismatch: manifest=%d actual=%d", file.Path, file.Size, size)
+		}
+
+		var resp coordinator.UploadObjectResponse
+		if opts.LegacyJSONUpload {
+			content, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return PushSummary{}, fmt.Errorf("read manifest file %s: %w", file.Path, readErr)
+			}
+			resp, err = opts.Client.UploadObject(ctx, coordinator.UploadObjectRequest{
+				GroupID:       opts.Config.GroupID,
+				HostID:        opts.Config.HostID,
+				HostToken:     opts.Config.HostToken,
+				SHA256:        file.SHA256,
+				ContentBase64: base64.StdEncoding.EncodeToString(content),
+			})
+		} else {
+			content, openErr := os.Open(path)
+			if openErr != nil {
+				return PushSummary{}, fmt.Errorf("open manifest file %s: %w", file.Path, openErr)
+			}
+			resp, err = opts.Client.UploadObjectStream(ctx, auth, file.SHA256, content, size)
+			_ = content.Close()
+		}
 		if err != nil {
 			return PushSummary{}, err
 		}
@@ -119,7 +145,7 @@ func Push(ctx context.Context, opts PushOptions) (PushSummary, error) {
 			summary.SkippedObjects++
 		} else {
 			summary.UploadedObjects++
-			summary.TotalBytesUploaded += int64(len(content))
+			summary.TotalBytesUploaded += size
 		}
 	}
 
@@ -205,26 +231,21 @@ func Pull(ctx context.Context, opts PullOptions) (PullSummary, error) {
 			continue
 		}
 
-		content, err := opts.Client.DownloadObject(ctx, auth, file.SHA256)
-		if err != nil {
-			return PullSummary{}, err
-		}
-		actual := sha256Hex(content)
-		if actual != file.SHA256 {
-			return PullSummary{}, fmt.Errorf("downloaded object %s sha256 mismatch: manifest=%s actual=%s", file.Path, file.SHA256, actual)
-		}
-		if existing, err := os.ReadFile(path); err == nil && sha256Hex(existing) == file.SHA256 {
+		if actual, _, err := hashFile(path); err == nil && actual == file.SHA256 {
 			summary.SkippedFiles++
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return PullSummary{}, fmt.Errorf("create parent directory for %s: %w", file.Path, err)
 		}
-		if err := os.WriteFile(path, content, 0o644); err != nil {
-			return PullSummary{}, fmt.Errorf("write %s: %w", file.Path, err)
+
+		size, err := downloadVerifiedObject(ctx, opts.Client, auth, file.SHA256, file.Size, path)
+		if err != nil {
+			return PullSummary{}, fmt.Errorf("restore %s: %w", file.Path, err)
 		}
 		summary.WrittenFiles++
-		summary.TotalBytes += int64(len(content))
+		summary.DownloadedObjects++
+		summary.TotalBytes += size
 	}
 
 	return summary, nil
@@ -249,6 +270,95 @@ func safeJoin(root string, manifestPath string) (string, error) {
 func sha256Hex(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
+}
+
+func hashFile(path string) (string, int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	size, err := io.Copy(hash, file)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), size, nil
+}
+
+func downloadVerifiedObject(
+	ctx context.Context,
+	client Client,
+	auth coordinator.ArtifactAuth,
+	expectedSHA string,
+	expectedSize int64,
+	targetPath string,
+) (int64, error) {
+	body, _, err := client.DownloadObjectStream(ctx, auth, expectedSHA)
+	if err != nil {
+		return 0, err
+	}
+
+	temporary, err := os.CreateTemp(filepath.Dir(targetPath), ".acbh-object-*.tmp")
+	if err != nil {
+		body.Close()
+		return 0, fmt.Errorf("create temporary file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	keepTemporary := false
+	defer func() {
+		if !keepTemporary {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(temporary, hash), body)
+	bodyCloseErr := body.Close()
+	syncErr := temporary.Sync()
+	fileCloseErr := temporary.Close()
+	if copyErr != nil {
+		return 0, fmt.Errorf("download object: %w", copyErr)
+	}
+	if bodyCloseErr != nil {
+		return 0, fmt.Errorf("close download: %w", bodyCloseErr)
+	}
+	if syncErr != nil {
+		return 0, fmt.Errorf("sync temporary file: %w", syncErr)
+	}
+	if fileCloseErr != nil {
+		return 0, fmt.Errorf("close temporary file: %w", fileCloseErr)
+	}
+
+	actualSHA := hex.EncodeToString(hash.Sum(nil))
+	if actualSHA != expectedSHA {
+		return 0, fmt.Errorf("downloaded object sha256 mismatch: manifest=%s actual=%s", expectedSHA, actualSHA)
+	}
+	if size != expectedSize {
+		return 0, fmt.Errorf("downloaded object size mismatch: manifest=%d actual=%d", expectedSize, size)
+	}
+	if err := os.Chmod(temporaryPath, 0o644); err != nil {
+		return 0, fmt.Errorf("set file mode: %w", err)
+	}
+	if err := replaceFile(temporaryPath, targetPath); err != nil {
+		return 0, err
+	}
+	keepTemporary = true
+	return size, nil
+}
+
+func replaceFile(temporaryPath string, targetPath string) error {
+	if err := os.Rename(temporaryPath, targetPath); err == nil {
+		return nil
+	}
+	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("replace target file: %w", err)
+	}
+	if err := os.Rename(temporaryPath, targetPath); err != nil {
+		return fmt.Errorf("move verified object into place: %w", err)
+	}
+	return nil
 }
 
 func exists(path string) bool {

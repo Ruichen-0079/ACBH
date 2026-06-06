@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
@@ -39,6 +40,31 @@ test("rejects object content when sha256 does not match", async () => {
       }),
       StorageValidationError,
     );
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("streams object writes and reads without buffering in the storage interface", async () => {
+  const { storage, root } = await testStorage();
+  try {
+    const content = Buffer.from("streamed region data");
+    const sha256 = hash(content);
+    const saved = await storage.saveObjectFromStream({
+      groupId: "grp_123",
+      sha256,
+      stream: Readable.from([content.subarray(0, 8), content.subarray(8)]),
+      maxBytes: content.byteLength,
+    });
+    assert.equal(saved.size, content.byteLength);
+
+    const opened = await storage.createObjectReadStream({ groupId: "grp_123", sha256 });
+    const chunks: Buffer[] = [];
+    for await (const chunk of opened.stream) {
+      chunks.push(Buffer.from(chunk));
+    }
+    assert.equal(opened.size, content.byteLength);
+    assert.deepEqual(Buffer.concat(chunks), content);
   } finally {
     await rm(root, { force: true, recursive: true });
   }
