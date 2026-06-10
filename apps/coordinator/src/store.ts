@@ -1,5 +1,12 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ArtifactKind } from "./domain/artifacts.js";
+import type {
+  TunnelMode,
+  TunnelStatus,
+  TunnelSession,
+  PlayerSession,
+  HostTunnelPresence,
+} from "./network.js";
 
 export type MemberRole = "owner" | "member";
 
@@ -212,6 +219,8 @@ type GroupRecord = {
   lastElection: ElectionResult | null;
   activeTakeoverAssignmentId: string | null;
   takeoverAssignments: Map<string, TakeoverAssignmentRecord>;
+  playerSessions: Map<string, PlayerSession>;
+  tunnelSessions: Map<string, TunnelSession>;
 };
 
 export type GroupSnapshot = {
@@ -266,6 +275,7 @@ type StoreOptions = {
   assignmentTtlMs?: number;
   retentionPerKind?: number;
   gcMinAgeMs?: number;
+  tunnelSessionTtlMs?: number;
   onMutation?: () => void;
 };
 
@@ -273,6 +283,7 @@ const defaultHeartbeatTimeoutMs = 30_000;
 const defaultAssignmentTtlMs = 60_000;
 const defaultRetentionPerKind = 5;
 const defaultGcMinAgeMs = 3_600_000;
+const defaultTunnelSessionTtlMs = 300_000;
 const ALL_ARTIFACT_KINDS: ArtifactKind[] = ["world-snapshot", "server-pack", "admin-state"];
 const fourGiB = 4 * 1024 * 1024 * 1024;
 const tenGiB = 10 * 1024 * 1024 * 1024;
@@ -294,6 +305,7 @@ export class InMemoryCoordinatorStore {
   readonly assignmentTtlMs: number;
   readonly retentionPerKind: number;
   readonly gcMinAgeMs: number;
+  readonly tunnelSessionTtlMs: number;
   private readonly onMutation?: () => void;
 
   constructor(options: StoreOptions = {}) {
@@ -306,6 +318,8 @@ export class InMemoryCoordinatorStore {
       options.retentionPerKind ?? positiveEnvInteger("ACBH_ARTIFACT_RETENTION_PER_KIND", defaultRetentionPerKind);
     this.gcMinAgeMs =
       options.gcMinAgeMs ?? positiveEnvInteger("ACBH_GC_MIN_AGE_MS", defaultGcMinAgeMs);
+    this.tunnelSessionTtlMs =
+      options.tunnelSessionTtlMs ?? positiveEnvInteger("ACBH_TUNNEL_SESSION_TTL_MS", defaultTunnelSessionTtlMs);
     this.onMutation = options.onMutation;
   }
 
@@ -391,6 +405,8 @@ export class InMemoryCoordinatorStore {
         lastElection: g.lastElection,
         activeTakeoverAssignmentId: g.activeTakeoverAssignmentId,
         takeoverAssignments: new Map(g.takeoverAssignments.map((a) => [a.assignmentId, a])),
+        playerSessions: new Map(),
+        tunnelSessions: new Map(),
       };
       store.groups.set(g.groupId, group);
     }
@@ -437,6 +453,8 @@ export class InMemoryCoordinatorStore {
       lastElection: null,
       activeTakeoverAssignmentId: null,
       takeoverAssignments: new Map(),
+      playerSessions: new Map(),
+      tunnelSessions: new Map(),
     });
 
     this.triggerMutation();
@@ -1130,6 +1148,112 @@ export class InMemoryCoordinatorStore {
     }
 
     return artifact;
+  }
+
+  createPlayerSession(input: { groupId: string; displayName?: string }): PlayerSession {
+    const group = this.requireGroup(input.groupId);
+    const now = this.now();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + this.tunnelSessionTtlMs).toISOString();
+    const playerId = createId("plyr");
+
+    const session: PlayerSession = {
+      playerId,
+      groupId: group.groupId,
+      displayName: input.displayName,
+      createdAt: nowIso,
+      expiresAt,
+    };
+
+    group.playerSessions.set(playerId, session);
+    return { ...session };
+  }
+
+  getPlayerSession(groupId: string, playerId: string): PlayerSession {
+    const group = this.requireGroup(groupId);
+    const session = group.playerSessions.get(playerId);
+    if (!session) {
+      throw new StoreError(404, "Player session does not exist");
+    }
+    return { ...session };
+  }
+
+  createTunnelSession(input: { groupId: string; playerId: string }): TunnelSession {
+    const group = this.requireGroup(input.groupId);
+
+    const playerSession = group.playerSessions.get(input.playerId);
+    if (!playerSession) {
+      throw new StoreError(404, "Player session does not exist");
+    }
+
+    if (group.currentHostId === null) {
+      throw new StoreError(400, "Group has no current host; cannot create tunnel session");
+    }
+
+    const now = this.now();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + this.tunnelSessionTtlMs).toISOString();
+    const sessionId = createId("tun");
+
+    const session: TunnelSession = {
+      sessionId,
+      groupId: group.groupId,
+      hostId: group.currentHostId,
+      playerId: input.playerId,
+      mode: "relay",
+      status: "pending",
+      currentHostGeneration: group.currentHostGeneration,
+      createdAt: nowIso,
+      expiresAt,
+    };
+
+    group.tunnelSessions.set(sessionId, session);
+    return { ...session };
+  }
+
+  getTunnelSession(groupId: string, sessionId: string): TunnelSession {
+    const group = this.requireGroup(groupId);
+    const session = group.tunnelSessions.get(sessionId);
+    if (!session) {
+      throw new StoreError(404, "Tunnel session does not exist");
+    }
+    return { ...session };
+  }
+
+  updateTunnelSessionStatus(
+    groupId: string,
+    sessionId: string,
+    status: TunnelStatus,
+  ): TunnelSession {
+    const group = this.requireGroup(groupId);
+    const session = group.tunnelSessions.get(sessionId);
+    if (!session) {
+      throw new StoreError(404, "Tunnel session does not exist");
+    }
+    session.status = status;
+    return { ...session };
+  }
+
+  expireTunnelSessions(now?: Date): void {
+    const nowDate = now ?? this.now();
+    const nowMs = nowDate.getTime();
+
+    for (const group of this.groups.values()) {
+      for (const [sessionId, session] of group.tunnelSessions) {
+        if (session.status !== "expired") {
+          const expiresMs = Date.parse(session.expiresAt);
+          if (Number.isFinite(expiresMs) && expiresMs <= nowMs) {
+            session.status = "expired";
+          }
+        }
+      }
+      for (const [playerId, player] of group.playerSessions) {
+        const expiresMs = Date.parse(player.expiresAt);
+        if (Number.isFinite(expiresMs) && expiresMs <= nowMs) {
+          group.playerSessions.delete(playerId);
+        }
+      }
+    }
   }
 
   private requireGroup(groupId: string): GroupRecord {

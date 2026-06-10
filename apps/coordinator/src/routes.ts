@@ -8,6 +8,7 @@ import { StorageError, StorageObjectTooLargeError } from "./storage/index.js";
 import type { ArtifactManifest } from "./storage/index.js";
 import type { InMemoryCoordinatorStore, GcBackend } from "./store.js";
 import { StoreError } from "./store.js";
+import type { TunnelSession, PlayerSession } from "./network.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
@@ -129,6 +130,27 @@ const artifactManifestParamsSchema = z.object({
   groupId: z.string().min(1),
   artifactKind: z.enum(artifactKinds),
   artifactId: z.string().min(1),
+});
+
+const playerSessionParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const playerSessionCreateSchema = z.object({
+  displayName: z.string().trim().min(1).max(80).optional(),
+});
+
+const tunnelSessionParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const tunnelSessionGetParamsSchema = z.object({
+  groupId: z.string().min(1),
+  sessionId: z.string().min(1),
+});
+
+const tunnelSessionCreateSchema = z.object({
+  playerId: z.string().min(1),
 });
 
 const objectParamsSchema = z.object({
@@ -462,6 +484,50 @@ export async function registerRoutes(
       }
       throw error;
     }
+  });
+
+  app.post("/v1/groups/:groupId/tunnel-sessions", async (request, reply) => {
+    const params = parseParams(tunnelSessionParamsSchema, request, reply);
+    const body = parseBody(tunnelSessionCreateSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      const session = store.createTunnelSession({
+        groupId: params.groupId,
+        playerId: body.playerId,
+      });
+      return { ...session };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/tunnel-sessions/:sessionId", async (request, reply) => {
+    const params = parseParams(tunnelSessionGetParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      const session = store.getTunnelSession(params.groupId, params.sessionId);
+      return { ...session };
+    });
+  });
+
+  app.post("/v1/groups/:groupId/player-sessions", async (request, reply) => {
+    const params = parseParams(playerSessionParamsSchema, request, reply);
+    const body = parseBody(playerSessionCreateSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      const session = store.createPlayerSession({
+        groupId: params.groupId,
+        displayName: body.displayName,
+      });
+      return { ...session };
+    });
   });
 
   app.post("/v1/groups", async (request, reply) => {

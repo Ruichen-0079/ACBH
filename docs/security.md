@@ -131,3 +131,27 @@ Never print these values in logs:
 - storage credentials
 
 RCON passwords are runtime-only Agent inputs. `safe-sync` accepts the password from `--rcon-password` or `ACBH_RCON_PASSWORD`; it does not write the password to Agent config, manifests, Coordinator storage, or command output.
+
+## Player tunnel and session security
+
+Player-to-host tunneling is introduced in PR26 as control-plane architecture
+groundwork. The following rules apply:
+
+- Tunnel session API responses must never expose host tokens, takeover tokens,
+  takeover token hashes, or the host's local Minecraft address.
+- Player authentication is an **MVP placeholder**. `POST /v1/groups/:groupId/player-sessions`
+  currently accepts only a `displayName`. There is no player credential
+  verification, session token, or access key check. This is explicitly not
+  final and must be hardened in a future PR.
+- Tunnel sessions bind to `currentHostId` and `currentHostGeneration` at
+  creation time. A stale generation cannot be used to create a tunnel session
+  that bypasses a new current host.
+- Tunnel sessions and player sessions are ephemeral runtime state. They are
+  **not persisted** across Coordinator restarts. After a restart, players
+  must reconnect and create new sessions.
+- No artifact mutation occurs through tunnel endpoints. Player session and
+  tunnel session creation is read-only with respect to artifacts and takeover
+  state.
+- The coordinator store methods return copies of session objects, not
+  references to internal state. Mutating a returned object does not affect
+  the store.

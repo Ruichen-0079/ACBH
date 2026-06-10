@@ -30,7 +30,7 @@ Create a runnable repository skeleton:
 
 ## Constraints
 
-- Do not introduce a proxy layer in V1.
+- Do not introduce a proxy layer in V1 core handoff loop. Player tunnel/proxy architecture groundwork is in PR26.
 - Do not require Minecraft mods.
 - Do not parse chunk data.
 - Do not upload files directly from fsnotify events.
@@ -76,3 +76,17 @@ Create a runnable repository skeleton:
 - #7 Safe snapshot sync
 - #9 Host election
 - #11 End-to-end takeover demo
+- #26 Network / Relay architecture groundwork
+
+## PR26: Network / Relay architecture
+
+Network/relay architecture groundwork has been added:
+
+- V1 architecture docs: `docs/v1-architecture.md`, `docs/network-design.md`, `docs/tunnel-protocol.md`
+- Tunnel/session types in `apps/coordinator/src/network.ts`
+- Tunnel store skeleton in `apps/coordinator/src/store.ts` (player sessions, tunnel sessions, expiration)
+- Control-plane routes for player session creation and tunnel session planning
+- Tunnel sessions bind to `currentHostId` and `currentHostGeneration`
+- Tunnel sessions are ephemeral runtime state; NOT persisted across restarts
+
+Next PR should implement relay MVP byte forwarding.
