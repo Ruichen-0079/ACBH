@@ -246,6 +246,7 @@ func runTakeover(ctx context.Context, cmd *cobra.Command, opts takeoverRunOption
 		fmt.Fprintf(cmd.OutOrStdout(), "Planned server command: %s\n", resolved.Command)
 	}
 
+	pull, start, hb := buildTakeoverDependencies(cmd, cfg, client, resolved)
 	_, err = takeover.Run(ctx, takeover.RunOptions{
 		Auth:         auth,
 		ServerDir:    resolved.ServerDir,
@@ -254,41 +255,98 @@ func runTakeover(ctx context.Context, cmd *cobra.Command, opts takeoverRunOption
 		Client:       client,
 		StatePath:    statePath,
 		Output:       cmd.OutOrStdout(),
-		Pull: func(ctx context.Context, kind manifest.ArtifactKind, artifactID, outputDir string, applyDeletes bool) error {
-			summary, err := artifactsync.Pull(ctx, artifactsync.PullOptions{
-				ArtifactKind: kind,
-				ArtifactID:   artifactID,
-				OutputDir:    outputDir,
-				ApplyDeletes: applyDeletes,
-				Config:       cfg,
-				Client:       client,
-			})
-			if err == nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "Restored %s: files=%d bytes=%d\n", kind, summary.WrittenFiles, summary.TotalBytes)
-			}
-			return err
-		},
-		Start: func(ctx context.Context) error {
-			executable, err := os.Executable()
-			if err != nil {
-				return fmt.Errorf("find Agent executable: %w", err)
-			}
-			state, err := mcserver.Start(ctx, executable, resolved)
-			if err == nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "Server started with PID %d\n", state.PID)
-			}
-			return err
-		},
-		Heartbeat: func(ctx context.Context, status string) error {
-			req, err := buildHeartbeatRequest(cfg, heartbeatOptions{status: status})
-			if err != nil {
-				return err
-			}
-			_, err = sendHeartbeat(ctx, cfg, req)
-			return err
-		},
+		Pull:         pull,
+		Start:        start,
+		Heartbeat:    hb,
 	})
 	return err
+}
+
+func buildTakeoverDependencies(
+	cmd *cobra.Command,
+	cfg agentconfig.Config,
+	client *coordinator.Client,
+	resolved mcserver.StartOptions,
+) (takeover.PullFunc, takeover.StartFunc, takeover.HeartbeatFunc) {
+	pull := func(ctx context.Context, kind manifest.ArtifactKind, artifactID, outputDir string, applyDeletes bool) error {
+		summary, err := artifactsync.Pull(ctx, artifactsync.PullOptions{
+			ArtifactKind: kind,
+			ArtifactID:   artifactID,
+			OutputDir:    outputDir,
+			ApplyDeletes: applyDeletes,
+			Config:       cfg,
+			Client:       client,
+		})
+		if err == nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Restored %s: files=%d bytes=%d\n", kind, summary.WrittenFiles, summary.TotalBytes)
+		}
+		return err
+	}
+	start := func(ctx context.Context) error {
+		executable, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("find Agent executable: %w", err)
+		}
+		state, err := mcserver.Start(ctx, executable, resolved)
+		if err == nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Server started with PID %d\n", state.PID)
+		}
+		return err
+	}
+	hb := func(ctx context.Context, status string) error {
+		req, err := buildHeartbeatRequest(cfg, heartbeatOptions{status: status})
+		if err != nil {
+			return err
+		}
+		_, err = sendHeartbeat(ctx, cfg, req)
+		return err
+	}
+	return pull, start, hb
+}
+
+func runAutoTakeover(
+	ctx context.Context,
+	cmd *cobra.Command,
+	cfg agentconfig.Config,
+	client *coordinator.Client,
+	auth coordinator.ElectionAuthRequest,
+	statePath string,
+	resolved mcserver.StartOptions,
+) (completed bool, err error) {
+	pull, start, hb := buildTakeoverDependencies(cmd, cfg, client, resolved)
+	return runAutoTakeoverWithDeps(ctx, cmd, client, auth, statePath, resolved.ServerDir, pull, start, hb)
+}
+
+func runAutoTakeoverWithDeps(
+	ctx context.Context,
+	cmd *cobra.Command,
+	client takeover.Client,
+	auth coordinator.ElectionAuthRequest,
+	statePath string,
+	serverDir string,
+	pull takeover.PullFunc,
+	start takeover.StartFunc,
+	hb takeover.HeartbeatFunc,
+) (completed bool, err error) {
+	summary, err := takeover.Run(ctx, takeover.RunOptions{
+		Auth:         auth,
+		ServerDir:    serverDir,
+		DryRun:       false,
+		ApplyDeletes: true,
+		Client:       client,
+		StatePath:    statePath,
+		Output:       cmd.OutOrStdout(),
+		Pull:         pull,
+		Start:        start,
+		Heartbeat:    hb,
+	})
+	if err != nil {
+		return false, err
+	}
+	if summary.NoAssignment {
+		return false, nil
+	}
+	return summary.Completed, nil
 }
 
 func takeoverStateCommand(

@@ -10,6 +10,8 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
 )
 
+var ErrNoAssignment = errors.New("takeover: no assignment available")
+
 type Client interface {
 	PollTakeover(context.Context, coordinator.TakeoverPollRequest) (coordinator.TakeoverPollResponse, error)
 	AcceptTakeover(context.Context, coordinator.TakeoverActionRequest) (coordinator.TakeoverActionResponse, error)
