@@ -6,7 +6,7 @@ import type { ArtifactKind } from "./domain/artifacts.js";
 import type { CoordinatorStorage } from "./storage/index.js";
 import { StorageError, StorageObjectTooLargeError } from "./storage/index.js";
 import type { ArtifactManifest } from "./storage/index.js";
-import type { InMemoryCoordinatorStore } from "./store.js";
+import type { InMemoryCoordinatorStore, GcBackend } from "./store.js";
 import { StoreError } from "./store.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
@@ -390,6 +390,80 @@ export async function registerRoutes(
     });
   });
 
+  const gcBodySchema = z.object({
+    dryRun: z.boolean().optional().default(true),
+    retentionPerKind: z.number().int().positive().optional(),
+    minAgeMs: z.number().int().positive().optional(),
+  });
+
+  app.post("/v1/groups/:groupId/artifacts/gc", async (request, reply) => {
+    const params = parseParams(
+      z.object({ groupId: z.string().min(1) }),
+      request,
+      reply,
+    );
+    if (!params) return reply;
+
+    const hostId = singleHeader(request.headers["x-acbh-host-id"]);
+    const hostToken = singleHeader(request.headers["x-acbh-host-token"]);
+    const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
+
+    if (!hostId || !hostToken) {
+      reply.code(401).send({
+        error: "Unauthorized",
+        message: "Host authentication headers are required (X-ACBH-Host-ID, X-ACBH-Host-Token)",
+      });
+      return reply;
+    }
+
+    const body = parseBody(gcBodySchema, request, reply);
+    if (!body) return reply;
+
+    const gcBackend: GcBackend = {
+      deleteManifest: async (p) => {
+        await storage.deleteManifest({ groupId: p.groupId, artifactKind: p.artifactKind, artifactId: p.artifactId });
+      },
+      deleteObject: async (p) => {
+        await storage.deleteObject({ groupId: p.groupId, sha256: p.sha256 });
+      },
+      listObjectSha256s: async (p) => {
+        return storage.listObjectSha256s({ groupId: p.groupId });
+      },
+      readManifestFiles: async (p) => {
+        try {
+          const manifest = await storage.readManifest({
+            groupId: p.groupId,
+            artifactKind: p.artifactKind,
+            artifactId: p.artifactId,
+          });
+          return (manifest.files ?? []).map((f) => ({ sha256: f.sha256, deleted: !!f.deleted }));
+        } catch {
+          return [];
+        }
+      },
+    };
+
+    try {
+      const result = await store.gcArtifacts({
+        groupId: params.groupId,
+        dryRun: body.dryRun,
+        hostId,
+        hostToken,
+        currentHostGeneration: hostGeneration ?? undefined,
+        retentionPerKind: body.retentionPerKind,
+        minAgeMs: body.minAgeMs,
+        backend: gcBackend,
+      });
+      return result;
+    } catch (error) {
+      if (error instanceof StoreError) {
+        reply.code(error.statusCode).send({ error: statusText(error.statusCode), message: error.message });
+        return reply;
+      }
+      throw error;
+    }
+  });
+
   app.post("/v1/groups", async (request, reply) => {
     const body = parseBody(createGroupSchema, request, reply);
     if (!body) {
@@ -734,6 +808,12 @@ function parseOptionalIntHeader(value: string | string[] | undefined): number | 
   if (raw === undefined) return null;
   const parsed = Number(raw);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value)) return value[0];
+  return value;
 }
 
 function statusText(statusCode: number): string {

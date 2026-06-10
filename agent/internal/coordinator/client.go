@@ -91,13 +91,13 @@ type UploadObjectResponse struct {
 }
 
 type UploadManifestRequest struct {
-	GroupID         string                `json:"groupId"`
-	HostID          string                `json:"hostId"`
-	HostToken       string                `json:"hostToken"`
-	ArtifactKind    manifest.ArtifactKind `json:"artifactKind"`
-	ArtifactID      string                `json:"artifactId"`
-	Manifest        manifest.Manifest     `json:"manifest"`
-	HostGeneration  *int                  `json:"-"`
+	GroupID        string                `json:"groupId"`
+	HostID         string                `json:"hostId"`
+	HostToken      string                `json:"hostToken"`
+	ArtifactKind   manifest.ArtifactKind `json:"artifactKind"`
+	ArtifactID     string                `json:"artifactId"`
+	Manifest       manifest.Manifest     `json:"manifest"`
+	HostGeneration *int                  `json:"-"`
 }
 
 type UploadManifestResponse struct {
@@ -385,6 +385,68 @@ func (c *Client) UploadManifest(ctx context.Context, req UploadManifestRequest) 
 	var out UploadManifestResponse
 	if err := json.Unmarshal(body, &out); err != nil {
 		return UploadManifestResponse{}, fmt.Errorf("decode coordinator response: %w", err)
+	}
+	return out, nil
+}
+
+type GcRequest struct {
+	DryRun           bool `json:"dryRun"`
+	RetentionPerKind int  `json:"retentionPerKind,omitempty"`
+	MinAgeMs         int  `json:"minAgeMs,omitempty"`
+}
+
+type GcDeletedArtifact struct {
+	GroupID      string `json:"groupId"`
+	ArtifactKind string `json:"artifactKind"`
+	ArtifactID   string `json:"artifactId"`
+	Status       string `json:"status"`
+}
+
+type GcResponse struct {
+	DryRun               bool                `json:"dryRun"`
+	DeletedArtifacts     []GcDeletedArtifact `json:"deletedArtifacts"`
+	DeletedObjectCount   int                 `json:"deletedObjectCount"`
+	ProtectedArtifactIds []string            `json:"protectedArtifactIds"`
+}
+
+func (c *Client) RunGC(ctx context.Context, req GcRequest, auth ArtifactAuth, generation *int) (GcResponse, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return GcResponse{}, fmt.Errorf("encode request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/v1/groups/"+url.PathEscape(auth.GroupID)+"/artifacts/gc",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return GcResponse{}, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-ACBH-Host-ID", auth.HostID)
+	httpReq.Header.Set("X-ACBH-Host-Token", auth.HostToken)
+	if generation != nil {
+		httpReq.Header.Set("X-ACBH-Host-Generation", fmt.Sprintf("%d", *generation))
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return GcResponse{}, fmt.Errorf("coordinator request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCoordinatorResponseBytes))
+	if err != nil {
+		return GcResponse{}, fmt.Errorf("read coordinator response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return GcResponse{}, responseError(resp.StatusCode, body)
+	}
+
+	var out GcResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return GcResponse{}, fmt.Errorf("decode coordinator response: %w", err)
 	}
 	return out, nil
 }

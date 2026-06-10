@@ -135,3 +135,10 @@ Only the current host may record new artifact metadata (publish manifests) and p
 - On any rejection (403/400/409), the latest pointer is unchanged.
 
 Raw SHA256 object blob uploads are NOT restricted, allowing standby hosts to pre-warm the Coordinator's object storage before an election promotes them.
+
+## Artifact GC protection
+
+Artifact garbage collection (`POST /v1/groups/:groupId/artifacts/gc`) respects all takeover assignment protections:
+
+- Artifacts referenced in `latestArtifactsAtAssignment` of an active (offered/accepted) takeover assignment are **never deleted**, even if they fall outside retention windows.
+- This ensures a takeover in progress always has its assigned artifacts available, regardless of GC timing.
