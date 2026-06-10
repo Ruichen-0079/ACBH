@@ -118,9 +118,14 @@ Create a new player session.
   "groupId": "grp_xyz",
   "displayName": "Steve",
   "createdAt": "2025-01-01T00:00:00.000Z",
-  "expiresAt": "2025-01-01T00:05:00.000Z"
+  "expiresAt": "2025-01-01T00:05:00.000Z",
+  "playerToken": "pt_abc123def456"
 }
 ```
+
+The `playerToken` is returned **once** on creation. It is stored as a SHA256
+hash in memory. Subsequent `getPlayerSession` calls and tunnel session
+responses do NOT include the raw token.
 
 ### POST /v1/groups/:groupId/tunnel-sessions
 
@@ -160,11 +165,11 @@ host capabilities.
 - `404` -- group does not exist
 - `404` -- player session does not exist
 - `400` -- group has no current host (cannot create tunnel)
-- `400` -- current host generation is zero (no takeover has completed)
 
 ### GET /v1/groups/:groupId/tunnel-sessions/:sessionId
 
-Retrieve metadata for an existing tunnel session.
+Retrieve metadata for an existing tunnel session. Never returns raw player
+or host tokens.
 
 **Response (200):**
 
@@ -175,17 +180,81 @@ Same shape as the tunnel session object above.
 - `404` -- group does not exist
 - `404` -- tunnel session does not exist
 
+### GET /v1/groups/:groupId/relay/tunnel-sessions/:sessionId/host (WebSocket)
+
+Host-side relay WebSocket endpoint. Upgrades to a WebSocket connection.
+
+**Required headers:**
+
+- `X-ACBH-Host-ID` -- host identifier
+- `X-ACBH-Host-Token` -- host authentication token
+- `X-ACBH-Host-Generation` -- must match current `currentHostGeneration`
+
+**Behavior:**
+
+- Validates group, host, and tunnel session exist.
+- Rejects with close code `4404` if tunnel session does not exist.
+- Rejects with close code `4403` if host is not current host.
+- Rejects with close code `4409` if generation is stale.
+- Rejects with close code `4409` if tunnel status is not `pending` or `active`.
+- Rejects with close code `4410` if tunnel has expired.
+- Rejects duplicate host connections for the same session (close code 4000).
+- On connect, registers the host side for byte forwarding.
+- When both host and player are connected, tunnel status becomes `active`.
+
+### GET /v1/groups/:groupId/relay/tunnel-sessions/:sessionId/player (WebSocket)
+
+Player-side relay WebSocket endpoint. Upgrades to a WebSocket connection.
+
+**Required headers:**
+
+- `X-ACBH-Player-ID` -- player session identifier
+- `X-ACBH-Player-Token` -- player session token (returned once on creation)
+
+**Behavior:**
+
+- Validates group, player session, and tunnel session exist.
+- Rejects with close code `4401` if player token is invalid.
+- Rejects with close code `4403` if player does not match tunnel session.
+- Rejects with close code `4409` if tunnel status is not `pending` or `active`.
+- Rejects with close code `4410` if tunnel has expired.
+- Rejects duplicate player connections for the same session (close code 4000).
+- On connect, registers the player side for byte forwarding.
+- When both host and player are connected, tunnel status becomes `active`.
+
+### Relay byte forwarding semantics
+
+- Binary WebSocket frames are forwarded opaque between host and player.
+- The relay does NOT parse or inspect Minecraft protocol data.
+- Frames preserve order: frames from host arrive at player in the same order
+  they were sent, and vice versa.
+- When one side disconnects (close or error), the other side is closed with
+  code 4001 and a descriptive reason ("Host disconnected" / "Player
+  disconnected").
+- After both sides disconnect, the relay pair is cleaned up and tunnel status
+  becomes `closed`.
+- Relay runtime state (RelayPair, byte counters, active WebSocket references)
+  is NOT persisted across Coordinator restarts.
+
 ## Security constraints
 
 - Tunnel session responses must **never** expose host tokens, takeover tokens,
-  or the host's local Minecraft address.
-- Player authentication is an MVP placeholder. The `POST /v1/groups/:groupId/player-sessions`
-  endpoint currently accepts only a `displayName`. A future PR should add
-  proper player auth (e.g. group access key verification or session tokens).
-- Only the public endpoints listed above are exposed. No raw host credentials
-  are returned through tunnel endpoints.
-- Tunnel sessions are ephemeral runtime state and are NOT persisted across
-  Coordinator restarts.
+  host token hashes, takeover token hashes, raw player tokens, or the host's
+  local Minecraft address.
+- Player authentication uses a one-time token returned on session creation.
+  The raw token is stored as a SHA256 hash in memory and never logged or
+  persisted. The `getPlayerSession` and tunnel session endpoints never return
+  the raw token.
+- The `createPlayerSession` endpoint returns the raw player token once.
+  Callers must store it securely.
+- Host-side relay connections require valid `X-ACBH-Host-ID`,
+  `X-ACBH-Host-Token`, and `X-ACBH-Host-Generation` headers.
+- Player-side relay connections require valid `X-ACBH-Player-ID` and
+  `X-ACBH-Player-Token` headers.
+- The relay forwards opaque binary frames and does not log or store raw
+  payloads. Production deployment should use HTTPS/WSS for transport security.
+- Tunnel sessions and relay runtime state are ephemeral and NOT persisted
+  across Coordinator restarts.
 
 ## Generation binding rules
 

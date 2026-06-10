@@ -9,6 +9,7 @@ import type { ArtifactManifest } from "./storage/index.js";
 import type { InMemoryCoordinatorStore, GcBackend } from "./store.js";
 import { StoreError } from "./store.js";
 import type { TunnelSession, PlayerSession } from "./network.js";
+import type { RelayManager } from "./relay.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
@@ -177,6 +178,7 @@ export async function registerRoutes(
   app: FastifyInstance,
   store: InMemoryCoordinatorStore,
   storage: CoordinatorStorage,
+  relay: RelayManager,
   options?: { maxObjectBytes?: number },
 ): Promise<void> {
   const maxObjectBytes = resolveMaxObjectBytes(options?.maxObjectBytes);
@@ -514,6 +516,91 @@ export async function registerRoutes(
     });
   });
 
+  app.get(
+    "/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/host",
+    { websocket: true },
+    (socket, request) => {
+      const params = parseWSParams(tunnelSessionGetParamsSchema, request, (code, reason) => {
+        try { socket.socket.close(code, reason); } catch { socket.destroy(); }
+      });
+      if (!params) return;
+
+      const hostId = singleHeader(request.headers["x-acbh-host-id"]);
+      const hostToken = singleHeader(request.headers["x-acbh-host-token"]);
+      const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
+
+      if (!hostId || !hostToken) {
+        socket.socket.close(4001, "Host authentication headers are required (X-ACBH-Host-ID, X-ACBH-Host-Token)");
+        return;
+      }
+      if (hostGeneration === null || hostGeneration === undefined) {
+        socket.socket.close(4001, "Host generation header is required (X-ACBH-Host-Generation)");
+        return;
+      }
+
+      try {
+        store.verifyHost({ groupId: params.groupId, hostId, hostToken });
+        store.getTunnelSessionForRelay(params.groupId, params.sessionId, hostId, hostGeneration);
+      } catch (error) {
+        if (error instanceof StoreError) {
+          socket.socket.close(4000 + error.statusCode, error.message);
+        } else {
+          socket.socket.close(4000, "Internal error");
+        }
+        return;
+      }
+
+      relay.registerHost(params.sessionId, params.groupId, socket.socket);
+    },
+  );
+
+  app.get(
+    "/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/player",
+    { websocket: true },
+    (socket, request) => {
+      const params = parseWSParams(tunnelSessionGetParamsSchema, request, (code, reason) => {
+        try { socket.socket.close(code, reason); } catch { socket.destroy(); }
+      });
+      if (!params) return;
+
+      const playerId = singleHeader(request.headers["x-acbh-player-id"]);
+      const playerToken = singleHeader(request.headers["x-acbh-player-token"]);
+
+      if (!playerId || !playerToken) {
+        socket.socket.close(4001, "Player authentication headers are required (X-ACBH-Player-ID, X-ACBH-Player-Token)");
+        return;
+      }
+
+      try {
+        store.verifyPlayerToken(params.groupId, playerId, playerToken);
+
+        const session = store.getTunnelSession(params.groupId, params.sessionId);
+        if (session.playerId !== playerId) {
+          socket.socket.close(4003, "Tunnel session does not belong to this player");
+          return;
+        }
+        if (session.status !== "pending" && session.status !== "active") {
+          socket.socket.close(4409, `Tunnel session is ${session.status} and cannot be joined for relay`);
+          return;
+        }
+        const expiresMs = Date.parse(session.expiresAt);
+        if (!Number.isFinite(expiresMs) || expiresMs <= Date.now()) {
+          socket.socket.close(4410, "Tunnel session has expired");
+          return;
+        }
+      } catch (error) {
+        if (error instanceof StoreError) {
+          socket.socket.close(4000 + error.statusCode, error.message);
+        } else {
+          socket.socket.close(4000, "Internal error");
+        }
+        return;
+      }
+
+      relay.registerPlayer(params.sessionId, params.groupId, socket.socket);
+    },
+  );
+
   app.post("/v1/groups/:groupId/player-sessions", async (request, reply) => {
     const params = parseParams(playerSessionParamsSchema, request, reply);
     const body = parseBody(playerSessionCreateSchema, request, reply);
@@ -789,6 +876,21 @@ function parseParams<T extends z.ZodTypeAny>(
       message: "Invalid route parameters",
       issues: result.error.issues,
     });
+    return null;
+  }
+
+  return result.data;
+}
+
+function parseWSParams<T extends z.ZodTypeAny>(
+  schema: T,
+  request: FastifyRequest,
+  closeFn: (code: number, reason: string) => void,
+): z.infer<T> | null {
+  const result = schema.safeParse(request.params);
+
+  if (!result.success) {
+    closeFn(4400, "Invalid route parameters");
     return null;
   }
 

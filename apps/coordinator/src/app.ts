@@ -1,4 +1,5 @@
 import cors from "@fastify/cors";
+import websocketPlugin from "@fastify/websocket";
 import Fastify from "fastify";
 import { registerRoutes } from "./routes.js";
 import { createLocalFilesystemStorageFromEnv, type CoordinatorStorage } from "./storage/index.js";
@@ -7,10 +8,12 @@ import {
   InMemoryCoordinatorStore,
 } from "./store.js";
 import { getStatePath, loadState, saveState } from "./persistence.js";
+import { RelayManager } from "./relay.js";
 
 export async function buildApp(options?: {
   store?: InMemoryCoordinatorStore;
   storage?: CoordinatorStorage;
+  relay?: RelayManager;
   logger?: boolean;
   maxObjectBytes?: number;
 }) {
@@ -67,15 +70,19 @@ export async function buildApp(options?: {
 
   const storage = options?.storage ?? createLocalFilesystemStorageFromEnv();
 
+  const relay = options?.relay ?? new RelayManager(store);
+
   await app.register(cors, {
     origin: true,
   });
+
+  await app.register(websocketPlugin);
 
   app.addContentTypeParser("application/octet-stream", (_request, payload, done) => {
     done(null, payload);
   });
 
-  await registerRoutes(app, store, storage, {
+  await registerRoutes(app, store, storage, relay, {
     maxObjectBytes: options?.maxObjectBytes,
   });
 
