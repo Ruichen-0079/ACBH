@@ -6,6 +6,7 @@ import test from "node:test";
 import { buildApp } from "../src/app.js";
 import {
   createInMemoryCoordinatorStore,
+  StoreError,
   type HostScoreHints,
   type LatestLocalArtifacts,
 } from "../src/store.js";
@@ -332,6 +333,220 @@ test("election and takeover APIs require auth and never expose stored token mate
   assert.equal(JSON.stringify(store.getTakeoverAssignment(host.groupId, polled.assignment.assignmentId)).includes(polled.assignment.takeoverToken), false);
 });
 
+test("recordArtifactFromHost blocks stale hosts from publishing artifacts", () => {
+  const store = createInMemoryCoordinatorStore();
+  const hostA = createHost(store);
+  const hostB = addHost(store, hostA, "host-b");
+  heartbeat(store, hostA, { status: "standby", javaAvailable: true });
+  heartbeat(store, hostB, { status: "standby", javaAvailable: true });
+  store.setHostManualPriority(hostA.groupId, hostA.hostId, 20);
+
+  store.recordArtifactFromHost({
+    metadata: createArtifactMetadata(hostA.groupId, hostA.hostId, "world-snapshot", "snap_initial"),
+    hostId: hostA.hostId,
+    hostToken: hostA.hostToken,
+  });
+
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_initial");
+
+  heartbeat(store, hostA, { status: "standby", javaAvailable: true, latestLocalArtifacts: { "world-snapshot": "snap_initial" } });
+
+  const election = store.runElection({ groupId: hostA.groupId, reason: "no-current-host" });
+  const assignmentId = required(election.assignment?.assignmentId);
+  const polled = store.pollTakeover(hostA);
+  const takeoverToken = required(polled?.assignment?.takeoverToken);
+  store.acceptTakeover({ ...hostA, assignmentId, takeoverToken });
+  store.completeTakeover({ ...hostA, assignmentId, takeoverToken });
+  heartbeat(store, hostA, { status: "hosting", javaAvailable: true });
+
+  assert.throws(
+    () =>
+      store.recordArtifactFromHost({
+        metadata: createArtifactMetadata(hostA.groupId, hostB.hostId, "world-snapshot", "snap_stale"),
+        hostId: hostB.hostId,
+        hostToken: hostB.hostToken,
+      }),
+    (err: unknown) => err instanceof StoreError && (err as StoreError).statusCode === 403,
+  );
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_initial");
+
+  assert.throws(
+    () =>
+      store.recordArtifactFromHost({
+        metadata: createArtifactMetadata(hostA.groupId, hostA.hostId, "world-snapshot", "snap_no_gen"),
+        hostId: hostA.hostId,
+        hostToken: hostA.hostToken,
+      }),
+    (err: unknown) => err instanceof StoreError && (err as StoreError).statusCode === 400,
+  );
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_initial");
+
+  store.recordArtifactFromHost({
+    metadata: createArtifactMetadata(hostA.groupId, hostA.hostId, "world-snapshot", "snap_from_a", "2026-06-06T00:11:00.000Z"),
+    hostId: hostA.hostId,
+    hostToken: hostA.hostToken,
+    currentHostGeneration: 1,
+  });
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_from_a");
+
+  assert.throws(
+    () =>
+      store.recordArtifactFromHost({
+        metadata: createArtifactMetadata(hostA.groupId, hostA.hostId, "world-snapshot", "snap_stale_gen"),
+        hostId: hostA.hostId,
+        hostToken: hostA.hostToken,
+        currentHostGeneration: 0,
+      }),
+    (err: unknown) => err instanceof StoreError && (err as StoreError).statusCode === 409,
+  );
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_from_a");
+});
+
+test("initial group without currentHostId allows any authenticated host to publish", () => {
+  const store = createInMemoryCoordinatorStore();
+  const host = createHost(store);
+  heartbeat(store, host, { status: "standby", javaAvailable: true });
+
+  assert.doesNotThrow(() =>
+    store.recordArtifactFromHost({
+      metadata: createArtifactMetadata(host.groupId, host.hostId, "world-snapshot", "snap_initial"),
+      hostId: host.hostId,
+      hostToken: host.hostToken,
+    }),
+  );
+  assert.equal(store.getLatestArtifact(host.groupId, "world-snapshot").artifactId, "snap_initial");
+
+  assert.throws(
+    () =>
+      store.recordArtifactFromHost({
+        metadata: createArtifactMetadata(host.groupId, host.hostId, "world-snapshot", "snap_bad_token"),
+        hostId: host.hostId,
+        hostToken: "wrong-token",
+      }),
+    (err: unknown) => err instanceof StoreError && (err as StoreError).statusCode === 401,
+  );
+});
+
+test("stale host manifest upload returns 403, 400, and 409 and never mutates latest", async (t) => {
+  const clock = testClock("2026-06-06T00:00:00.000Z");
+  const store = createInMemoryCoordinatorStore({ now: clock.now });
+  const hostA = createHost(store);
+  const hostB = addHost(store, hostA, "host-b");
+  heartbeat(store, hostA, { status: "standby", javaAvailable: true });
+  heartbeat(store, hostB, { status: "standby", javaAvailable: true });
+  store.setHostManualPriority(hostA.groupId, hostA.hostId, 20);
+
+  const election = store.runElection({ groupId: hostA.groupId, reason: "no-current-host" });
+  const assignmentId = required(election.assignment?.assignmentId);
+  const polled = store.pollTakeover(hostA);
+  const token = required(polled?.assignment?.takeoverToken);
+  store.acceptTakeover({ ...hostA, assignmentId, takeoverToken: token });
+  store.completeTakeover({ ...hostA, assignmentId, takeoverToken: token });
+  heartbeat(store, hostA, { status: "hosting", javaAvailable: true });
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "acbh-stale-host-api-"));
+  t.after(async () => rm(root, { force: true, recursive: true }));
+  const app = await buildApp({ logger: false, store, storage: new LocalFilesystemStorage(root) });
+  t.after(async () => app.close());
+
+  const baseline = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    headers: { "x-acbh-host-generation": "1" },
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostA.hostId,
+      hostToken: hostA.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_baseline",
+      manifest: makeTestManifest(hostA.groupId, hostA.hostId, "snap_baseline"),
+    },
+  });
+  assert.equal(baseline.statusCode, 200, baseline.body);
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+
+  const stale = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostB.hostId,
+      hostToken: hostB.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_stale",
+      manifest: makeTestManifest(hostA.groupId, hostB.hostId, "snap_stale"),
+    },
+  });
+  assert.equal(stale.statusCode, 403);
+  assert.match(stale.body, /Only the current host may publish/);
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+
+  const noGen = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostA.hostId,
+      hostToken: hostA.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_no_gen",
+      manifest: makeTestManifest(hostA.groupId, hostA.hostId, "snap_no_gen"),
+    },
+  });
+  assert.equal(noGen.statusCode, 400);
+  assert.match(noGen.body, /Host generation header is required/);
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+
+  const staleGen = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    headers: { "x-acbh-host-generation": "0" },
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostA.hostId,
+      hostToken: hostA.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_stale_gen",
+      manifest: makeTestManifest(hostA.groupId, hostA.hostId, "snap_stale_gen"),
+    },
+  });
+  assert.equal(staleGen.statusCode, 409);
+  assert.match(staleGen.body, /Host generation is stale/);
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+
+  const badGenFormat = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    headers: { "x-acbh-host-generation": "not-a-number" },
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostA.hostId,
+      hostToken: hostA.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_bad_gen",
+      manifest: makeTestManifest(hostA.groupId, hostA.hostId, "snap_bad_gen"),
+    },
+  });
+  assert.equal(badGenFormat.statusCode, 400);
+  assert.match(badGenFormat.body, /Host generation header is required/);
+
+  const ok = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    headers: { "x-acbh-host-generation": "1" },
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostA.hostId,
+      hostToken: hostA.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_ok",
+      manifest: makeTestManifest(hostA.groupId, hostA.hostId, "snap_ok", "2026-06-06T00:11:00Z"),
+    },
+  });
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_ok");
+});
+
 type TestHost = {
   groupId: string;
   accessKey: string;
@@ -438,5 +653,49 @@ function hostHeaders(host: TestHost): Record<string, string> {
   return {
     "x-acbh-host-id": host.hostId,
     "x-acbh-host-token": host.hostToken,
+  };
+}
+
+function createArtifactMetadata(
+  groupId: string,
+  creatorHostId: string,
+  artifactKind: "server-pack" | "world-snapshot" | "admin-state",
+  artifactId: string,
+  createdAt?: string,
+) {
+  return {
+    groupId,
+    artifactKind,
+    artifactId,
+    parentArtifactId: null,
+    serverPackVersion: artifactKind === "world-snapshot" ? "pack_000001" : null,
+    creatorHostId,
+    createdAt: createdAt ?? "2026-06-06T00:10:00.000Z",
+    status: "available" as const,
+    manifestSha256: "a".repeat(64),
+    manifestObjectPath: `manifests/${artifactId}`,
+    fileCount: 1,
+    totalBytes: 1,
+  };
+}
+
+function makeTestManifest(groupId: string, creatorHostId: string, artifactId: string = "snap_test", createdAt?: string) {
+  return {
+    manifestVersion: 1,
+    artifactKind: "world-snapshot",
+    artifactId,
+    groupId,
+    createdAt: createdAt ?? "2026-06-06T00:10:00Z",
+    creatorHostId,
+    parentArtifactId: null,
+    serverPackVersion: "pack_000001",
+    files: [],
+    summary: {
+      includedFiles: 0,
+      ignoredFiles: 0,
+      unknownFiles: 0,
+      deletedFiles: 0,
+      totalBytes: 0,
+    },
   };
 }

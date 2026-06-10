@@ -91,12 +91,13 @@ type UploadObjectResponse struct {
 }
 
 type UploadManifestRequest struct {
-	GroupID      string                `json:"groupId"`
-	HostID       string                `json:"hostId"`
-	HostToken    string                `json:"hostToken"`
-	ArtifactKind manifest.ArtifactKind `json:"artifactKind"`
-	ArtifactID   string                `json:"artifactId"`
-	Manifest     manifest.Manifest     `json:"manifest"`
+	GroupID         string                `json:"groupId"`
+	HostID          string                `json:"hostId"`
+	HostToken       string                `json:"hostToken"`
+	ArtifactKind    manifest.ArtifactKind `json:"artifactKind"`
+	ArtifactID      string                `json:"artifactId"`
+	Manifest        manifest.Manifest     `json:"manifest"`
+	HostGeneration  *int                  `json:"-"`
 }
 
 type UploadManifestResponse struct {
@@ -354,9 +355,38 @@ func (c *Client) UploadObjectStream(
 }
 
 func (c *Client) UploadManifest(ctx context.Context, req UploadManifestRequest) (UploadManifestResponse, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return UploadManifestResponse{}, fmt.Errorf("encode request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/artifacts/manifests", bytes.NewReader(payload))
+	if err != nil {
+		return UploadManifestResponse{}, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if req.HostGeneration != nil {
+		httpReq.Header.Set("X-ACBH-Host-Generation", fmt.Sprintf("%d", *req.HostGeneration))
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return UploadManifestResponse{}, fmt.Errorf("coordinator request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCoordinatorResponseBytes))
+	if err != nil {
+		return UploadManifestResponse{}, fmt.Errorf("read coordinator response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return UploadManifestResponse{}, responseError(resp.StatusCode, body)
+	}
+
 	var out UploadManifestResponse
-	err := c.post(ctx, "/v1/artifacts/manifests", req, &out)
-	return out, err
+	if err := json.Unmarshal(body, &out); err != nil {
+		return UploadManifestResponse{}, fmt.Errorf("decode coordinator response: %w", err)
+	}
+	return out, nil
 }
 
 func (c *Client) GetLatestArtifact(ctx context.Context, auth ArtifactAuth, artifactKind manifest.ArtifactKind) (ArtifactMetadata, error) {

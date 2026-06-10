@@ -90,6 +90,28 @@ func TestPushCanUseLegacyJSONUpload(t *testing.T) {
 	}
 }
 
+func TestPushPropagatesHostGeneration(t *testing.T) {
+	serverDir := t.TempDir()
+	writeFile(t, serverDir, "world/region/r.0.0.mca", "region data")
+	manifestPath := writeManifest(t, t.TempDir(), testManifest(sha256Hex([]byte("region data"))))
+
+	client := &fakeClient{}
+	gen := 3
+	_, err := Push(context.Background(), PushOptions{
+		ManifestPath:   manifestPath,
+		ServerDir:      serverDir,
+		Config:         testConfig(),
+		Client:         client,
+		HostGeneration: &gen,
+	})
+	if err != nil {
+		t.Fatalf("Push() error = %v", err)
+	}
+	if client.lastManifestGeneration == nil || *client.lastManifestGeneration != 3 {
+		t.Fatalf("lastManifestGeneration = %#v, want 3", client.lastManifestGeneration)
+	}
+}
+
 func TestPushAndPullZeroByteNonDeletedFile(t *testing.T) {
 	serverDir := t.TempDir()
 	writeFile(t, serverDir, "world/data/empty.dat", "")
@@ -263,9 +285,10 @@ func TestPullDeletesOnlyWithApplyDeletes(t *testing.T) {
 }
 
 type fakeClient struct {
-	calls    []string
-	manifest manifest.Manifest
-	objects  map[string][]byte
+	calls                  []string
+	manifest               manifest.Manifest
+	objects                map[string][]byte
+	lastManifestGeneration *int
 }
 
 func (c *fakeClient) UploadObject(ctx context.Context, req coordinator.UploadObjectRequest) (coordinator.UploadObjectResponse, error) {
@@ -313,6 +336,10 @@ func (c *fakeClient) UploadObjectStream(
 func (c *fakeClient) UploadManifest(ctx context.Context, req coordinator.UploadManifestRequest) (coordinator.UploadManifestResponse, error) {
 	c.calls = append(c.calls, "uploadManifest")
 	c.manifest = req.Manifest
+	if req.HostGeneration != nil {
+		gen := *req.HostGeneration
+		c.lastManifestGeneration = &gen
+	}
 	return coordinator.UploadManifestResponse{OK: true, ArtifactKind: req.ArtifactKind, ArtifactID: req.ArtifactID, Status: "available"}, nil
 }
 

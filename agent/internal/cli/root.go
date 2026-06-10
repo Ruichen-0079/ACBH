@@ -651,12 +651,31 @@ func runPush(ctx context.Context, cmd *cobra.Command, opts pushOptions) error {
 		return err
 	}
 
+	auth := coordinator.ArtifactAuth{
+		GroupID:   cfg.GroupID,
+		HostID:    cfg.HostID,
+		HostToken: cfg.HostToken,
+	}
+	status, statusErr := client.GetElectionStatus(ctx, auth)
+	if statusErr != nil {
+		return fmt.Errorf("cannot verify current host state before publishing artifacts: %w", statusErr)
+	}
+	var generation *int
+	if status.CurrentHostID != nil {
+		if *status.CurrentHostID != cfg.HostID {
+			return fmt.Errorf("this host is not the current host; only the current host may publish artifacts")
+		}
+		gen := status.CurrentHostGeneration
+		generation = &gen
+	}
+
 	summary, err := artifactsync.Push(ctx, artifactsync.PushOptions{
 		ManifestPath:     opts.manifestPath,
 		ServerDir:        opts.serverDir,
 		Config:           cfg,
 		Client:           client,
 		LegacyJSONUpload: opts.legacyJSONUpload,
+		HostGeneration:   generation,
 	})
 	if err != nil {
 		return err
