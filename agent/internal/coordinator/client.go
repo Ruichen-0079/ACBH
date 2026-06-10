@@ -46,11 +46,27 @@ type RegisterHostResponse struct {
 }
 
 type HeartbeatRequest struct {
-	GroupID               string  `json:"groupId"`
-	HostID                string  `json:"hostId"`
-	HostToken             string  `json:"hostToken"`
-	Status                string  `json:"status"`
-	LatestLocalSnapshotID *string `json:"latestLocalSnapshotId"`
+	GroupID               string            `json:"groupId"`
+	HostID                string            `json:"hostId"`
+	HostToken             string            `json:"hostToken"`
+	Status                string            `json:"status"`
+	LatestLocalSnapshotID *string           `json:"latestLocalSnapshotId"`
+	LatestLocalArtifacts  map[string]string `json:"latestLocalArtifacts,omitempty"`
+	HostScoreHints        *HostScoreHints   `json:"hostScoreHints,omitempty"`
+	Connection            *HostConnection   `json:"connection,omitempty"`
+}
+
+type HostScoreHints struct {
+	CPUCores         int   `json:"cpuCores,omitempty"`
+	MemoryTotalBytes int64 `json:"memoryTotalBytes,omitempty"`
+	DiskFreeBytes    int64 `json:"diskFreeBytes,omitempty"`
+	JavaAvailable    *bool `json:"javaAvailable,omitempty"`
+}
+
+type HostConnection struct {
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	Network string `json:"network"`
 }
 
 type HeartbeatResponse struct {
@@ -117,6 +133,98 @@ type DownloadManifestResponse struct {
 	Manifest manifest.Manifest `json:"manifest"`
 }
 
+type ElectionAuthRequest struct {
+	GroupID   string `json:"groupId"`
+	HostID    string `json:"hostId"`
+	HostToken string `json:"hostToken"`
+}
+
+type ElectionCandidate struct {
+	HostID               string            `json:"hostId"`
+	Eligible             bool              `json:"eligible"`
+	Score                int               `json:"score"`
+	Reasons              []string          `json:"reasons"`
+	LatestLocalArtifacts map[string]string `json:"latestLocalArtifacts"`
+	LastHeartbeatAt      *string           `json:"lastHeartbeatAt"`
+}
+
+type ElectionResult struct {
+	ElectionID            string              `json:"electionId"`
+	GroupID               string              `json:"groupId"`
+	Reason                string              `json:"reason"`
+	SelectedHostID        *string             `json:"selectedHostId"`
+	CurrentHostGeneration int                 `json:"currentHostGeneration"`
+	AssignmentID          *string             `json:"assignmentId"`
+	Candidates            []ElectionCandidate `json:"candidates"`
+	CreatedAt             string              `json:"createdAt"`
+}
+
+type TakeoverAssignment struct {
+	AssignmentID                string            `json:"assignmentId"`
+	GroupID                     string            `json:"groupId"`
+	HostID                      string            `json:"hostId"`
+	Reason                      string            `json:"reason"`
+	Status                      string            `json:"status"`
+	TakeoverToken               string            `json:"takeoverToken,omitempty"`
+	CurrentHostGeneration       int               `json:"currentHostGeneration"`
+	LatestArtifactsAtAssignment map[string]string `json:"latestArtifactsAtAssignment"`
+	CreatedAt                   string            `json:"createdAt"`
+	ExpiresAt                   string            `json:"expiresAt"`
+	AcceptedAt                  *string           `json:"acceptedAt"`
+	CompletedAt                 *string           `json:"completedAt"`
+	FailedAt                    *string           `json:"failedAt"`
+	FailureReason               *string           `json:"failureReason"`
+}
+
+type ElectionStatusResponse struct {
+	GroupID                  string              `json:"groupId"`
+	CurrentHostID            *string             `json:"currentHostId"`
+	CurrentHostGeneration    int                 `json:"currentHostGeneration"`
+	LastElection             *ElectionResult     `json:"lastElection"`
+	ActiveTakeoverAssignment *TakeoverAssignment `json:"activeTakeoverAssignment"`
+}
+
+type ElectionRunResponse struct {
+	OK             bool                `json:"ok"`
+	GroupID        string              `json:"groupId"`
+	SelectedHostID *string             `json:"selectedHostId"`
+	Candidates     []ElectionCandidate `json:"candidates"`
+	Election       ElectionResult      `json:"election"`
+	Assignment     *TakeoverAssignment `json:"assignment"`
+}
+
+type ElectionCheckTimeoutResponse struct {
+	ElectionNeeded bool                 `json:"electionNeeded"`
+	Election       *ElectionRunResponse `json:"election"`
+}
+
+type TakeoverPollResponse struct {
+	Assignment *TakeoverAssignment `json:"assignment"`
+}
+
+type TakeoverPollRequest struct {
+	ElectionAuthRequest
+	DryRun bool `json:"dryRun,omitempty"`
+}
+
+type TakeoverActionRequest struct {
+	GroupID       string `json:"groupId"`
+	HostID        string `json:"hostId"`
+	HostToken     string `json:"hostToken"`
+	AssignmentID  string `json:"assignmentId"`
+	TakeoverToken string `json:"takeoverToken"`
+}
+
+type TakeoverFailRequest struct {
+	TakeoverActionRequest
+	FailureReason string `json:"failureReason"`
+}
+
+type TakeoverActionResponse struct {
+	OK         bool               `json:"ok"`
+	Assignment TakeoverAssignment `json:"assignment"`
+}
+
 type apiError struct {
 	Message string `json:"message"`
 	Error   string `json:"error"`
@@ -152,6 +260,42 @@ func (c *Client) RegisterHost(ctx context.Context, req RegisterHostRequest) (Reg
 func (c *Client) SendHeartbeat(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, error) {
 	var out HeartbeatResponse
 	err := c.post(ctx, "/v1/hosts/heartbeat", req, &out)
+	return out, err
+}
+
+func (c *Client) GetElectionStatus(ctx context.Context, auth ArtifactAuth) (ElectionStatusResponse, error) {
+	var out ElectionStatusResponse
+	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/election/status", auth, &out)
+	return out, err
+}
+
+func (c *Client) CheckElectionTimeout(ctx context.Context, req ElectionAuthRequest) (ElectionCheckTimeoutResponse, error) {
+	var out ElectionCheckTimeoutResponse
+	err := c.post(ctx, "/v1/groups/"+url.PathEscape(req.GroupID)+"/election/check-timeout", req, &out)
+	return out, err
+}
+
+func (c *Client) PollTakeover(ctx context.Context, req TakeoverPollRequest) (TakeoverPollResponse, error) {
+	var out TakeoverPollResponse
+	err := c.post(ctx, "/v1/hosts/takeover/poll", req, &out)
+	return out, err
+}
+
+func (c *Client) AcceptTakeover(ctx context.Context, req TakeoverActionRequest) (TakeoverActionResponse, error) {
+	var out TakeoverActionResponse
+	err := c.post(ctx, "/v1/hosts/takeover/accept", req, &out)
+	return out, err
+}
+
+func (c *Client) CompleteTakeover(ctx context.Context, req TakeoverActionRequest) (TakeoverActionResponse, error) {
+	var out TakeoverActionResponse
+	err := c.post(ctx, "/v1/hosts/takeover/complete", req, &out)
+	return out, err
+}
+
+func (c *Client) FailTakeover(ctx context.Context, req TakeoverFailRequest) (TakeoverActionResponse, error) {
+	var out TakeoverActionResponse
+	err := c.post(ctx, "/v1/hosts/takeover/fail", req, &out)
 	return out, err
 }
 

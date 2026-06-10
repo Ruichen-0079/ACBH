@@ -7,6 +7,21 @@ export type HostStatus = "online" | "standby" | "hosting" | "unhealthy" | "offli
 
 export type ArtifactStatus = "uploading" | "available" | "rejected";
 
+export type LatestLocalArtifacts = Partial<Record<ArtifactKind, string>>;
+
+export type HostScoreHints = {
+  cpuCores?: number;
+  memoryTotalBytes?: number;
+  diskFreeBytes?: number;
+  javaAvailable?: boolean;
+};
+
+export type HostConnection = {
+  host: string;
+  port: number;
+  network: string;
+};
+
 export type ArtifactMetadata = {
   groupId: string;
   artifactKind: ArtifactKind;
@@ -23,10 +38,85 @@ export type ArtifactMetadata = {
   totalBytes: number;
 };
 
+export type ElectionCandidate = {
+  hostId: string;
+  eligible: boolean;
+  score: number;
+  reasons: string[];
+  latestLocalArtifacts: LatestLocalArtifacts;
+  lastHeartbeatAt: string | null;
+};
+
+export type ElectionReason = "manual" | "heartbeat-timeout" | "no-current-host";
+
+export type ElectionResult = {
+  electionId: string;
+  groupId: string;
+  reason: ElectionReason;
+  selectedHostId: string | null;
+  currentHostGeneration: number;
+  assignmentId: string | null;
+  candidates: ElectionCandidate[];
+  createdAt: string;
+};
+
+export type TakeoverAssignmentStatus =
+  | "offered"
+  | "accepted"
+  | "completed"
+  | "failed"
+  | "expired"
+  | "cancelled";
+
+export type TakeoverAssignmentRecord = {
+  assignmentId: string;
+  groupId: string;
+  hostId: string;
+  reason: ElectionReason;
+  status: TakeoverAssignmentStatus;
+  takeoverTokenHash: string | null;
+  currentHostGeneration: number;
+  latestArtifactsAtAssignment: LatestLocalArtifacts;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  completedAt: string | null;
+  failedAt: string | null;
+  failureReason: string | null;
+};
+
+export type PublicTakeoverAssignment = Omit<TakeoverAssignmentRecord, "takeoverTokenHash">;
+
+export type ElectionRunResponse = {
+  ok: boolean;
+  groupId: string;
+  selectedHostId: string | null;
+  candidates: ElectionCandidate[];
+  election: ElectionResult;
+  assignment: PublicTakeoverAssignment | null;
+};
+
+export type ElectionStatus = {
+  groupId: string;
+  currentHostId: string | null;
+  currentHostGeneration: number;
+  lastElection: ElectionResult | null;
+  activeTakeoverAssignment: PublicTakeoverAssignment | null;
+};
+
+export type TakeoverPollResponse = {
+  assignment:
+    | (PublicTakeoverAssignment & {
+        takeoverToken?: string;
+      })
+    | null;
+};
+
 export type GroupState = {
   groupId: string;
   name: string;
   currentHostId: string | null;
+  currentHostGeneration: number;
   latestSnapshotId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -44,6 +134,13 @@ export type GroupState = {
     agentVersion: string;
     status: HostStatus;
     latestLocalSnapshotId: string | null;
+    latestLocalArtifacts: LatestLocalArtifacts;
+    hostScoreHints: HostScoreHints;
+    connection: HostConnection | null;
+    computedHostScore: number;
+    recentFailureCount: number;
+    manualPriority: number;
+    lastElectionCandidateAt: string | null;
     createdAt: string;
     updatedAt: string;
     lastHeartbeatAt: string | null;
@@ -66,6 +163,13 @@ type HostRecord = {
   status: HostStatus;
   hostTokenHash: string;
   latestLocalSnapshotId: string | null;
+  latestLocalArtifacts: LatestLocalArtifacts;
+  hostScoreHints: HostScoreHints;
+  connection: HostConnection | null;
+  computedHostScore: number;
+  recentFailureCount: number;
+  manualPriority: number;
+  lastElectionCandidateAt: string | null;
   createdAt: string;
   updatedAt: string;
   lastHeartbeatAt: string | null;
@@ -76,6 +180,7 @@ type GroupRecord = {
   name: string;
   accessKeyHash: string;
   currentHostId: string | null;
+  currentHostGeneration: number;
   latestSnapshotId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -83,7 +188,21 @@ type GroupRecord = {
   hosts: Map<string, HostRecord>;
   artifacts: Map<ArtifactKind, Map<string, ArtifactMetadata>>;
   latestArtifacts: Map<ArtifactKind, string>;
+  lastElection: ElectionResult | null;
+  activeTakeoverAssignmentId: string | null;
+  takeoverAssignments: Map<string, TakeoverAssignmentRecord>;
 };
+
+type StoreOptions = {
+  now?: () => Date;
+  heartbeatTimeoutMs?: number;
+  assignmentTtlMs?: number;
+};
+
+const defaultHeartbeatTimeoutMs = 30_000;
+const defaultAssignmentTtlMs = 60_000;
+const fourGiB = 4 * 1024 * 1024 * 1024;
+const tenGiB = 10 * 1024 * 1024 * 1024;
 
 export class StoreError extends Error {
   constructor(
@@ -97,13 +216,24 @@ export class StoreError extends Error {
 
 export class InMemoryCoordinatorStore {
   private readonly groups = new Map<string, GroupRecord>();
+  private readonly now: () => Date;
+  readonly heartbeatTimeoutMs: number;
+  readonly assignmentTtlMs: number;
+
+  constructor(options: StoreOptions = {}) {
+    this.now = options.now ?? (() => new Date());
+    this.heartbeatTimeoutMs =
+      options.heartbeatTimeoutMs ?? positiveEnvInteger("ACBH_HOST_HEARTBEAT_TIMEOUT_MS", defaultHeartbeatTimeoutMs);
+    this.assignmentTtlMs =
+      options.assignmentTtlMs ?? positiveEnvInteger("ACBH_TAKEOVER_ASSIGNMENT_TTL_MS", defaultAssignmentTtlMs);
+  }
 
   createGroup(input: { name: string; ownerName: string }): {
     groupId: string;
     ownerMemberId: string;
     accessKey: string;
   } {
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     const groupId = createId("grp");
     const ownerMemberId = createId("mem");
     const accessKey = createSecret("ak");
@@ -113,6 +243,7 @@ export class InMemoryCoordinatorStore {
       name: input.name,
       accessKeyHash: hashSecret(accessKey),
       currentHostId: null,
+      currentHostGeneration: 0,
       latestSnapshotId: null,
       createdAt: now,
       updatedAt: now,
@@ -130,6 +261,9 @@ export class InMemoryCoordinatorStore {
       hosts: new Map(),
       artifacts: new Map(),
       latestArtifacts: new Map(),
+      lastElection: null,
+      activeTakeoverAssignmentId: null,
+      takeoverAssignments: new Map(),
     });
 
     return { groupId, ownerMemberId, accessKey };
@@ -145,7 +279,7 @@ export class InMemoryCoordinatorStore {
       throw new StoreError(401, "Invalid access key");
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     const memberId = createId("mem");
     group.members.set(memberId, {
       memberId,
@@ -171,7 +305,7 @@ export class InMemoryCoordinatorStore {
       throw new StoreError(404, "Member does not exist in group");
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     const hostId = createId("host");
     const hostToken = createSecret("ht");
     group.hosts.set(hostId, {
@@ -183,6 +317,13 @@ export class InMemoryCoordinatorStore {
       status: "standby",
       hostTokenHash: hashSecret(hostToken),
       latestLocalSnapshotId: null,
+      latestLocalArtifacts: {},
+      hostScoreHints: {},
+      connection: null,
+      computedHostScore: 0,
+      recentFailureCount: 0,
+      manualPriority: 0,
+      lastElectionCandidateAt: null,
       createdAt: now,
       updatedAt: now,
       lastHeartbeatAt: now,
@@ -197,22 +338,39 @@ export class InMemoryCoordinatorStore {
     hostId: string;
     hostToken: string;
     status: HostStatus;
-    latestLocalSnapshotId: string | null;
+    latestLocalSnapshotId?: string | null;
+    latestLocalArtifacts?: LatestLocalArtifacts;
+    hostScoreHints?: HostScoreHints;
+    connection?: HostConnection | null;
   }): { ok: true; hostId: string; status: HostStatus } {
     const group = this.requireGroup(input.groupId);
-    const host = group.hosts.get(input.hostId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
 
-    if (!host) {
-      throw new StoreError(404, "Host does not exist in group");
-    }
-
-    if (!verifySecret(input.hostToken, host.hostTokenHash)) {
-      throw new StoreError(401, "Invalid host token");
-    }
-
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     host.status = input.status;
-    host.latestLocalSnapshotId = input.latestLocalSnapshotId;
+    if (input.latestLocalSnapshotId !== undefined) {
+      host.latestLocalSnapshotId = input.latestLocalSnapshotId;
+    }
+    if (input.latestLocalArtifacts !== undefined) {
+      host.latestLocalArtifacts = { ...input.latestLocalArtifacts };
+    }
+    if (
+      input.latestLocalSnapshotId !== undefined &&
+      input.latestLocalArtifacts?.["world-snapshot"] === undefined
+    ) {
+      if (input.latestLocalSnapshotId === null) {
+        delete host.latestLocalArtifacts["world-snapshot"];
+      } else {
+        host.latestLocalArtifacts["world-snapshot"] = input.latestLocalSnapshotId;
+      }
+    }
+    if (input.hostScoreHints !== undefined) {
+      host.hostScoreHints = { ...input.hostScoreHints };
+    }
+    if (input.connection !== undefined) {
+      host.connection = input.connection === null ? null : { ...input.connection };
+    }
     host.lastHeartbeatAt = now;
     host.updatedAt = now;
     group.updatedAt = now;
@@ -227,6 +385,7 @@ export class InMemoryCoordinatorStore {
       groupId: group.groupId,
       name: group.name,
       currentHostId: group.currentHostId,
+      currentHostGeneration: group.currentHostGeneration,
       latestSnapshotId: group.latestSnapshotId,
       createdAt: group.createdAt,
       updatedAt: group.updatedAt,
@@ -244,6 +403,13 @@ export class InMemoryCoordinatorStore {
         agentVersion: host.agentVersion,
         status: host.status,
         latestLocalSnapshotId: host.latestLocalSnapshotId,
+        latestLocalArtifacts: { ...host.latestLocalArtifacts },
+        hostScoreHints: { ...host.hostScoreHints },
+        connection: host.connection === null ? null : { ...host.connection },
+        computedHostScore: host.computedHostScore,
+        recentFailureCount: host.recentFailureCount,
+        manualPriority: host.manualPriority,
+        lastElectionCandidateAt: host.lastElectionCandidateAt,
         createdAt: host.createdAt,
         updatedAt: host.updatedAt,
         lastHeartbeatAt: host.lastHeartbeatAt,
@@ -251,17 +417,281 @@ export class InMemoryCoordinatorStore {
     };
   }
 
+  evaluateCandidates(groupId: string): ElectionCandidate[] {
+    const group = this.requireGroup(groupId);
+    const evaluatedAt = this.now();
+    const evaluatedAtIso = evaluatedAt.toISOString();
+    const latestWorld = this.findLatestArtifact(group, "world-snapshot");
+    const latestServerPack = this.findLatestArtifact(group, "server-pack");
+    const latestAdminState = this.findLatestArtifact(group, "admin-state");
+
+    const candidates = Array.from(group.hosts.values()).map((host): ElectionCandidate => {
+      const reasons: string[] = [];
+      const heartbeatFresh = isFresh(host.lastHeartbeatAt, evaluatedAt, this.heartbeatTimeoutMs);
+      const hasLatestWorld =
+        latestWorld === undefined ||
+        host.latestLocalArtifacts["world-snapshot"] === latestWorld.artifactId ||
+        host.latestLocalSnapshotId === latestWorld.artifactId;
+
+      if (host.status !== "online" && host.status !== "standby") {
+        reasons.push(`status-${host.status}`);
+      }
+      if (!heartbeatFresh) {
+        reasons.push("stale-heartbeat");
+      }
+      if (!hasLatestWorld) {
+        reasons.push("missing-latest-world-snapshot");
+      }
+      if (host.hostScoreHints.javaAvailable === false) {
+        reasons.push("java-unavailable");
+      }
+
+      let score = 0;
+      if (heartbeatFresh) score += 30;
+      if (latestWorld !== undefined && hasLatestWorld) score += 25;
+      if (
+        latestServerPack !== undefined &&
+        host.latestLocalArtifacts["server-pack"] === latestServerPack.artifactId
+      ) {
+        score += 10;
+      }
+      if (
+        latestAdminState !== undefined &&
+        host.latestLocalArtifacts["admin-state"] === latestAdminState.artifactId
+      ) {
+        score += 5;
+      }
+      if (host.hostScoreHints.javaAvailable === true) score += 10;
+      if ((host.hostScoreHints.memoryTotalBytes ?? 0) >= fourGiB) score += 10;
+      if ((host.hostScoreHints.diskFreeBytes ?? 0) >= tenGiB) score += 5;
+      score += Math.min(Math.max(host.hostScoreHints.cpuCores ?? 0, 0), 8);
+      score += host.manualPriority;
+      score -= host.recentFailureCount * 10;
+
+      host.computedHostScore = score;
+      host.lastElectionCandidateAt = evaluatedAtIso;
+
+      return {
+        hostId: host.hostId,
+        eligible: reasons.length === 0,
+        score,
+        reasons,
+        latestLocalArtifacts: { ...host.latestLocalArtifacts },
+        lastHeartbeatAt: host.lastHeartbeatAt,
+      };
+    });
+
+    return candidates.sort(compareCandidates);
+  }
+
+  setHostManualPriority(groupId: string, hostId: string, manualPriority: number): void {
+    const group = this.requireGroup(groupId);
+    const host = this.requireHost(group, hostId);
+    host.manualPriority = manualPriority;
+    host.updatedAt = this.nowIso();
+  }
+
+  recordHostFailure(groupId: string, hostId: string): void {
+    const group = this.requireGroup(groupId);
+    const host = this.requireHost(group, hostId);
+    host.recentFailureCount += 1;
+    host.updatedAt = this.nowIso();
+  }
+
+  runElection(input: { groupId: string; reason: ElectionReason }): ElectionRunResponse {
+    const group = this.requireGroup(input.groupId);
+    this.cancelActiveAssignment(group);
+    const candidates = this.evaluateCandidates(input.groupId);
+    const selected = candidates.find((candidate) => candidate.eligible);
+    const now = this.now();
+    const nowIso = now.toISOString();
+    let assignment: TakeoverAssignmentRecord | null = null;
+
+    if (selected !== undefined) {
+      assignment = {
+        assignmentId: createId("takeover"),
+        groupId: group.groupId,
+        hostId: selected.hostId,
+        reason: input.reason,
+        status: "offered",
+        takeoverTokenHash: null,
+        currentHostGeneration: group.currentHostGeneration,
+        latestArtifactsAtAssignment: Object.fromEntries(group.latestArtifacts.entries()),
+        createdAt: nowIso,
+        expiresAt: new Date(now.getTime() + this.assignmentTtlMs).toISOString(),
+        acceptedAt: null,
+        completedAt: null,
+        failedAt: null,
+        failureReason: null,
+      };
+      group.takeoverAssignments.set(assignment.assignmentId, assignment);
+      group.activeTakeoverAssignmentId = assignment.assignmentId;
+    }
+
+    const election: ElectionResult = {
+      electionId: createId("election"),
+      groupId: group.groupId,
+      reason: input.reason,
+      selectedHostId: selected?.hostId ?? null,
+      currentHostGeneration: group.currentHostGeneration,
+      assignmentId: assignment?.assignmentId ?? null,
+      candidates: candidates.map(copyCandidate),
+      createdAt: nowIso,
+    };
+    group.lastElection = election;
+    group.updatedAt = nowIso;
+
+    return {
+      ok: selected !== undefined,
+      groupId: group.groupId,
+      selectedHostId: selected?.hostId ?? null,
+      candidates: candidates.map(copyCandidate),
+      election: copyElection(election),
+      assignment: assignment === null ? null : publicAssignment(assignment),
+    };
+  }
+
+  checkElectionTimeout(groupId: string): {
+    electionNeeded: boolean;
+    election: ElectionRunResponse | null;
+  } {
+    const group = this.requireGroup(groupId);
+    if (group.currentHostId === null) {
+      return {
+        electionNeeded: true,
+        election: this.runElection({ groupId, reason: "no-current-host" }),
+      };
+    }
+
+    const currentHost = this.requireHost(group, group.currentHostId);
+    if (isFresh(currentHost.lastHeartbeatAt, this.now(), this.heartbeatTimeoutMs)) {
+      return { electionNeeded: false, election: null };
+    }
+
+    currentHost.status = "unhealthy";
+    currentHost.updatedAt = this.nowIso();
+    return {
+      electionNeeded: true,
+      election: this.runElection({ groupId, reason: "heartbeat-timeout" }),
+    };
+  }
+
+  getElectionStatus(groupId: string): ElectionStatus {
+    const group = this.requireGroup(groupId);
+    this.expireActiveAssignment(group);
+    const active = this.activeAssignment(group);
+
+    return {
+      groupId: group.groupId,
+      currentHostId: group.currentHostId,
+      currentHostGeneration: group.currentHostGeneration,
+      lastElection: group.lastElection === null ? null : copyElection(group.lastElection),
+      activeTakeoverAssignment: active === null ? null : publicAssignment(active),
+    };
+  }
+
+  pollTakeover(input: {
+    groupId: string;
+    hostId: string;
+    hostToken: string;
+    dryRun?: boolean;
+  }): TakeoverPollResponse {
+    const group = this.requireGroup(input.groupId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+    this.expireActiveAssignment(group);
+    const assignment = this.activeAssignment(group);
+    if (assignment === null || assignment.hostId !== input.hostId) {
+      return { assignment: null };
+    }
+
+    if (input.dryRun === true) {
+      return { assignment: publicAssignment(assignment) };
+    }
+
+    if (assignment.status === "offered" && assignment.takeoverTokenHash === null) {
+      const takeoverToken = createSecret("tt");
+      assignment.takeoverTokenHash = hashSecret(takeoverToken);
+      return {
+        assignment: {
+          ...publicAssignment(assignment),
+          takeoverToken,
+        },
+      };
+    }
+
+    return { assignment: publicAssignment(assignment) };
+  }
+
+  acceptTakeover(input: TakeoverActionInput): PublicTakeoverAssignment {
+    const { assignment } = this.requireTakeoverAction(input);
+    if (assignment.status !== "offered") {
+      throw new StoreError(409, `Takeover assignment cannot be accepted from status ${assignment.status}`);
+    }
+    if (Date.parse(assignment.expiresAt) <= this.now().getTime()) {
+      this.expireAssignment(this.requireGroup(input.groupId), assignment);
+      throw new StoreError(409, "Takeover assignment has expired");
+    }
+
+    assignment.status = "accepted";
+    assignment.acceptedAt = this.nowIso();
+    return publicAssignment(assignment);
+  }
+
+  completeTakeover(input: TakeoverActionInput): PublicTakeoverAssignment {
+    const { group, host, assignment } = this.requireTakeoverAction(input);
+    if (assignment.status !== "accepted") {
+      throw new StoreError(409, `Takeover assignment cannot be completed from status ${assignment.status}`);
+    }
+    if (assignment.currentHostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Takeover assignment generation is stale");
+    }
+
+    const now = this.nowIso();
+    assignment.status = "completed";
+    assignment.completedAt = now;
+    group.currentHostId = host.hostId;
+    group.currentHostGeneration += 1;
+    group.activeTakeoverAssignmentId = null;
+    group.updatedAt = now;
+    host.status = "hosting";
+    host.updatedAt = now;
+    return publicAssignment(assignment);
+  }
+
+  failTakeover(input: TakeoverActionInput & { failureReason: string }): PublicTakeoverAssignment {
+    const { group, host, assignment } = this.requireTakeoverAction(input);
+    if (assignment.status !== "offered" && assignment.status !== "accepted") {
+      throw new StoreError(409, `Takeover assignment cannot fail from status ${assignment.status}`);
+    }
+
+    const now = this.nowIso();
+    assignment.status = "failed";
+    assignment.failedAt = now;
+    assignment.failureReason = input.failureReason;
+    group.activeTakeoverAssignmentId = null;
+    group.updatedAt = now;
+    host.recentFailureCount += 1;
+    host.updatedAt = now;
+    return publicAssignment(assignment);
+  }
+
+  getTakeoverAssignment(groupId: string, assignmentId: string): TakeoverAssignmentRecord {
+    const group = this.requireGroup(groupId);
+    const assignment = group.takeoverAssignments.get(assignmentId);
+    if (!assignment) {
+      throw new StoreError(404, "Takeover assignment does not exist");
+    }
+    return {
+      ...assignment,
+      latestArtifactsAtAssignment: { ...assignment.latestArtifactsAtAssignment },
+    };
+  }
+
   verifyHost(input: { groupId: string; hostId: string; hostToken: string }): void {
     const group = this.requireGroup(input.groupId);
-    const host = group.hosts.get(input.hostId);
-
-    if (!host) {
-      throw new StoreError(404, "Host does not exist in group");
-    }
-
-    if (!verifySecret(input.hostToken, host.hostTokenHash)) {
-      throw new StoreError(401, "Invalid host token");
-    }
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
   }
 
   recordArtifact(metadata: Omit<ArtifactMetadata, "updatedAt">): ArtifactMetadata {
@@ -271,7 +701,7 @@ export class InMemoryCoordinatorStore {
       throw new StoreError(400, "serverPackVersion is required for world-snapshot artifacts");
     }
 
-    const now = new Date().toISOString();
+    const now = this.nowIso();
     const artifact = {
       ...metadata,
       updatedAt: now,
@@ -318,13 +748,13 @@ export class InMemoryCoordinatorStore {
 
   getLatestArtifact(groupId: string, artifactKind: ArtifactKind): ArtifactMetadata {
     const group = this.requireGroup(groupId);
-    const artifactId = group.latestArtifacts.get(artifactKind);
+    const artifact = this.findLatestArtifact(group, artifactKind);
 
-    if (!artifactId) {
+    if (!artifact) {
       throw new StoreError(404, "No available artifact exists for this kind");
     }
 
-    return this.getArtifact(groupId, artifactKind, artifactId);
+    return artifact;
   }
 
   private requireGroup(groupId: string): GroupRecord {
@@ -337,23 +767,155 @@ export class InMemoryCoordinatorStore {
     return group;
   }
 
+  private requireHost(group: GroupRecord, hostId: string): HostRecord {
+    const host = group.hosts.get(hostId);
+    if (!host) {
+      throw new StoreError(404, "Host does not exist in group");
+    }
+    return host;
+  }
+
+  private verifyHostToken(host: HostRecord, hostToken: string): void {
+    if (!verifySecret(hostToken, host.hostTokenHash)) {
+      throw new StoreError(401, "Invalid host token");
+    }
+  }
+
+  private findLatestArtifact(group: GroupRecord, artifactKind: ArtifactKind): ArtifactMetadata | undefined {
+    const artifactId = group.latestArtifacts.get(artifactKind);
+    return artifactId === undefined ? undefined : group.artifacts.get(artifactKind)?.get(artifactId);
+  }
+
   private shouldAdvanceLatest(group: GroupRecord, artifact: ArtifactMetadata): boolean {
-    const currentLatestId = group.latestArtifacts.get(artifact.artifactKind);
-    if (!currentLatestId) {
-      return true;
-    }
+    const currentLatest = this.findLatestArtifact(group, artifact.artifactKind);
+    return currentLatest === undefined || artifact.createdAt > currentLatest.createdAt;
+  }
 
-    const currentLatest = group.artifacts.get(artifact.artifactKind)?.get(currentLatestId);
-    if (!currentLatest) {
-      return true;
-    }
+  private nowIso(): string {
+    return this.now().toISOString();
+  }
 
-    return artifact.createdAt > currentLatest.createdAt;
+  private activeAssignment(group: GroupRecord): TakeoverAssignmentRecord | null {
+    if (group.activeTakeoverAssignmentId === null) return null;
+    return group.takeoverAssignments.get(group.activeTakeoverAssignmentId) ?? null;
+  }
+
+  private cancelActiveAssignment(group: GroupRecord): void {
+    this.expireActiveAssignment(group);
+    const active = this.activeAssignment(group);
+    if (active !== null && (active.status === "offered" || active.status === "accepted")) {
+      active.status = "cancelled";
+    }
+    group.activeTakeoverAssignmentId = null;
+  }
+
+  private expireActiveAssignment(group: GroupRecord): void {
+    const active = this.activeAssignment(group);
+    if (
+      active !== null &&
+      (active.status === "offered" || active.status === "accepted") &&
+      Date.parse(active.expiresAt) <= this.now().getTime()
+    ) {
+      this.expireAssignment(group, active);
+    }
+  }
+
+  private expireAssignment(group: GroupRecord, assignment: TakeoverAssignmentRecord): void {
+    assignment.status = "expired";
+    if (group.activeTakeoverAssignmentId === assignment.assignmentId) {
+      group.activeTakeoverAssignmentId = null;
+    }
+  }
+
+  private requireTakeoverAction(input: TakeoverActionInput): {
+    group: GroupRecord;
+    host: HostRecord;
+    assignment: TakeoverAssignmentRecord;
+  } {
+    const group = this.requireGroup(input.groupId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+    const assignment = group.takeoverAssignments.get(input.assignmentId);
+    if (!assignment) {
+      throw new StoreError(404, "Takeover assignment does not exist");
+    }
+    if (assignment.hostId !== host.hostId) {
+      throw new StoreError(403, "Takeover assignment belongs to another host");
+    }
+    if (assignment.takeoverTokenHash === null || !verifySecret(input.takeoverToken, assignment.takeoverTokenHash)) {
+      throw new StoreError(401, "Invalid takeover token");
+    }
+    return { group, host, assignment };
   }
 }
 
-export function createInMemoryCoordinatorStore(): InMemoryCoordinatorStore {
-  return new InMemoryCoordinatorStore();
+export function createInMemoryCoordinatorStore(options: StoreOptions = {}): InMemoryCoordinatorStore {
+  return new InMemoryCoordinatorStore(options);
+}
+
+type TakeoverActionInput = {
+  groupId: string;
+  hostId: string;
+  hostToken: string;
+  assignmentId: string;
+  takeoverToken: string;
+};
+
+function copyCandidate(candidate: ElectionCandidate): ElectionCandidate {
+  return {
+    ...candidate,
+    reasons: [...candidate.reasons],
+    latestLocalArtifacts: { ...candidate.latestLocalArtifacts },
+  };
+}
+
+function copyElection(election: ElectionResult): ElectionResult {
+  return {
+    ...election,
+    candidates: election.candidates.map(copyCandidate),
+  };
+}
+
+function publicAssignment(assignment: TakeoverAssignmentRecord): PublicTakeoverAssignment {
+  const { takeoverTokenHash: _takeoverTokenHash, ...result } = assignment;
+  return {
+    ...result,
+    latestArtifactsAtAssignment: { ...result.latestArtifactsAtAssignment },
+  };
+}
+
+function compareCandidates(a: ElectionCandidate, b: ElectionCandidate): number {
+  return (
+    b.score - a.score ||
+    compareHeartbeatDescending(a.lastHeartbeatAt, b.lastHeartbeatAt) ||
+    compareAscending(a.hostId, b.hostId)
+  );
+}
+
+function compareAscending(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+function compareHeartbeatDescending(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return b.localeCompare(a);
+}
+
+function isFresh(lastHeartbeatAt: string | null, now: Date, timeoutMs: number): boolean {
+  if (lastHeartbeatAt === null) return false;
+  const heartbeatMs = Date.parse(lastHeartbeatAt);
+  return Number.isFinite(heartbeatMs) && now.getTime() - heartbeatMs <= timeoutMs;
+}
+
+function positiveEnvInteger(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function createId(prefix: string): string {

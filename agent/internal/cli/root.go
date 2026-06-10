@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -54,6 +55,8 @@ func newRootCmd() *cobra.Command {
 		newPullCmd(),
 		newManifestCmd(),
 		newServerCmd(),
+		newElectionCmd(),
+		newTakeoverCmd(),
 	)
 	return rootCmd
 }
@@ -196,16 +199,23 @@ func newLoginCmd() *cobra.Command {
 }
 
 func newHeartbeatCmd() *cobra.Command {
-	var status string
+	var opts heartbeatOptions
 	cmd := &cobra.Command{
 		Use:   "heartbeat",
 		Short: "Send one host heartbeat to the Coordinator",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runHeartbeat(cmd.Context(), cmd, status)
+			return runHeartbeat(cmd.Context(), cmd, opts)
 		},
 	}
 
-	cmd.Flags().StringVar(&status, "status", "standby", "Host status to report")
+	cmd.Flags().StringVar(&opts.status, "status", "standby", "Host status to report")
+	cmd.Flags().StringVar(&opts.latestWorldSnapshot, "latest-world-snapshot", "", "Latest local world snapshot artifact ID")
+	cmd.Flags().StringVar(&opts.latestServerPack, "latest-server-pack", "", "Latest local server pack artifact ID")
+	cmd.Flags().StringVar(&opts.latestAdminState, "latest-admin-state", "", "Latest local admin state artifact ID")
+	cmd.Flags().StringVar(&opts.javaAvailable, "java-available", "", "Override Java availability: true or false")
+	cmd.Flags().StringVar(&opts.connectionHost, "connection-host", "", "Host address players can connect to")
+	cmd.Flags().IntVar(&opts.connectionPort, "connection-port", 0, "Minecraft server connection port")
+	cmd.Flags().StringVar(&opts.connectionNetwork, "connection-network", "", "Connection network label, such as tailscale")
 	return cmd
 }
 
@@ -440,6 +450,17 @@ type loginOptions struct {
 	displayName    string
 	deviceName     string
 	platform       string
+}
+
+type heartbeatOptions struct {
+	status              string
+	latestWorldSnapshot string
+	latestServerPack    string
+	latestAdminState    string
+	javaAvailable       string
+	connectionHost      string
+	connectionPort      int
+	connectionNetwork   string
 }
 
 type scanOptions struct {
@@ -914,9 +935,9 @@ func runLogin(ctx context.Context, cmd *cobra.Command, opts loginOptions) error 
 	return nil
 }
 
-func runHeartbeat(ctx context.Context, cmd *cobra.Command, status string) error {
-	if !coordinator.ValidStatus(status) {
-		return fmt.Errorf("invalid status %q", status)
+func runHeartbeat(ctx context.Context, cmd *cobra.Command, opts heartbeatOptions) error {
+	if !coordinator.ValidStatus(opts.status) {
+		return fmt.Errorf("invalid status %q", opts.status)
 	}
 
 	cfg, configPath, err := loadConfig()
@@ -924,7 +945,11 @@ func runHeartbeat(ctx context.Context, cmd *cobra.Command, status string) error 
 		return err
 	}
 
-	resp, err := sendHeartbeat(ctx, cfg, status)
+	req, err := buildHeartbeatRequest(cfg, opts)
+	if err != nil {
+		return err
+	}
+	resp, err := sendHeartbeat(ctx, cfg, req)
 	if err != nil {
 		return err
 	}
@@ -977,7 +1002,11 @@ func runDaemon(ctx context.Context, cmd *cobra.Command, status string, interval 
 }
 
 func daemonTick(ctx context.Context, cmd *cobra.Command, cfg agentconfig.Config, status string) error {
-	resp, err := sendHeartbeat(ctx, cfg, status)
+	req, err := buildHeartbeatRequest(cfg, heartbeatOptions{status: status})
+	if err != nil {
+		return err
+	}
+	resp, err := sendHeartbeat(ctx, cfg, req)
 	if err != nil {
 		return err
 	}
@@ -1000,19 +1029,66 @@ func loadConfig() (agentconfig.Config, string, error) {
 	return cfg, configPath, nil
 }
 
-func sendHeartbeat(ctx context.Context, cfg agentconfig.Config, status string) (coordinator.HeartbeatResponse, error) {
-	client, err := coordinator.NewClient(cfg.CoordinatorURL)
-	if err != nil {
-		return coordinator.HeartbeatResponse{}, err
+func buildHeartbeatRequest(cfg agentconfig.Config, opts heartbeatOptions) (coordinator.HeartbeatRequest, error) {
+	javaAvailable := false
+	if _, err := exec.LookPath("java"); err == nil {
+		javaAvailable = true
+	}
+	if opts.javaAvailable != "" {
+		parsed, err := strconv.ParseBool(opts.javaAvailable)
+		if err != nil {
+			return coordinator.HeartbeatRequest{}, errors.New("--java-available must be true or false")
+		}
+		javaAvailable = parsed
+	}
+
+	latestArtifacts := make(map[string]string)
+	if opts.latestWorldSnapshot != "" {
+		latestArtifacts[string(manifest.WorldSnapshot)] = opts.latestWorldSnapshot
+	}
+	if opts.latestServerPack != "" {
+		latestArtifacts[string(manifest.ServerPack)] = opts.latestServerPack
+	}
+	if opts.latestAdminState != "" {
+		latestArtifacts[string(manifest.AdminState)] = opts.latestAdminState
+	}
+
+	var connection *coordinator.HostConnection
+	if opts.connectionHost != "" || opts.connectionPort != 0 || opts.connectionNetwork != "" {
+		if opts.connectionHost == "" || opts.connectionPort < 1 || opts.connectionPort > 65535 || opts.connectionNetwork == "" {
+			return coordinator.HeartbeatRequest{}, errors.New("connection host, port, and network must be provided together")
+		}
+		connection = &coordinator.HostConnection{
+			Host:    opts.connectionHost,
+			Port:    opts.connectionPort,
+			Network: opts.connectionNetwork,
+		}
 	}
 
 	req := coordinator.HeartbeatRequest{
 		GroupID:               cfg.GroupID,
 		HostID:                cfg.HostID,
 		HostToken:             cfg.HostToken,
-		Status:                status,
+		Status:                opts.status,
 		LatestLocalSnapshotID: nil,
+		HostScoreHints: &coordinator.HostScoreHints{
+			CPUCores:      runtime.NumCPU(),
+			JavaAvailable: &javaAvailable,
+		},
+		Connection: connection,
 	}
+	if len(latestArtifacts) > 0 {
+		req.LatestLocalArtifacts = latestArtifacts
+	}
+	return req, nil
+}
+
+func sendHeartbeat(ctx context.Context, cfg agentconfig.Config, req coordinator.HeartbeatRequest) (coordinator.HeartbeatResponse, error) {
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return coordinator.HeartbeatResponse{}, err
+	}
+
 	if err := coordinator.ValidateHeartbeatRequest(req); err != nil {
 		return coordinator.HeartbeatResponse{}, err
 	}

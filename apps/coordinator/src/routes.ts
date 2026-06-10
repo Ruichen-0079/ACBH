@@ -41,11 +41,61 @@ const heartbeatSchema = z.object({
   hostId: z.string().min(1),
   hostToken: z.string().min(1),
   status: z.enum(["online", "standby", "hosting", "unhealthy", "offline"]),
-  latestLocalSnapshotId: z.string().min(1).nullable(),
+  latestLocalSnapshotId: z.string().min(1).nullable().optional(),
+  latestLocalArtifacts: z
+    .object({
+      "world-snapshot": z.string().min(1).optional(),
+      "server-pack": z.string().min(1).optional(),
+      "admin-state": z.string().min(1).optional(),
+    })
+    .optional(),
+  hostScoreHints: z
+    .object({
+      cpuCores: z.number().int().nonnegative().optional(),
+      memoryTotalBytes: z.number().int().nonnegative().optional(),
+      diskFreeBytes: z.number().int().nonnegative().optional(),
+      javaAvailable: z.boolean().optional(),
+    })
+    .optional(),
+  connection: z
+    .object({
+      host: z.string().trim().min(1).max(255),
+      port: z.number().int().min(1).max(65535),
+      network: z.string().trim().min(1).max(40),
+    })
+    .nullable()
+    .optional(),
 });
 
 const groupStateParamsSchema = z.object({
   groupId: z.string().min(1),
+});
+
+const electionParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const electionAuthSchema = z.object({
+  groupId: z.string().min(1),
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+});
+
+const electionRunSchema = electionAuthSchema.extend({
+  reason: z.enum(["manual", "heartbeat-timeout", "no-current-host"]),
+});
+
+const takeoverActionSchema = electionAuthSchema.extend({
+  assignmentId: z.string().min(1),
+  takeoverToken: z.string().min(1),
+});
+
+const takeoverPollSchema = electionAuthSchema.extend({
+  dryRun: z.boolean().optional(),
+});
+
+const takeoverFailSchema = takeoverActionSchema.extend({
+  failureReason: z.string().trim().min(1).max(200),
 });
 
 const artifactKinds = ["server-pack", "world-snapshot", "admin-state"] as const;
@@ -377,6 +427,99 @@ export async function registerRoutes(
     return handleStoreCall(reply, () => store.updateHeartbeat(body));
   });
 
+  app.post("/v1/groups/:groupId/election/run", async (request, reply) => {
+    const params = parseParams(electionParamsSchema, request, reply);
+    const body = parseBody(electionRunSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    if (params.groupId !== body.groupId) {
+      return reply.code(400).send({
+        error: "Bad Request",
+        message: "Request groupId must match route groupId",
+      });
+    }
+
+    return handleStoreCall(reply, () => {
+      store.verifyHost(body);
+      return store.runElection({ groupId: body.groupId, reason: body.reason });
+    });
+  });
+
+  app.post("/v1/groups/:groupId/election/check-timeout", async (request, reply) => {
+    const params = parseParams(electionParamsSchema, request, reply);
+    const body = parseBody(electionAuthSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    if (params.groupId !== body.groupId) {
+      return reply.code(400).send({
+        error: "Bad Request",
+        message: "Request groupId must match route groupId",
+      });
+    }
+
+    return handleStoreCall(reply, () => {
+      store.verifyHost(body);
+      return store.checkElectionTimeout(body.groupId);
+    });
+  });
+
+  app.get("/v1/groups/:groupId/election/status", async (request, reply) => {
+    const params = parseParams(electionParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      return store.getElectionStatus(params.groupId);
+    });
+  });
+
+  app.post("/v1/hosts/takeover/poll", async (request, reply) => {
+    const body = parseBody(takeoverPollSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => store.pollTakeover(body));
+  });
+
+  app.post("/v1/hosts/takeover/accept", async (request, reply) => {
+    const body = parseBody(takeoverActionSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => ({
+      ok: true,
+      assignment: store.acceptTakeover(body),
+    }));
+  });
+
+  app.post("/v1/hosts/takeover/complete", async (request, reply) => {
+    const body = parseBody(takeoverActionSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => ({
+      ok: true,
+      assignment: store.completeTakeover(body),
+    }));
+  });
+
+  app.post("/v1/hosts/takeover/fail", async (request, reply) => {
+    const body = parseBody(takeoverFailSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => ({
+      ok: true,
+      assignment: store.failTakeover(body),
+    }));
+  });
+
   app.get("/v1/groups/:groupId/state", async (request, reply) => {
     const params = parseParams(groupStateParamsSchema, request, reply);
     if (!params) {
@@ -587,6 +730,8 @@ function statusText(statusCode: number): string {
       return "Forbidden";
     case 404:
       return "Not Found";
+    case 409:
+      return "Conflict";
     case 413:
       return "Payload Too Large";
     default:

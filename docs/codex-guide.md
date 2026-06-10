@@ -54,6 +54,15 @@ Create a runnable repository skeleton:
 - Keep process state and logs local to the Agent user config directory.
 - Do not implement host election or automatic takeover while adding local process control.
 - Do not add a GUI, proxy, relay, or Coordinator-side Minecraft process control in the process-manager PR.
+- Keep election deterministic and expose candidate reasons for debugging.
+- Election must create an assignment; it must not start a server or finalize `currentHostId`.
+- Only takeover completion may increment `currentHostGeneration`.
+- Never return or log Host Tokens or stored takeover-token hashes.
+- Keep takeover dry-run read-only; it must not generate or consume the one-time token.
+- Agent takeover restores server-pack, admin-state, then world-snapshot before process start.
+- Takeover must not run RCON or safe-sync; it consumes already available artifacts.
+- Keep the local two-host demo fake-server based. Do not add a Minecraft installer.
+- Do not describe takeover as hot migration or live session transfer. Players reconnect.
 
 ## Useful issues
 
