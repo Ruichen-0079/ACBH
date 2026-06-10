@@ -65,6 +65,7 @@ Create a runnable repository skeleton:
 - Do not describe takeover as hot migration or live session transfer. Players reconnect.
 - Daemon auto-takeover is opt-in via --auto-takeover flag and reuses the existing takeover.Run flow.
 - Artifact GC (retention) is manual API/CLI only; never schedule automatic GC.
+- Coordinator local state persistence to JSON is implemented. PostgreSQL is not.
 
 ## Useful issues
 

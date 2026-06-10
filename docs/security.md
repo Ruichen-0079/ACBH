@@ -107,6 +107,19 @@ Protected artifacts cannot be deleted:
 
 Only `available` and `rejected` artifacts are deletion candidates. Object blobs are only deleted when no retained manifest references them.
 
+## Coordinator state persistence
+
+The Coordinator persists its in-memory state to a local JSON file so group, host, artifact, election, and takeover metadata survive restarts.
+
+Rules:
+
+- State is saved to `ACBH_COORDINATOR_STATE_PATH`. Set this env var to a file path (e.g. `./data/coordinator-state.json`) to enable persistence. Unset or empty disables it.
+- The file contains host token hashes and takeover token hashes, never the raw secrets.
+- Store only the SHA256 hash of host tokens and takeover tokens in persisted state. Raw Host Token and Takeover Token are returned at registration/poll time and never written to the file.
+- The state file should be protected with restrictive file permissions (operator responsibility).
+- Writes use a temp-file + rename strategy to avoid corrupting the file on crash.
+- A `version` field guards against loading future or invalid formats.
+
 ## Secrets
 
 Never print these values in logs:
