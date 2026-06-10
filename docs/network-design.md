@@ -131,3 +131,27 @@ Tunnel sessions and player sessions are **ephemeral runtime state**. They are
 - The snapshot mechanism (`StoreSnapshot`) and persistence layer deliberately
   exclude tunnel/player sessions. Only durable state from PR25 (groups, hosts,
   artifacts, election history, takeover assignments) is persisted.
+
+## Relay MVP runtime (PR27)
+
+The relay-only byte forwarding path has been implemented:
+
+- **WebSocket transport**: The Public Node exposes WebSocket endpoints under
+  `/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/{host,player}`.
+  WebSocket binary frames are used for opaque byte forwarding between host and
+  player. This is the MVP transport; future direct/P2P transport remains a
+  separate concern.
+- **Host-side auth**: Host connections require `X-ACBH-Host-ID`,
+  `X-ACBH-Host-Token`, and `X-ACBH-Host-Generation` headers. Stale generation
+  and non-current-host connections are rejected.
+- **Player-side auth**: Player connections require `X-ACBH-Player-ID` and
+  `X-ACBH-Player-Token`. The player token is returned once on session creation
+  and stored as a SHA256 hash in memory.
+- **RelayManager**: An in-memory relay pair tracker handles at most one host
+  and one player WebSocket per tunnel session. Binary frames are forwarded
+  directly between peers. The relay is ephemeral and not persisted.
+- **Status transitions**: Tunnel status becomes `active` when both sides
+  connect, `closed` when either side disconnects.
+- Relay runtime state (RelayPair, byte counters, active WebSocket references)
+  is **not included** in the Coordinator persistence snapshot. After restart,
+  hosts and players must reconnect and create new sessions.

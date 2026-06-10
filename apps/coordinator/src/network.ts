@@ -23,6 +23,10 @@ export interface PlayerSession {
   expiresAt: string;
 }
 
+export interface PlayerSessionResponse extends PlayerSession {
+  playerToken?: string;
+}
+
 export interface HostTunnelPresence {
   hostId: string;
   groupId: string;

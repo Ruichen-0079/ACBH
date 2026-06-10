@@ -5,6 +5,7 @@ import type {
   TunnelStatus,
   TunnelSession,
   PlayerSession,
+  PlayerSessionResponse,
   HostTunnelPresence,
 } from "./network.js";
 
@@ -219,8 +220,12 @@ type GroupRecord = {
   lastElection: ElectionResult | null;
   activeTakeoverAssignmentId: string | null;
   takeoverAssignments: Map<string, TakeoverAssignmentRecord>;
-  playerSessions: Map<string, PlayerSession>;
+  playerSessions: Map<string, PlayerSessionRecord>;
   tunnelSessions: Map<string, TunnelSession>;
+};
+
+type PlayerSessionRecord = PlayerSession & {
+  playerTokenHash: string;
 };
 
 export type GroupSnapshot = {
@@ -1150,32 +1155,47 @@ export class InMemoryCoordinatorStore {
     return artifact;
   }
 
-  createPlayerSession(input: { groupId: string; displayName?: string }): PlayerSession {
+  createPlayerSession(input: { groupId: string; displayName?: string }): PlayerSessionResponse {
     const group = this.requireGroup(input.groupId);
     const now = this.now();
     const nowIso = now.toISOString();
     const expiresAt = new Date(now.getTime() + this.tunnelSessionTtlMs).toISOString();
     const playerId = createId("plyr");
+    const playerToken = createSecret("pt");
 
-    const session: PlayerSession = {
+    const record: PlayerSessionRecord = {
       playerId,
       groupId: group.groupId,
       displayName: input.displayName,
       createdAt: nowIso,
       expiresAt,
+      playerTokenHash: hashSecret(playerToken),
     };
 
-    group.playerSessions.set(playerId, session);
-    return { ...session };
+    group.playerSessions.set(playerId, record);
+    const { playerTokenHash: _, ...publicSession } = record;
+    return { ...publicSession, playerToken };
   }
 
   getPlayerSession(groupId: string, playerId: string): PlayerSession {
     const group = this.requireGroup(groupId);
-    const session = group.playerSessions.get(playerId);
-    if (!session) {
+    const record = group.playerSessions.get(playerId);
+    if (!record) {
       throw new StoreError(404, "Player session does not exist");
     }
+    const { playerTokenHash: _, ...session } = record;
     return { ...session };
+  }
+
+  verifyPlayerToken(groupId: string, playerId: string, playerToken: string): void {
+    const group = this.requireGroup(groupId);
+    const record = group.playerSessions.get(playerId);
+    if (!record) {
+      throw new StoreError(404, "Player session does not exist");
+    }
+    if (!verifySecret(playerToken, record.playerTokenHash)) {
+      throw new StoreError(401, "Invalid player token");
+    }
   }
 
   createTunnelSession(input: { groupId: string; playerId: string }): TunnelSession {
@@ -1231,6 +1251,40 @@ export class InMemoryCoordinatorStore {
       throw new StoreError(404, "Tunnel session does not exist");
     }
     session.status = status;
+    return { ...session };
+  }
+
+  getTunnelSessionForRelay(
+    groupId: string,
+    sessionId: string,
+    expectedHostId: string,
+    expectedHostGeneration: number,
+  ): TunnelSession {
+    const group = this.requireGroup(groupId);
+    const session = group.tunnelSessions.get(sessionId);
+    if (!session) {
+      throw new StoreError(404, "Tunnel session does not exist");
+    }
+    if (session.status !== "pending" && session.status !== "active") {
+      throw new StoreError(409, `Tunnel session is ${session.status} and cannot be joined for relay`);
+    }
+    const expiresMs = Date.parse(session.expiresAt);
+    if (!Number.isFinite(expiresMs) || expiresMs <= this.now().getTime()) {
+      session.status = "expired";
+      throw new StoreError(410, "Tunnel session has expired");
+    }
+    if (session.hostId !== expectedHostId) {
+      throw new StoreError(403, "Tunnel session belongs to a different host");
+    }
+    if (session.currentHostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Generation is stale; current host has changed");
+    }
+    if (expectedHostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Host generation is stale; current host may have changed");
+    }
+    if (group.currentHostId !== expectedHostId) {
+      throw new StoreError(403, "Only the current host may join relay");
+    }
     return { ...session };
   }
 

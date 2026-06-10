@@ -78,6 +78,17 @@ Create a runnable repository skeleton:
 - #11 End-to-end takeover demo
 - #26 Network / Relay architecture groundwork
 
+## PR27: Public Relay MVP
+
+Public relay MVP byte forwarding has been implemented:
+
+- WebSocket relay endpoints under `/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/{host,player}`
+- `RelayManager` in `apps/coordinator/src/relay.ts` tracks active relay pairs and forwards binary frames
+- Player session token auth (one-time token, SHA256 hashed, never exposed in tunnel responses)
+- Host-side auth with host ID/token/generation for relay connections
+- Relay is ephemeral runtime state; not persisted across restarts
+- Next PR should connect the Host Agent to the relay WebSocket endpoint
+
 ## PR26: Network / Relay architecture
 
 Network/relay architecture groundwork has been added:
