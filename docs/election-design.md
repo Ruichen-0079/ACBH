@@ -105,6 +105,20 @@ Missing artifact kinds are skipped. Deletes are applied by default so the restor
 
 This is restore plus process start, not hot migration. No live player session is transferred, players must reconnect, and the Coordinator never runs Minecraft.
 
+## Daemon auto-takeover (opt-in)
+
+`acbh-agent daemon --auto-takeover=true` extends the heartbeat loop to automatically poll and execute takeover assignments without human intervention.
+
+- The daemon starts by checking `GET /v1/groups/:groupId/election/status`. If this host is already the current host, it sends `hosting` heartbeats and skips all takeover polling.
+- On each heartbeat cycle (or per `--takeover-interval`), the daemon polls for a takeover assignment. When one is found, it runs the full `takeover.Run` flow (poll → accept → restore artifacts → start server → heartbeat `hosting` → complete).
+- After a successful takeover, the daemon transitions to `hosting` heartbeats and permanently stops polling.
+- `takeover.Run` remains the sole owner of poll/accept/fail/complete. The daemon never calls PollTakeover directly — it delegates to `takeover.Run`.
+- Failures after accept are reported via `FailTakeover` by `takeover.Run`. Failures before accept (poll error, no assignment, accept rejected) do not generate a fail report.
+- A concurrency guard (`atomic.Bool`) ensures only one takeover runs at a time. If a takeover is already in progress, the daemon skips the current poll window.
+- `--auto-takeover` requires `--server-dir` and `--command`. Without `--auto-takeover`, daemon behavior is unchanged from prior releases.
+
+
+
 ## Split-brain boundary
 
 The assignment token and generation form the current V1 lease boundary. They reduce accidental stale completion, but the Coordinator remains in-memory and there is no distributed consensus or network fencing in this milestone.

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/mcserver"
 	"github.com/Ruichen-0079/ACBH/agent/internal/rcon"
 	"github.com/Ruichen-0079/ACBH/agent/internal/scanner"
+	"github.com/Ruichen-0079/ACBH/agent/internal/takeover"
 	"github.com/spf13/cobra"
 )
 
@@ -220,19 +222,35 @@ func newHeartbeatCmd() *cobra.Command {
 }
 
 func newDaemonCmd() *cobra.Command {
-	var status string
-	var interval time.Duration
+	var opts daemonOptions
 	cmd := &cobra.Command{
 		Use:   "daemon",
 		Short: "Send host heartbeats until interrupted",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemon(cmd.Context(), cmd, status, interval)
+			return runDaemon(cmd.Context(), cmd, opts)
 		},
 	}
 
-	cmd.Flags().StringVar(&status, "status", "standby", "Host status to report")
-	cmd.Flags().DurationVar(&interval, "interval", defaultHeartbeatInterval, "Heartbeat interval")
+	cmd.Flags().StringVar(&opts.status, "status", "standby", "Host status to report")
+	cmd.Flags().DurationVar(&opts.interval, "interval", defaultHeartbeatInterval, "Heartbeat interval")
+	cmd.Flags().BoolVar(&opts.autoTakeover, "auto-takeover", false, "Enable automatic takeover assignment execution")
+	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Minecraft server working directory (required with --auto-takeover)")
+	cmd.Flags().StringVar(&opts.command, "command", "", "User-provided server launch command (required with --auto-takeover)")
+	cmd.Flags().StringVar(&opts.logDir, "log-dir", "", "Directory for server stdout and stderr logs")
+	cmd.Flags().DurationVar(&opts.stopTimeout, "stop-timeout", defaultServerStopTimeout, "Graceful stop timeout before forced kill")
+	cmd.Flags().DurationVar(&opts.takeoverInterval, "takeover-interval", 0, "Takeover poll interval (defaults to heartbeat interval)")
 	return cmd
+}
+
+type daemonOptions struct {
+	status           string
+	interval         time.Duration
+	autoTakeover     bool
+	serverDir        string
+	command          string
+	logDir           string
+	stopTimeout      time.Duration
+	takeoverInterval time.Duration
 }
 
 func newScanCmd() *cobra.Command {
@@ -980,12 +998,30 @@ func runHeartbeat(ctx context.Context, cmd *cobra.Command, opts heartbeatOptions
 	return nil
 }
 
-func runDaemon(ctx context.Context, cmd *cobra.Command, status string, interval time.Duration) error {
-	if !coordinator.ValidStatus(status) {
-		return fmt.Errorf("invalid status %q", status)
+func runDaemon(ctx context.Context, cmd *cobra.Command, opts daemonOptions) error {
+	if !coordinator.ValidStatus(opts.status) {
+		return fmt.Errorf("invalid status %q", opts.status)
 	}
-	if interval <= 0 {
+	if opts.interval <= 0 {
 		return errors.New("interval must be positive")
+	}
+	if opts.stopTimeout <= 0 {
+		opts.stopTimeout = defaultServerStopTimeout
+	}
+	if opts.takeoverInterval <= 0 {
+		opts.takeoverInterval = opts.interval
+	}
+	if opts.autoTakeover {
+		if opts.serverDir == "" || opts.command == "" {
+			return errors.New("--server-dir and --command are required when --auto-takeover is enabled")
+		}
+		if opts.logDir == "" {
+			configDir, err := agentconfig.DefaultDir()
+			if err != nil {
+				return fmt.Errorf("resolve default log directory: %w", err)
+			}
+			opts.logDir = filepath.Join(configDir, "logs")
+		}
 	}
 
 	cfg, configPath, err := loadConfig()
@@ -996,15 +1032,52 @@ func runDaemon(ctx context.Context, cmd *cobra.Command, status string, interval 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Starting heartbeat daemon with config %s\n", configPath)
-	fmt.Fprintf(cmd.OutOrStdout(), "Interval: %s\n", interval)
-	fmt.Fprintf(cmd.OutOrStdout(), "Status: %s\n", status)
-
-	if err := daemonTick(ctx, cmd, cfg, status); err != nil {
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
 		return err
 	}
 
-	ticker := time.NewTicker(interval)
+	auth := coordinator.ElectionAuthRequest{
+		GroupID:   cfg.GroupID,
+		HostID:    cfg.HostID,
+		HostToken: cfg.HostToken,
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Starting heartbeat daemon with config %s\n", configPath)
+	fmt.Fprintf(cmd.OutOrStdout(), "Interval: %s\n", opts.interval)
+	fmt.Fprintf(cmd.OutOrStdout(), "Status: %s\n", opts.status)
+	if opts.autoTakeover {
+		fmt.Fprintf(cmd.OutOrStdout(), "Auto-takeover: enabled\n")
+		fmt.Fprintf(cmd.OutOrStdout(), "Takeover interval: %s\n", opts.takeoverInterval)
+		fmt.Fprintf(cmd.OutOrStdout(), "Server dir: %s\n", opts.serverDir)
+		fmt.Fprintf(cmd.OutOrStdout(), "Log dir: %s\n", opts.logDir)
+	}
+
+	var (
+		hosting            bool
+		lastTakeoverCheck  time.Time
+		takeoverInProgress atomic.Bool
+	)
+
+	if opts.autoTakeover {
+		status, statusErr := client.GetElectionStatus(ctx, coordinator.ArtifactAuth{GroupID: auth.GroupID, HostID: auth.HostID, HostToken: auth.HostToken})
+		if statusErr != nil {
+			fmt.Fprintf(cmd.OutOrStdout(), "Warning: cannot check election status on startup: %v\n", statusErr)
+		} else if status.CurrentHostID != nil && *status.CurrentHostID == cfg.HostID {
+			hosting = true
+			fmt.Fprintf(cmd.OutOrStdout(), "Already current host, sending hosting heartbeats and skipping takeover polling.\n")
+		}
+	}
+
+	hbStatus := opts.status
+	if hosting {
+		hbStatus = "hosting"
+	}
+	if err := daemonTick(ctx, cmd, cfg, hbStatus); err != nil {
+		return err
+	}
+
+	ticker := time.NewTicker(opts.interval)
 	defer ticker.Stop()
 
 	for {
@@ -1013,8 +1086,45 @@ func runDaemon(ctx context.Context, cmd *cobra.Command, status string, interval 
 			fmt.Fprintln(cmd.OutOrStdout(), "Heartbeat daemon stopped.")
 			return nil
 		case <-ticker.C:
-			if err := daemonTick(ctx, cmd, cfg, status); err != nil {
+			hbStatus := opts.status
+			if hosting {
+				hbStatus = "hosting"
+			}
+			if err := daemonTick(ctx, cmd, cfg, hbStatus); err != nil {
 				return err
+			}
+
+			if !opts.autoTakeover || hosting {
+				continue
+			}
+
+			if takeoverInProgress.Load() {
+				fmt.Fprintln(cmd.OutOrStdout(), "Takeover already in progress, skipping poll.")
+				continue
+			}
+
+			if time.Since(lastTakeoverCheck) < opts.takeoverInterval {
+				continue
+			}
+			lastTakeoverCheck = time.Now()
+
+			takeoverInProgress.Store(true)
+			completed, runErr := runAutoTakeover(ctx, cmd, cfg, client, auth,
+				takeover.StatePath(filepath.Dir(configPath)), mcserver.StartOptions{
+					ServerDir:   opts.serverDir,
+					Command:     opts.command,
+					LogDir:      opts.logDir,
+					StopTimeout: opts.stopTimeout,
+				})
+			takeoverInProgress.Store(false)
+
+			if runErr != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Auto-takeover failed: %v\n", runErr)
+				continue
+			}
+			if completed {
+				hosting = true
+				fmt.Fprintln(cmd.OutOrStdout(), "Auto-takeover completed successfully. Daemon is now hosting.")
 			}
 		}
 	}

@@ -63,6 +63,7 @@ Create a runnable repository skeleton:
 - Takeover must not run RCON or safe-sync; it consumes already available artifacts.
 - Keep the local two-host demo fake-server based. Do not add a Minecraft installer.
 - Do not describe takeover as hot migration or live session transfer. Players reconnect.
+- Daemon auto-takeover is opt-in via --auto-takeover flag and reuses the existing takeover.Run flow.
 
 ## Useful issues
 
