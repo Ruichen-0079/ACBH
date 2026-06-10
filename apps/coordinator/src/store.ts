@@ -214,12 +214,59 @@ type GroupRecord = {
   takeoverAssignments: Map<string, TakeoverAssignmentRecord>;
 };
 
+export type GroupSnapshot = {
+  groupId: string;
+  name: string;
+  accessKeyHash: string;
+  currentHostId: string | null;
+  currentHostGeneration: number;
+  latestSnapshotId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  members: Array<{
+    memberId: string;
+    displayName: string;
+    role: MemberRole;
+    createdAt: string;
+  }>;
+  hosts: Array<{
+    hostId: string;
+    memberId: string;
+    deviceName: string;
+    platform: string;
+    agentVersion: string;
+    status: HostStatus;
+    hostTokenHash: string;
+    latestLocalSnapshotId: string | null;
+    latestLocalArtifacts: LatestLocalArtifacts;
+    hostScoreHints: HostScoreHints;
+    connection: HostConnection | null;
+    computedHostScore: number;
+    recentFailureCount: number;
+    manualPriority: number;
+    lastElectionCandidateAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+    lastHeartbeatAt: string | null;
+  }>;
+  artifacts: Record<ArtifactKind, Record<string, ArtifactMetadata>>;
+  latestArtifacts: Record<ArtifactKind, string>;
+  lastElection: ElectionResult | null;
+  activeTakeoverAssignmentId: string | null;
+  takeoverAssignments: TakeoverAssignmentRecord[];
+};
+
+export type StoreSnapshot = {
+  groups: GroupSnapshot[];
+};
+
 type StoreOptions = {
   now?: () => Date;
   heartbeatTimeoutMs?: number;
   assignmentTtlMs?: number;
   retentionPerKind?: number;
   gcMinAgeMs?: number;
+  onMutation?: () => void;
 };
 
 const defaultHeartbeatTimeoutMs = 30_000;
@@ -247,6 +294,7 @@ export class InMemoryCoordinatorStore {
   readonly assignmentTtlMs: number;
   readonly retentionPerKind: number;
   readonly gcMinAgeMs: number;
+  private readonly onMutation?: () => void;
 
   constructor(options: StoreOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -258,6 +306,99 @@ export class InMemoryCoordinatorStore {
       options.retentionPerKind ?? positiveEnvInteger("ACBH_ARTIFACT_RETENTION_PER_KIND", defaultRetentionPerKind);
     this.gcMinAgeMs =
       options.gcMinAgeMs ?? positiveEnvInteger("ACBH_GC_MIN_AGE_MS", defaultGcMinAgeMs);
+    this.onMutation = options.onMutation;
+  }
+
+  snapshot(): StoreSnapshot {
+    const groups: GroupSnapshot[] = [];
+    for (const group of this.groups.values()) {
+      const artifacts: Record<ArtifactKind, Record<string, ArtifactMetadata>> = {
+        "server-pack": {},
+        "world-snapshot": {},
+        "admin-state": {},
+      };
+      for (const [kind, kindMap] of group.artifacts) {
+        artifacts[kind] = Object.fromEntries(kindMap.entries()) as Record<string, ArtifactMetadata>;
+      }
+      groups.push({
+        groupId: group.groupId,
+        name: group.name,
+        accessKeyHash: group.accessKeyHash,
+        currentHostId: group.currentHostId,
+        currentHostGeneration: group.currentHostGeneration,
+        latestSnapshotId: group.latestSnapshotId,
+        createdAt: group.createdAt,
+        updatedAt: group.updatedAt,
+        members: Array.from(group.members.values()).map((m) => ({
+          memberId: m.memberId,
+          displayName: m.displayName,
+          role: m.role,
+          createdAt: m.createdAt,
+        })),
+        hosts: Array.from(group.hosts.values()).map((h) => ({
+          hostId: h.hostId,
+          memberId: h.memberId,
+          deviceName: h.deviceName,
+          platform: h.platform,
+          agentVersion: h.agentVersion,
+          status: h.status,
+          hostTokenHash: h.hostTokenHash,
+          latestLocalSnapshotId: h.latestLocalSnapshotId,
+          latestLocalArtifacts: { ...h.latestLocalArtifacts },
+          hostScoreHints: { ...h.hostScoreHints },
+          connection: h.connection === null ? null : { ...h.connection },
+          computedHostScore: h.computedHostScore,
+          recentFailureCount: h.recentFailureCount,
+          manualPriority: h.manualPriority,
+          lastElectionCandidateAt: h.lastElectionCandidateAt,
+          createdAt: h.createdAt,
+          updatedAt: h.updatedAt,
+          lastHeartbeatAt: h.lastHeartbeatAt,
+        })),
+        artifacts,
+        latestArtifacts: Object.fromEntries(group.latestArtifacts) as Record<ArtifactKind, string>,
+        lastElection: group.lastElection,
+        activeTakeoverAssignmentId: group.activeTakeoverAssignmentId,
+        takeoverAssignments: Array.from(group.takeoverAssignments.values()),
+      });
+    }
+    return { groups };
+  }
+
+  static fromSnapshot(snapshot: StoreSnapshot, options: StoreOptions = {}): InMemoryCoordinatorStore {
+    const store = new InMemoryCoordinatorStore(options);
+    for (const g of snapshot.groups) {
+      const artifacts = new Map<ArtifactKind, Map<string, ArtifactMetadata>>();
+      for (const kind of ALL_ARTIFACT_KINDS) {
+        const kindObj = g.artifacts[kind];
+        if (kindObj && Object.keys(kindObj).length > 0) {
+          artifacts.set(kind, new Map(Object.entries(kindObj)));
+        }
+      }
+      const group: GroupRecord = {
+        groupId: g.groupId,
+        name: g.name,
+        accessKeyHash: g.accessKeyHash,
+        currentHostId: g.currentHostId,
+        currentHostGeneration: g.currentHostGeneration,
+        latestSnapshotId: g.latestSnapshotId,
+        createdAt: g.createdAt,
+        updatedAt: g.updatedAt,
+        members: new Map(g.members.map((m) => [m.memberId, m])),
+        hosts: new Map(g.hosts.map((h) => [h.hostId, h])),
+        artifacts,
+        latestArtifacts: new Map(Object.entries(g.latestArtifacts)) as Map<ArtifactKind, string>,
+        lastElection: g.lastElection,
+        activeTakeoverAssignmentId: g.activeTakeoverAssignmentId,
+        takeoverAssignments: new Map(g.takeoverAssignments.map((a) => [a.assignmentId, a])),
+      };
+      store.groups.set(g.groupId, group);
+    }
+    return store;
+  }
+
+  private triggerMutation(): void {
+    this.onMutation?.();
   }
 
   createGroup(input: { name: string; ownerName: string }): {
@@ -298,6 +439,7 @@ export class InMemoryCoordinatorStore {
       takeoverAssignments: new Map(),
     });
 
+    this.triggerMutation();
     return { groupId, ownerMemberId, accessKey };
   }
 
@@ -321,6 +463,7 @@ export class InMemoryCoordinatorStore {
     });
     group.updatedAt = now;
 
+    this.triggerMutation();
     return { memberId, role: "member" };
   }
 
@@ -362,6 +505,7 @@ export class InMemoryCoordinatorStore {
     });
     group.updatedAt = now;
 
+    this.triggerMutation();
     return { hostId, hostToken };
   }
 
@@ -407,6 +551,7 @@ export class InMemoryCoordinatorStore {
     host.updatedAt = now;
     group.updatedAt = now;
 
+    this.triggerMutation();
     return { ok: true, hostId: host.hostId, status: host.status };
   }
 
@@ -521,6 +666,7 @@ export class InMemoryCoordinatorStore {
     const host = this.requireHost(group, hostId);
     host.manualPriority = manualPriority;
     host.updatedAt = this.nowIso();
+    this.triggerMutation();
   }
 
   recordHostFailure(groupId: string, hostId: string): void {
@@ -528,6 +674,7 @@ export class InMemoryCoordinatorStore {
     const host = this.requireHost(group, hostId);
     host.recentFailureCount += 1;
     host.updatedAt = this.nowIso();
+    this.triggerMutation();
   }
 
   runElection(input: { groupId: string; reason: ElectionReason }): ElectionRunResponse {
@@ -573,6 +720,7 @@ export class InMemoryCoordinatorStore {
     group.lastElection = election;
     group.updatedAt = nowIso;
 
+    this.triggerMutation();
     return {
       ok: selected !== undefined,
       groupId: group.groupId,
@@ -644,6 +792,7 @@ export class InMemoryCoordinatorStore {
     if (assignment.status === "offered" && assignment.takeoverTokenHash === null) {
       const takeoverToken = createSecret("tt");
       assignment.takeoverTokenHash = hashSecret(takeoverToken);
+      this.triggerMutation();
       return {
         assignment: {
           ...publicAssignment(assignment),
@@ -667,6 +816,7 @@ export class InMemoryCoordinatorStore {
 
     assignment.status = "accepted";
     assignment.acceptedAt = this.nowIso();
+    this.triggerMutation();
     return publicAssignment(assignment);
   }
 
@@ -688,6 +838,7 @@ export class InMemoryCoordinatorStore {
     group.updatedAt = now;
     host.status = "hosting";
     host.updatedAt = now;
+    this.triggerMutation();
     return publicAssignment(assignment);
   }
 
@@ -705,6 +856,7 @@ export class InMemoryCoordinatorStore {
     group.updatedAt = now;
     host.recentFailureCount += 1;
     host.updatedAt = now;
+    this.triggerMutation();
     return publicAssignment(assignment);
   }
 
@@ -754,6 +906,7 @@ export class InMemoryCoordinatorStore {
     }
 
     group.updatedAt = now;
+    this.triggerMutation();
     return artifact;
   }
 
@@ -938,6 +1091,7 @@ export class InMemoryCoordinatorStore {
 
     group.updatedAt = now.toISOString();
 
+    this.triggerMutation();
     return {
       dryRun: false,
       deletedArtifacts: candidates,

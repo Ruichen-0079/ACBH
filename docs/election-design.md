@@ -142,3 +142,7 @@ Artifact garbage collection (`POST /v1/groups/:groupId/artifacts/gc`) respects a
 
 - Artifacts referenced in `latestArtifactsAtAssignment` of an active (offered/accepted) takeover assignment are **never deleted**, even if they fall outside retention windows.
 - This ensures a takeover in progress always has its assigned artifacts available, regardless of GC timing.
+
+## Coordinator state persistence
+
+Coordinator state including `currentHostGeneration` and active takeover assignments is persisted to the path set via `ACBH_COORDINATOR_STATE_PATH`. On restart, the Coordinator reloads group/host/artifact records, election history, current host identity, and active assignment metadata. Takeover token hashes are persisted; raw tokens are never written to the file. Persistence is opt-in: unset or empty `ACBH_COORDINATOR_STATE_PATH` disables it.

@@ -4,8 +4,9 @@ import { registerRoutes } from "./routes.js";
 import { createLocalFilesystemStorageFromEnv, type CoordinatorStorage } from "./storage/index.js";
 import {
   createInMemoryCoordinatorStore,
-  type InMemoryCoordinatorStore,
+  InMemoryCoordinatorStore,
 } from "./store.js";
+import { getStatePath, loadState, saveState } from "./persistence.js";
 
 export async function buildApp(options?: {
   store?: InMemoryCoordinatorStore;
@@ -14,7 +15,56 @@ export async function buildApp(options?: {
   maxObjectBytes?: number;
 }) {
   const app = Fastify({ logger: options?.logger ?? true });
-  const store = options?.store ?? createInMemoryCoordinatorStore();
+
+  let store: InMemoryCoordinatorStore;
+
+  if (options?.store) {
+    store = options.store;
+  } else {
+    const statePath = getStatePath();
+
+    if (statePath) {
+      let snapshot = null;
+      try {
+        snapshot = await loadState(statePath);
+      } catch (err: unknown) {
+        app.log.error(
+          { err },
+          `Failed to load coordinator state from ${statePath}, starting fresh`,
+        );
+      }
+
+      if (snapshot) {
+        app.log.info(
+          `Loaded persisted coordinator state with ${snapshot.groups.length} group(s) from ${statePath}`,
+        );
+      } else {
+        app.log.info(
+          `No existing coordinator state file at ${statePath}, starting fresh`,
+        );
+      }
+
+      let saveTimer: ReturnType<typeof setTimeout> | null = null;
+      const debouncedSave = () => {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => {
+          saveState(statePath, store.snapshot()).catch((err: unknown) => {
+            app.log.error({ err }, `Failed to persist coordinator state to ${statePath}`);
+          });
+        }, 100);
+      };
+
+      if (snapshot) {
+        store = InMemoryCoordinatorStore.fromSnapshot(snapshot, { onMutation: debouncedSave });
+      } else {
+        store = createInMemoryCoordinatorStore({ onMutation: debouncedSave });
+      }
+    } else {
+      app.log.info("Coordinator state persistence disabled");
+      store = createInMemoryCoordinatorStore();
+    }
+  }
+
   const storage = options?.storage ?? createLocalFilesystemStorageFromEnv();
 
   await app.register(cors, {
