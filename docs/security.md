@@ -58,12 +58,17 @@ Coordinator must check:
 
 ## Stale host protection
 
-A host that was previously current but timed out must not overwrite the new current host after reconnecting.
+Only the current host may publish artifacts that become available or advance the latest pointer. SHA256 object blob uploads remain unrestricted so standby hosts can pre-warm storage.
 
 Rules:
 
-- Every snapshot upload should include host ID and expected current-host generation.
-- Coordinator should reject uploads from stale hosts unless manually accepted.
+- Manifest upload and artifact recording must include host identity (hostId, hostToken) verified by the Coordinator.
+- When `group.currentHostId` is null (initial state before any takeover completes), any authenticated host may publish without a generation header.
+- When `group.currentHostId` is set, the `X-ACBH-Host-Generation` header is required. Missing or malformed headers return 400.
+- When `group.currentHostId` is set, only the current host may publish. Uploads from other hosts return 403.
+- A generation mismatch returns 409, signaling that the current host changed.
+- Stale hosts cannot overwrite the latest snapshot through artifact publish. On rejection, the latest pointer is unchanged.
+- Standby hosts may still upload raw SHA256 objects to the storage backend for future snapshot assembly.
 - Takeover should be explicit and single-winner.
 
 ## Takeover token and generation

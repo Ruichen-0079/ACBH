@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -79,5 +80,24 @@ func TestValidStatus(t *testing.T) {
 	}
 	if ValidStatus("starting") {
 		t.Fatal("ValidStatus(\"starting\") = true")
+	}
+}
+
+func TestUploadManifestRequestHostGenerationNotInJSON(t *testing.T) {
+	gen := 5
+	req := UploadManifestRequest{
+		GroupID:        "grp_1",
+		HostID:         "host_1",
+		HostToken:      "secret",
+		ArtifactKind:   "world-snapshot",
+		ArtifactID:     "snap_1",
+		HostGeneration: &gen,
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if strings.Contains(string(data), "hostGeneration") {
+		t.Fatalf("JSON must not include hostGeneration field: %s", data)
 	}
 }

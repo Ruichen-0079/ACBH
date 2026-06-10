@@ -725,6 +725,31 @@ export class InMemoryCoordinatorStore {
     return artifact;
   }
 
+  recordArtifactFromHost(input: {
+    metadata: Omit<ArtifactMetadata, "updatedAt">;
+    hostId: string;
+    hostToken: string;
+    currentHostGeneration?: number;
+  }): ArtifactMetadata {
+    const group = this.requireGroup(input.metadata.groupId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+
+    if (group.currentHostId !== null) {
+      if (input.hostId !== group.currentHostId) {
+        throw new StoreError(403, "Only the current host may publish artifacts");
+      }
+      if (input.currentHostGeneration === undefined) {
+        throw new StoreError(400, "Host generation header is required when a current host is set");
+      }
+      if (input.currentHostGeneration !== group.currentHostGeneration) {
+        throw new StoreError(409, "Host generation is stale; current host may have changed");
+      }
+    }
+
+    return this.recordArtifact(input.metadata);
+  }
+
   listArtifacts(groupId: string, artifactKind?: ArtifactKind): ArtifactMetadata[] {
     const group = this.requireGroup(groupId);
     const maps = artifactKind ? [group.artifacts.get(artifactKind)] : Array.from(group.artifacts.values());

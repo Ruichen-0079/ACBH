@@ -358,20 +358,26 @@ export async function registerRoutes(
         });
 
         const manifestSha256 = sha256(Buffer.from(JSON.stringify(uploadedManifest), "utf8"));
-        const metadata = store.recordArtifact({
-          groupId: body.groupId,
-          artifactKind: body.artifactKind,
-          artifactId: body.artifactId,
-          parentArtifactId: uploadedManifest.parentArtifactId ?? null,
-          serverPackVersion:
-            uploadedManifest.serverPackVersion ?? (body.artifactKind === "server-pack" ? body.artifactId : null),
-          creatorHostId: uploadedManifest.creatorHostId,
-          createdAt: uploadedManifest.createdAt,
-          status: "available",
-          manifestSha256,
-          manifestObjectPath: manifestStorageKey(body.groupId, body.artifactKind, body.artifactId),
-          fileCount: countIncludedFiles(uploadedManifest),
-          totalBytes: totalManifestBytes(uploadedManifest),
+        const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
+        const metadata = store.recordArtifactFromHost({
+          metadata: {
+            groupId: body.groupId,
+            artifactKind: body.artifactKind,
+            artifactId: body.artifactId,
+            parentArtifactId: uploadedManifest.parentArtifactId ?? null,
+            serverPackVersion:
+              uploadedManifest.serverPackVersion ?? (body.artifactKind === "server-pack" ? body.artifactId : null),
+            creatorHostId: uploadedManifest.creatorHostId,
+            createdAt: uploadedManifest.createdAt,
+            status: "available",
+            manifestSha256,
+            manifestObjectPath: manifestStorageKey(body.groupId, body.artifactKind, body.artifactId),
+            fileCount: countIncludedFiles(uploadedManifest),
+            totalBytes: totalManifestBytes(uploadedManifest),
+          },
+          hostId: body.hostId,
+          hostToken: body.hostToken,
+          currentHostGeneration: hostGeneration ?? undefined,
         });
 
         return {
@@ -719,6 +725,14 @@ function parseContentLength(value: string | undefined): number | null {
     return null;
   }
   const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function parseOptionalIntHeader(value: string | string[] | undefined): number | null {
+  if (value === undefined) return null;
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (raw === undefined) return null;
+  const parsed = Number(raw);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 

@@ -31,6 +31,7 @@ type PushOptions struct {
 	Config           agentconfig.Config
 	Client           Client
 	LegacyJSONUpload bool
+	HostGeneration   *int
 }
 
 type PushSummary struct {
@@ -150,12 +151,13 @@ func Push(ctx context.Context, opts PushOptions) (PushSummary, error) {
 	}
 
 	resp, err := opts.Client.UploadManifest(ctx, coordinator.UploadManifestRequest{
-		GroupID:      opts.Config.GroupID,
-		HostID:       opts.Config.HostID,
-		HostToken:    opts.Config.HostToken,
-		ArtifactKind: loaded.ArtifactKind,
-		ArtifactID:   loaded.ArtifactID,
-		Manifest:     loaded,
+		GroupID:        opts.Config.GroupID,
+		HostID:         opts.Config.HostID,
+		HostToken:      opts.Config.HostToken,
+		ArtifactKind:   loaded.ArtifactKind,
+		ArtifactID:     loaded.ArtifactID,
+		Manifest:       loaded,
+		HostGeneration: opts.HostGeneration,
 	})
 	if err != nil {
 		return PushSummary{}, err

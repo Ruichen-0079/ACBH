@@ -108,3 +108,16 @@ This is restore plus process start, not hot migration. No live player session is
 ## Split-brain boundary
 
 The assignment token and generation form the current V1 lease boundary. They reduce accidental stale completion, but the Coordinator remains in-memory and there is no distributed consensus or network fencing in this milestone.
+
+## Stale-host artifact protection
+
+Only the current host may record new artifact metadata (publish manifests) and potentially advance the latest pointer. The `recordArtifactFromHost` method enforces:
+
+- When `currentHostId` is null (initial group state), any authenticated host may publish without a generation header.
+- When `currentHostId` is non-null, the `X-ACBH-Host-Generation` header is required. Missing or malformed headers return 400.
+- When the header is present and matches, the publish proceeds normally.
+- When the host does not match `currentHostId`, rejecting with 403.
+- When the generation does not match `currentHostGeneration`, rejecting with 409.
+- On any rejection (403/400/409), the latest pointer is unchanged.
+
+Raw SHA256 object blob uploads are NOT restricted, allowing standby hosts to pre-warm the Coordinator's object storage before an election promotes them.
