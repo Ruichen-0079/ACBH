@@ -146,3 +146,22 @@ Artifact garbage collection (`POST /v1/groups/:groupId/artifacts/gc`) respects a
 ## Coordinator state persistence
 
 Coordinator state including `currentHostGeneration` and active takeover assignments is persisted to the path set via `ACBH_COORDINATOR_STATE_PATH`. On restart, the Coordinator reloads group/host/artifact records, election history, current host identity, and active assignment metadata. Takeover token hashes are persisted; raw tokens are never written to the file. Persistence is opt-in: unset or empty `ACBH_COORDINATOR_STATE_PATH` disables it.
+
+## Tunnel session generation binding
+
+Player-to-host tunnel sessions (PR26) bind to `currentHostGeneration`:
+
+- A tunnel session is created targeting `currentHostId` at the current
+  `currentHostGeneration`.
+- If no current host exists (`currentHostId` is null), tunnel creation is
+  rejected with 400.
+- If no takeover has completed (`currentHostGeneration` is 0), tunnel
+  creation is rejected with 400.
+- After a takeover increments the generation:
+  - Existing tunnel sessions retain their original (now stale) generation.
+  - New tunnel sessions target the new `currentHostId` and new
+    `currentHostGeneration`.
+- Callers can detect staleness by comparing `session.currentHostGeneration`
+  with `group.currentHostGeneration`.
+- Tunnel sessions are ephemeral runtime state and are NOT persisted across
+  Coordinator restarts.
