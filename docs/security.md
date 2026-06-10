@@ -85,7 +85,27 @@ Rules:
 - Finalize `currentHostId` and increment `currentHostGeneration` only after successful completion.
 - Cancel the previous active assignment when a new election runs.
 
-The current generation is a control-plane guard, not full distributed fencing. Snapshot upload generation enforcement and durable consensus remain future work.
+## Artifact garbage collection
+
+The `POST /v1/groups/:groupId/artifacts/gc` endpoint allows the current host to remove old artifact manifests and unreferenced object blobs. GC can be triggered manually via `acbh-agent gc` or the Coordinator API.
+
+Rules:
+
+- Header-based auth: `X-ACBH-Host-ID`, `X-ACBH-Host-Token`, and `X-ACBH-Host-Generation` (when a current host exists).
+- Only the current host may run GC when `currentHostId` is set. Other hosts receive 403.
+- A stale generation header (not matching `currentHostGeneration`) returns 409.
+- Missing or invalid generation header returns 400.
+- `dryRun` defaults to `true`. Dry runs never mutate store or storage.
+- GC does not run automatically. It must be triggered manually.
+
+Protected artifacts cannot be deleted:
+- The latest artifact per kind
+- Artifacts referenced by an active takeover assignment
+- The N most recent `available` artifacts per kind
+- Artifacts younger than the configured minimum age
+- Artifacts with `uploading` status
+
+Only `available` and `rejected` artifacts are deletion candidates. Object blobs are only deleted when no retained manifest references them.
 
 ## Secrets
 

@@ -59,6 +59,7 @@ func newRootCmd() *cobra.Command {
 		newServerCmd(),
 		newElectionCmd(),
 		newTakeoverCmd(),
+		newGcCmd(),
 	)
 	return rootCmd
 }

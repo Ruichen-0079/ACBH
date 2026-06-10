@@ -79,6 +79,21 @@ export type StorageInfo = {
   ready: boolean;
 };
 
+export type DeleteObjectParams = {
+  groupId: string;
+  sha256: string;
+};
+
+export type DeleteManifestParams = {
+  groupId: string;
+  artifactKind: ArtifactKind;
+  artifactId: string;
+};
+
+export type ListObjectsParams = {
+  groupId: string;
+};
+
 export interface CoordinatorStorage {
   saveObject(params: SaveObjectParams): Promise<void>;
   saveObjectFromStream(params: SaveObjectFromStreamParams): Promise<{ size: number }>;
@@ -87,6 +102,9 @@ export interface CoordinatorStorage {
   objectExists(params: ObjectExistsParams): Promise<boolean>;
   saveManifest(params: SaveManifestParams): Promise<void>;
   readManifest(params: ReadManifestParams): Promise<ArtifactManifest>;
+  deleteObject(params: DeleteObjectParams): Promise<void>;
+  deleteManifest(params: DeleteManifestParams): Promise<void>;
+  listObjectSha256s(params: ListObjectsParams): Promise<string[]>;
   info(): StorageInfo;
 }
 

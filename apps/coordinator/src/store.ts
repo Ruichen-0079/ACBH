@@ -147,6 +147,27 @@ export type GroupState = {
   }>;
 };
 
+export type DeletedArtifact = {
+  groupId: string;
+  artifactKind: ArtifactKind;
+  artifactId: string;
+  status: ArtifactStatus;
+};
+
+export type GcResult = {
+  dryRun: boolean;
+  deletedArtifacts: DeletedArtifact[];
+  deletedObjectCount: number;
+  protectedArtifactIds: string[];
+};
+
+export interface GcBackend {
+  deleteManifest(params: { groupId: string; artifactKind: ArtifactKind; artifactId: string }): Promise<void>;
+  deleteObject(params: { groupId: string; sha256: string }): Promise<void>;
+  listObjectSha256s(params: { groupId: string }): Promise<string[]>;
+  readManifestFiles(params: { groupId: string; artifactKind: ArtifactKind; artifactId: string }): Promise<Array<{ sha256: string; deleted: boolean }>>;
+}
+
 type MemberRecord = {
   memberId: string;
   displayName: string;
@@ -197,10 +218,15 @@ type StoreOptions = {
   now?: () => Date;
   heartbeatTimeoutMs?: number;
   assignmentTtlMs?: number;
+  retentionPerKind?: number;
+  gcMinAgeMs?: number;
 };
 
 const defaultHeartbeatTimeoutMs = 30_000;
 const defaultAssignmentTtlMs = 60_000;
+const defaultRetentionPerKind = 5;
+const defaultGcMinAgeMs = 3_600_000;
+const ALL_ARTIFACT_KINDS: ArtifactKind[] = ["world-snapshot", "server-pack", "admin-state"];
 const fourGiB = 4 * 1024 * 1024 * 1024;
 const tenGiB = 10 * 1024 * 1024 * 1024;
 
@@ -219,6 +245,8 @@ export class InMemoryCoordinatorStore {
   private readonly now: () => Date;
   readonly heartbeatTimeoutMs: number;
   readonly assignmentTtlMs: number;
+  readonly retentionPerKind: number;
+  readonly gcMinAgeMs: number;
 
   constructor(options: StoreOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -226,6 +254,10 @@ export class InMemoryCoordinatorStore {
       options.heartbeatTimeoutMs ?? positiveEnvInteger("ACBH_HOST_HEARTBEAT_TIMEOUT_MS", defaultHeartbeatTimeoutMs);
     this.assignmentTtlMs =
       options.assignmentTtlMs ?? positiveEnvInteger("ACBH_TAKEOVER_ASSIGNMENT_TTL_MS", defaultAssignmentTtlMs);
+    this.retentionPerKind =
+      options.retentionPerKind ?? positiveEnvInteger("ACBH_ARTIFACT_RETENTION_PER_KIND", defaultRetentionPerKind);
+    this.gcMinAgeMs =
+      options.gcMinAgeMs ?? positiveEnvInteger("ACBH_GC_MIN_AGE_MS", defaultGcMinAgeMs);
   }
 
   createGroup(input: { name: string; ownerName: string }): {
@@ -748,6 +780,170 @@ export class InMemoryCoordinatorStore {
     }
 
     return this.recordArtifact(input.metadata);
+  }
+
+  async gcArtifacts(input: {
+    groupId: string;
+    dryRun: boolean;
+    hostId: string;
+    hostToken: string;
+    currentHostGeneration?: number;
+    retentionPerKind?: number;
+    minAgeMs?: number;
+    backend: GcBackend;
+  }): Promise<GcResult> {
+    const group = this.requireGroup(input.groupId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+
+    if (group.currentHostId !== null) {
+      if (input.hostId !== group.currentHostId) {
+        throw new StoreError(403, "Only the current host may run garbage collection");
+      }
+      if (input.currentHostGeneration === undefined) {
+        throw new StoreError(400, "Host generation header is required when a current host is set");
+      }
+      if (input.currentHostGeneration !== group.currentHostGeneration) {
+        throw new StoreError(409, "Host generation is stale; current host may have changed");
+      }
+    }
+
+    const retention = input.retentionPerKind ?? this.retentionPerKind;
+    const minAge = input.minAgeMs ?? this.gcMinAgeMs;
+    const now = this.now();
+    const cutoff = new Date(now.getTime() - minAge);
+
+    const protectedIds = new Set<string>();
+    const protectedLog: string[] = [];
+
+    for (const [kind, artifactId] of group.latestArtifacts) {
+      protectedIds.add(artifactId);
+      protectedLog.push(`${artifactId} (latest ${kind})`);
+    }
+
+    if (group.activeTakeoverAssignmentId !== null) {
+      const active = group.takeoverAssignments.get(group.activeTakeoverAssignmentId);
+      if (active && active.status !== "completed" && active.status !== "failed" && active.status !== "cancelled") {
+        for (const [kind, artifactId] of Object.entries(active.latestArtifactsAtAssignment)) {
+          if (artifactId) {
+            protectedIds.add(artifactId);
+            protectedLog.push(`${artifactId} (active assignment ${kind})`);
+          }
+        }
+      }
+    }
+
+    for (const kind of ALL_ARTIFACT_KINDS) {
+      const artifactsByKind = group.artifacts.get(kind);
+      if (!artifactsByKind) continue;
+      const available = Array.from(artifactsByKind.values())
+        .filter((a) => a.status === "available")
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      for (let i = 0; i < Math.min(retention, available.length); i++) {
+        if (!protectedIds.has(available[i].artifactId)) {
+          protectedIds.add(available[i].artifactId);
+          protectedLog.push(`${available[i].artifactId} (recent ${kind} #${i + 1})`);
+        }
+      }
+    }
+
+    const candidates: DeletedArtifact[] = [];
+    const allArtifacts = this.listArtifacts(input.groupId);
+
+    for (const artifact of allArtifacts) {
+      if (protectedIds.has(artifact.artifactId)) continue;
+      if (artifact.status === "uploading") {
+        protectedLog.push(`${artifact.artifactId} (uploading)`);
+        continue;
+      }
+      if (artifact.status !== "available" && artifact.status !== "rejected") continue;
+      const createdAt = Date.parse(artifact.createdAt);
+      if (!Number.isFinite(createdAt) || createdAt >= cutoff.getTime()) {
+        protectedLog.push(`${artifact.artifactId} (min-age not reached)`);
+        continue;
+      }
+
+      candidates.push({
+        groupId: artifact.groupId,
+        artifactKind: artifact.artifactKind,
+        artifactId: artifact.artifactId,
+        status: artifact.status,
+      });
+    }
+
+    if (input.dryRun) {
+      return {
+        dryRun: true,
+        deletedArtifacts: candidates,
+        deletedObjectCount: 0,
+        protectedArtifactIds: protectedLog,
+      };
+    }
+
+    const retainedSha256s = new Set<string>();
+    for (const kind of ALL_ARTIFACT_KINDS) {
+      const artifactsByKind = group.artifacts.get(kind);
+      if (!artifactsByKind) continue;
+      for (const [artifactId, artifact] of artifactsByKind) {
+        if (protectedIds.has(artifactId) || !candidates.some((c) => c.artifactId === artifactId)) {
+          try {
+            const files = await input.backend.readManifestFiles({
+              groupId: artifact.groupId,
+              artifactKind: artifact.artifactKind,
+              artifactId: artifact.artifactId,
+            });
+            for (const file of files) {
+              if (!file.deleted && file.sha256) {
+                retainedSha256s.add(file.sha256);
+              }
+            }
+          } catch {
+            protectedLog.push(`${artifactId} (manifest read error, treating as retained)`);
+          }
+        }
+      }
+    }
+
+    for (const candidate of candidates) {
+      const artifactsByKind = group.artifacts.get(candidate.artifactKind);
+      if (artifactsByKind) {
+        artifactsByKind.delete(candidate.artifactId);
+      }
+      if (group.latestArtifacts.get(candidate.artifactKind) === candidate.artifactId) {
+        group.latestArtifacts.delete(candidate.artifactKind);
+      }
+      try {
+        await input.backend.deleteManifest({
+          groupId: candidate.groupId,
+          artifactKind: candidate.artifactKind,
+          artifactId: candidate.artifactId,
+        });
+      } catch {
+        protectedLog.push(`${candidate.artifactId} (manifest delete failed)`);
+      }
+    }
+
+    let deletedObjectCount = 0;
+    try {
+      const allObjects = await input.backend.listObjectSha256s({ groupId: input.groupId });
+      for (const sha256 of allObjects) {
+        if (!retainedSha256s.has(sha256)) {
+          await input.backend.deleteObject({ groupId: input.groupId, sha256 });
+          deletedObjectCount++;
+        }
+      }
+    } catch {
+      protectedLog.push("(object enumeration failed, skipping object GC)");
+    }
+
+    group.updatedAt = now.toISOString();
+
+    return {
+      dryRun: false,
+      deletedArtifacts: candidates,
+      deletedObjectCount,
+      protectedArtifactIds: protectedLog,
+    };
   }
 
   listArtifacts(groupId: string, artifactKind?: ArtifactKind): ArtifactMetadata[] {

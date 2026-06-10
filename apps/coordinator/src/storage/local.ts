@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ArtifactKind } from "../domain/artifacts.js";
 import {
   type ArtifactManifest,
+  type DeleteManifestParams,
+  type DeleteObjectParams,
+  type ListObjectsParams,
   type ObjectReadStream,
   StorageObjectTooLargeError,
   StorageNotFoundError,
@@ -179,6 +182,46 @@ export class LocalFilesystemStorage implements CoordinatorStorage {
 
     const parsed = JSON.parse(raw) as ArtifactManifest;
     return validateManifest(parsed);
+  }
+
+  async deleteObject(params: DeleteObjectParams): Promise<void> {
+    const groupId = validateStorageId("groupId", params.groupId);
+    const sha256 = validateSha256(params.sha256);
+    const objectPath = this.objectPath(groupId, sha256);
+    await rm(objectPath, { force: true });
+  }
+
+  async deleteManifest(params: DeleteManifestParams): Promise<void> {
+    const groupId = validateStorageId("groupId", params.groupId);
+    const artifactKind = validateArtifactKind(params.artifactKind);
+    const artifactId = validateStorageId("artifactId", params.artifactId);
+    const manifestPath = this.manifestPath(groupId, artifactKind, artifactId);
+    await rm(manifestPath, { force: true });
+  }
+
+  async listObjectSha256s(params: ListObjectsParams): Promise<string[]> {
+    const groupId = validateStorageId("groupId", params.groupId);
+    const objectsDir = resolveUnderRoot(this.root, "groups", groupId, "objects", "sha256");
+    const sha256s: string[] = [];
+    try {
+      const prefixDirs = await readdir(objectsDir, { withFileTypes: true });
+      for (const prefix of prefixDirs) {
+        if (!prefix.isDirectory() || prefix.name.length !== 2) continue;
+        const prefixDir = path.join(objectsDir, prefix.name);
+        const files = await readdir(prefixDir, { withFileTypes: true });
+        for (const file of files) {
+          if (file.isFile() && /^[a-f0-9]{64}$/.test(file.name)) {
+            sha256s.push(file.name);
+          }
+        }
+      }
+    } catch (error) {
+      if (isNotFound(error)) {
+        return [];
+      }
+      throw error;
+    }
+    return sha256s;
   }
 
   info(): StorageInfo {
