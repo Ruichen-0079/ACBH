@@ -156,3 +156,19 @@ Rules:
 - Production deployment should use HTTPS/WSS for transport security.
 - No host token, takeover token, or player token material is exposed through
   tunnel session responses or relay endpoints.
+
+## Host Agent relay client security (PR28)
+
+The Host Agent relay tunnel client (`acbh-agent relay host`) enforces:
+
+- The host's local Minecraft address (`--target-address`, typically
+  `127.0.0.1:25565`) is a local-only configuration on the Host Agent. It is
+  never transmitted to the Coordinator or exposed to players.
+- The host token is sent only via WebSocket upgrade headers to the
+  Coordinator. It is never logged, printed to stdout/stderr, or included
+  in error messages.
+- Binary payloads are forwarded opaque between the WebSocket and TCP
+  connections. No payload bytes are logged or inspected.
+- The relay client does not parse or interpret the Minecraft protocol.
+- Context cancellation triggers clean shutdown of both WebSocket and TCP
+  connections.

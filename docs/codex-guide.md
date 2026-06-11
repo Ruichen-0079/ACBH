@@ -78,6 +78,18 @@ Create a runnable repository skeleton:
 - #11 End-to-end takeover demo
 - #26 Network / Relay architecture groundwork
 
+## PR28: Host Agent relay tunnel client
+
+Host Agent relay tunnel client has been implemented:
+
+- `acbh-agent relay host` command connects to Coordinator relay WebSocket and forwards to local TCP target
+- `agent/internal/relay/client.go` -- HostRelayClient with WebSocket dial, TCP forward, context cancellation
+- `agent/internal/relay/client_test.go` -- 16 tests with in-process WebSocket server and TCP echo
+- CLI tests for required flags, invalid addresses, and no secrets in errors
+- Flags default from Agent config; target-address is local-only (never exposed)
+
+Next PR should implement the Player local proxy.
+
 ## PR27: Public Relay MVP
 
 Public relay MVP byte forwarding has been implemented:
