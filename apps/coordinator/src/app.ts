@@ -1,6 +1,7 @@
 import cors from "@fastify/cors";
 import websocketPlugin from "@fastify/websocket";
 import Fastify from "fastify";
+import { registerDashboardRoutes } from "./dashboard.js";
 import { registerRoutes } from "./routes.js";
 import { createLocalFilesystemStorageFromEnv, type CoordinatorStorage } from "./storage/index.js";
 import {
@@ -82,6 +83,7 @@ export async function buildApp(options?: {
     done(null, payload);
   });
 
+  await registerDashboardRoutes(app);
   await registerRoutes(app, store, storage, relay, {
     maxObjectBytes: options?.maxObjectBytes,
   });
