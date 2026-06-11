@@ -172,3 +172,20 @@ The Host Agent relay tunnel client (`acbh-agent relay host`) enforces:
 - The relay client does not parse or interpret the Minecraft protocol.
 - Context cancellation triggers clean shutdown of both WebSocket and TCP
   connections.
+
+## Player local proxy security (PR29)
+
+The Player local TCP proxy (`acbh-agent relay player`) enforces:
+
+- The local proxy binds to `127.0.0.1` by default, limiting access to the
+  local machine.
+- If `--listen-address` is explicitly set to `0.0.0.0`, the proxy binds to
+  all interfaces and may be reachable from other LAN hosts. This should be
+  used carefully and only in trusted network environments.
+- The player token is never logged, printed to stdout/stderr, or included
+  in error messages.
+- Binary payloads are forwarded opaque between TCP and WebSocket without
+  logging or inspection.
+- The proxy does not parse the Minecraft protocol.
+- Context cancellation triggers clean shutdown of listener, local TCP
+  connections, and WebSocket connections.

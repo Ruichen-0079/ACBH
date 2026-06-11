@@ -78,6 +78,19 @@ Create a runnable repository skeleton:
 - #11 End-to-end takeover demo
 - #26 Network / Relay architecture groundwork
 
+## PR29: Player local TCP proxy
+
+Player local TCP proxy has been implemented:
+
+- `acbh-agent relay player` command listens locally and forwards to Coordinator player relay WebSocket
+- `agent/internal/playerproxy/proxy.go` -- PlayerProxy with Run, continuous listen, forwarding, cancellation-safe cleanup
+- `agent/internal/playerproxy/proxy_test.go` -- 14 tests: auth headers, forwarding, order preservation, close propagation, context cancellation, invalid addresses, secrets exclusion
+- CLI tests for required flags, configurable listen address, invalid listen address, secrets exclusion, command registration
+- Default listen address is `127.0.0.1:25565`; configurable via `--listen-address` (e.g. `127.0.0.1:25577`)
+- Host target address and Player listen address are independent
+
+Next PR should add E2E relay demo and smoke test.
+
 ## PR28: Host Agent relay tunnel client
 
 Host Agent relay tunnel client has been implemented:

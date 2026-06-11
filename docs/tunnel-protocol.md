@@ -280,7 +280,6 @@ sessions past their `expiresAt`.
 - Direct candidate signaling (STUN/ICE exchange).
 - QUIC or WebRTC data channel between player proxy and host agent.
 - Automatic direct-to-relay fallback with connectivity probing.
-- Player local proxy implementation.
 
 ## Host Agent relay client (PR28)
 
@@ -322,3 +321,93 @@ Flags default to values from the Agent config file when available.
 - Host token is never logged or included in error messages.
 - Binary payloads are forwarded opaque and never logged.
 - No Minecraft protocol parsing is performed.
+
+## Player local proxy (PR29)
+
+The Agent (`acbh-agent`) includes a relay player command that acts as
+a local TCP proxy for the player's Minecraft client.
+
+### CLI usage
+
+```
+acbh-agent relay player \
+  --coordinator-url http://public-node:8080 \
+  --group-id demo \
+  --player-id player-a \
+  --player-token xxx \
+  --session-id tun_abc \
+  --listen-address 127.0.0.1:25565
+```
+
+With a non-default listen port (e.g. Velocity-style):
+
+```
+acbh-agent relay player \
+  --coordinator-url http://public-node:8080 \
+  --group-id demo \
+  --player-id player-a \
+  --player-token xxx \
+  --session-id tun_abc \
+  --listen-address 127.0.0.1:25577
+```
+
+### Behavior
+
+- Listens on `--listen-address` (default `127.0.0.1:25565`).
+- Accepts one local TCP connection at a time from a Minecraft client.
+- Connects to the Coordinator player relay WebSocket endpoint
+  `/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/player` with
+  player auth headers (`X-ACBH-Player-ID`, `X-ACBH-Player-Token`).
+- Forwards TCP bytes to WebSocket as binary frames.
+- Forwards WebSocket binary frames to TCP.
+- Uses a 32 KiB buffer by default (configurable).
+- Supports context cancellation for graceful shutdown.
+- When either side closes or errors, closes the other side.
+- After a connection ends, continues listening for the next local TCP
+  connection.
+- Does not parse or interpret the Minecraft protocol.
+
+### Independent addresses
+
+The Host target address (`--target-address` on the host command) and the
+Player listen address (`--listen-address` on the player command) are
+independent.
+
+Examples:
+
+- Host points to Velocity on 127.0.0.1:25577:
+  `acbh-agent relay host --target-address 127.0.0.1:25577`
+- Player listens on the default Minecraft port:
+  `acbh-agent relay player --listen-address 127.0.0.1:25565`
+  Player's Minecraft client connects to 127.0.0.1:25565.
+
+- Player listens on a Velocity-style port:
+  `acbh-agent relay player --listen-address 127.0.0.1:25577`
+  Player's Minecraft client connects to 127.0.0.1:25577.
+
+### E2E relay flow
+
+Minecraft Client
+-> Player local TCP proxy (PR29)
+-> Public Node relay (PR27)
+-> Host Agent relay client (PR28)
+-> Host local Minecraft server or Velocity
+
+### Cancellation and cleanup
+
+- When context is canceled, the listener and all active connections
+  are closed.
+- When either forwarding direction exits, both the local TCP connection
+  and the WebSocket connection are closed using `sync.Once` for
+  idempotent cleanup.
+- `context.Canceled`, `net.ErrClosed`, `io.EOF`, and WebSocket normal
+  closure are treated as normal shutdown.
+
+### Security
+
+- The player token is never logged or included in error messages.
+- Binary payloads are forwarded opaque and never logged.
+- The local proxy defaults to loopback (`127.0.0.1:25565`).
+- If `--listen-address` is explicitly set to `0.0.0.0`, the proxy
+  binds to all interfaces and is reachable on the LAN; this should
+  be used with caution.
