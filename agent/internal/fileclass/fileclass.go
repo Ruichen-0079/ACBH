@@ -77,6 +77,9 @@ func ClassifyNormalizedPath(normalized string) FileClass {
 	if hasDirPrefix(normalized, "logs") ||
 		hasDirPrefix(normalized, "crash-reports") ||
 		hasDirPrefix(normalized, "cache") ||
+		hasDirPrefix(normalized, "backups") ||
+		hasDirPrefix(normalized, ".fabric/processedMods") ||
+		hasDirPrefix(normalized, ".fabric/remappedJars") ||
 		base == "session.lock" ||
 		strings.HasSuffix(strings.ToLower(base), ".log") {
 		return Ignored
@@ -96,10 +99,14 @@ func ClassifyNormalizedPath(normalized string) FileClass {
 
 	if isModsJar(normalized) ||
 		isTopLevelPluginJar(normalized) ||
+		isTopLevelJar(normalized) ||
+		normalized == "eula.txt" ||
 		hasDirPrefix(normalized, "config") ||
 		hasDirPrefix(normalized, "defaultconfigs") ||
 		hasDirPrefix(normalized, "kubejs") ||
-		hasDirPrefix(normalized, "scripts") {
+		hasDirPrefix(normalized, "scripts") ||
+		hasDirPrefix(normalized, "libraries") ||
+		hasDirPrefix(normalized, ".fabric/server") {
 		return ServerPack
 	}
 
@@ -130,6 +137,10 @@ func isModsJar(filePath string) bool {
 func isTopLevelPluginJar(filePath string) bool {
 	rest, ok := strings.CutPrefix(filePath, "plugins/")
 	return ok && !strings.Contains(rest, "/") && strings.HasSuffix(strings.ToLower(rest), ".jar")
+}
+
+func isTopLevelJar(filePath string) bool {
+	return !strings.Contains(filePath, "/") && strings.HasSuffix(strings.ToLower(filePath), ".jar")
 }
 
 func hasPluginRuntimePrefix(filePath, runtimeDir string) bool {
