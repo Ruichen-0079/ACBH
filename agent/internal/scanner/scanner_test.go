@@ -45,20 +45,31 @@ func TestScanServerPack(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "mods/example.jar", "mod")
 	writeFile(t, root, "plugins/Vault.jar", "plugin")
+	writeFile(t, root, "fabric-server-mc.1.20.1-loader.0.16.7-launcher.1.0.1.jar", "launcher")
+	writeFile(t, root, "server.jar", "server")
+	writeFile(t, root, "libraries/com/google/guava/guava.jar", "library")
+	writeFile(t, root, ".fabric/server/fabric-loader-server.jar", "fabric-server")
+	writeFile(t, root, "eula.txt", "eula=true")
 	writeFile(t, root, "config/server.toml", "config")
 	writeFile(t, root, "world/level.dat", "world")
+	writeFile(t, root, "logs/latest.log", "log")
+	writeFile(t, root, ".fabric/processedMods/fabric-api.jar", "processed")
+	writeFile(t, root, ".fabric/remappedJars/minecraft.jar", "remapped")
 
-	got, _, err := Scan(testOptions(root, manifest.ServerPack, "pack_000001"))
+	got, report, err := Scan(testOptions(root, manifest.ServerPack, "pack_000001"))
 	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
-	if len(got.Files) != 3 {
-		t.Fatalf("len(files) = %d, want 3", len(got.Files))
+	if len(got.Files) != 8 {
+		t.Fatalf("len(files) = %d, want 8: %#v", len(got.Files), got.Files)
 	}
 	for _, file := range got.Files {
 		if file.Class != fileclass.ServerPack {
 			t.Fatalf("file class = %q, want server-pack", file.Class)
 		}
+	}
+	if report.IgnoredFiles != 3 || report.UnknownFiles != 0 {
+		t.Fatalf("report = %#v", report)
 	}
 	if got.ServerPackVersion == nil || *got.ServerPackVersion != "pack_000001" {
 		t.Fatalf("serverPackVersion = %#v", got.ServerPackVersion)
