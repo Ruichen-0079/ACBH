@@ -36,6 +36,10 @@ func NewPlayerProxy(opts PlayerProxyOptions) *PlayerProxy {
 	return &PlayerProxy{opts: opts}
 }
 
+func (p *PlayerProxy) ListenAddress() string {
+	return p.opts.ListenAddress
+}
+
 func (p *PlayerProxy) Run(ctx context.Context) error {
 	ln, err := net.Listen("tcp", p.opts.ListenAddress)
 	if err != nil {
