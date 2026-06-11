@@ -142,3 +142,42 @@ Intel Macs should use `darwin-amd64`.
 
 Generated artifacts (`dist/`) are ignored by `.gitignore` and should never be
 committed to the repository.
+
+## CI workflow
+
+A GitHub Actions workflow is available at
+`.github/workflows/agent-release-artifacts.yml`.
+
+### How to run manually
+
+1. Go to the repository on GitHub.
+2. Click the **Actions** tab.
+3. Select **Agent Release Artifacts** from the left sidebar.
+4. Click the **Run workflow** dropdown.
+5. Select the branch and click **Run workflow**.
+
+The workflow will also run automatically when a tag matching `v*` is pushed
+(e.g. `v1.0.0`).
+
+### Where to download artifacts
+
+After the workflow completes, the generated artifacts are available as a
+workflow artifact at the bottom of the workflow run page, named
+`acbh-agent-release-artifacts`.
+
+The artifact is a ZIP file containing:
+- `acbh-agent-{os}-{arch}` binaries
+- `relay-demo-{os}-{arch}` binaries
+- `checksums.txt`
+
+### Important notes
+
+- This workflow does **not** publish a GitHub Release. It only produces
+  workflow artifacts that are available for download from the Actions tab.
+- Workflow artifacts are **temporary**. GitHub automatically expires them
+  after 90 days by default.
+- To create a permanent GitHub Release, download the workflow artifact and
+  attach the binaries to a release page.
+- The workflow does not require any secrets or tokens beyond the default
+  `GITHUB_TOKEN`.
+
