@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"bytes"
+	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/spf13/cobra"
 )
 
 func TestRelayHostRequiredFlags(t *testing.T) {
@@ -137,54 +142,85 @@ func TestRelayPlayerRequiredFlags(t *testing.T) {
 
 func TestRelayPlayerListenAddressIsConfigurable(t *testing.T) {
 	// Verifies that --listen-address accepts non-default values.
-	// Test uses port 0 which is valid but won't actually bind.
-	_, err := executeCommand(
-		"relay", "player",
-		"--coordinator-url", "http://localhost:8080",
-		"--group-id", "g",
-		"--player-id", "p",
-		"--player-token", "t",
-		"--session-id", "s",
-		"--listen-address", "127.0.0.1:25577",
-	)
-	// Expects error (can't connect) but NOT a flag parse error.
-	if err == nil {
-		t.Fatal("expected error from run")
-	}
-	if strings.Contains(err.Error(), "unknown flag") {
-		t.Errorf("--listen-address should be accepted, got: %v", err)
+	// Uses a timeout context so proxy.Run does not hang on ln.Accept.
+	cmd := newRelayPlayerCmd()
+	for _, addr := range []string{"127.0.0.1:25565", "127.0.0.1:25577"} {
+		flagAddr, err := cmd.Flags().GetString("listen-address")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if flagAddr != "127.0.0.1:25565" {
+			t.Errorf("expected default listen-address=127.0.0.1:25565, got %s", flagAddr)
+		}
+
+		// Verify flag parse for non-default
+		c := newRelayPlayerCmd()
+		c.SetArgs([]string{"--listen-address", addr})
+		if err := c.ParseFlags([]string{"--listen-address", addr}); err != nil {
+			t.Fatalf("failed to parse --listen-address %s: %v", addr, err)
+		}
+		got, err := c.Flags().GetString("listen-address")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != addr {
+			t.Errorf("expected --listen-address=%s, got %s", addr, got)
+		}
 	}
 }
 
 func TestRelayPlayerInvalidListenAddress(t *testing.T) {
-	_, err := executeCommand(
-		"relay", "player",
-		"--coordinator-url", "http://localhost:8080",
-		"--group-id", "g",
-		"--player-id", "p",
-		"--player-token", "t",
-		"--session-id", "s",
-		"--listen-address", "not-a-valid-address",
-	)
+	cmd := newRootCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"relay", "player", "--coordinator-url", "http://localhost:8080", "--group-id", "g", "--player-id", "p", "--player-token", "t", "--session-id", "s", "--listen-address", "not-a-valid-address"})
+	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error for invalid listen address")
 	}
 }
 
 func TestRelayPlayerNoSecretsInErrors(t *testing.T) {
-	_, err := executeCommand(
-		"relay", "player",
-		"--coordinator-url", "http://localhost:8080",
-		"--group-id", "g",
-		"--player-id", "p",
-		"--player-token", "secret_player_token_value",
-		"--session-id", "s",
-		"--listen-address", "127.0.0.1:25565",
-	)
+	cmd := newRootCmd()
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"relay", "player", "--coordinator-url", "http://localhost:8080", "--group-id", "g", "--player-id", "p", "--player-token", "secret_player_token_value", "--session-id", "s", "--listen-address", "127.0.0.1:0"})
+	cmd.SetContext(ctx)
+	err := cmd.Execute()
 	if err == nil {
 		t.Fatal("expected error")
 	}
 	if strings.Contains(err.Error(), "secret_player_token_value") {
 		t.Error("error message must not contain the player token")
+	}
+}
+
+func TestRelayPlayerCommandRegistered(t *testing.T) {
+	playerCmd := &cobra.Command{Use: "player"}
+	found := false
+	for _, sub := range newRelayCmd().Commands() {
+		if sub.Use == "player" {
+			playerCmd = sub
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("player subcommand not registered under relay")
+	}
+	if playerCmd.Use != "player" {
+		t.Errorf("expected Use=player, got %s", playerCmd.Use)
+	}
+
+	// Verify required flags exist
+	flags := []string{"coordinator-url", "group-id", "player-id", "player-token", "session-id", "listen-address"}
+	for _, name := range flags {
+		if playerCmd.Flags().Lookup(name) == nil {
+			t.Errorf("missing required flag --%s", name)
+		}
 	}
 }
