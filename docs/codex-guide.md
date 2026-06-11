@@ -78,6 +78,16 @@ Create a runnable repository skeleton:
 - #11 End-to-end takeover demo
 - #26 Network / Relay architecture groundwork
 
+## PR34: Release artifact workflow
+
+GitHub Actions workflow for agent release artifacts has been added:
+
+- `.github/workflows/agent-release-artifacts.yml` — runs `build-agent-release.sh` and uploads `dist/` as a workflow artifact
+- Triggered manually (`workflow_dispatch`) or on `v*` tag push
+- Artifact name: `acbh-agent-release-artifacts`
+- Does not publish a GitHub Release; artifacts are temporary CI artifacts
+- `docs/release-packaging.md` updated with CI workflow instructions
+
 ## PR33: Agent release packaging
 
 Agent release packaging scripts and docs have been added:
