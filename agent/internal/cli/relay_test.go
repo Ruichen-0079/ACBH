@@ -2,10 +2,8 @@ package cli
 
 import (
 	"bytes"
-	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -182,15 +180,16 @@ func TestRelayPlayerInvalidListenAddress(t *testing.T) {
 }
 
 func TestRelayPlayerNoSecretsInErrors(t *testing.T) {
-	cmd := newRootCmd()
-	var out bytes.Buffer
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	cmd.SetOut(&out)
-	cmd.SetErr(&out)
-	cmd.SetArgs([]string{"relay", "player", "--coordinator-url", "http://localhost:8080", "--group-id", "g", "--player-id", "p", "--player-token", "secret_player_token_value", "--session-id", "s", "--listen-address", "127.0.0.1:0"})
-	cmd.SetContext(ctx)
-	err := cmd.Execute()
+	// Invalid coordinator URL causes early validation failure so proxy.Run is never called.
+	_, err := executeCommand(
+		"relay", "player",
+		"--coordinator-url", "not-a-valid-url",
+		"--group-id", "g",
+		"--player-id", "p",
+		"--player-token", "secret_player_token_value",
+		"--session-id", "s",
+		"--listen-address", "127.0.0.1:0",
+	)
 	if err == nil {
 		t.Fatal("expected error")
 	}
