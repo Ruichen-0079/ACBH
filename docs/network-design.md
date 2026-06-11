@@ -171,4 +171,35 @@ The Host Agent relay tunnel client is implemented:
   of both sides.
 - The host's local Minecraft address (`--target-address`) is never exposed to
   the Coordinator or players.
-- Next step: Player local proxy implementation.
+
+## Player local proxy (PR29)
+
+The Player local TCP proxy completes the relay-only end-to-end path:
+
+- **CLI command**: `acbh-agent relay player` listens on a configurable local
+  TCP address (default `127.0.0.1:25565`) and connects to the Coordinator
+  player relay WebSocket endpoint.
+- **Auth**: Sends `X-ACBH-Player-ID` and `X-ACBH-Player-Token` headers.
+  Player token is CLI-supplied; `coordinator-url` and `group-id` default
+  from Agent config.
+- **Forwarding**: Same opaque byte forwarding model as the host relay
+  client (TCP ↔ WebSocket binary frames, 32 KiB buffer).
+- **Continuous listen**: Accepts one local TCP connection at a time; after
+  a connection ends, listens for the next one.
+- **Cleanup**: `sync.Once` idempotent cleanup closes both sides on context
+  cancellation or either direction exiting.
+- **Independent addresses**: The Host target address and Player listen
+  address are independent. For example, Host may target Velocity on
+  `127.0.0.1:25577` while Player listens on `127.0.0.1:25565`.
+
+### Relay-only E2E path (structurally complete after PR29)
+
+```
+Minecraft Client -> Player TCP proxy -> Public Node relay -> Host Agent relay client -> Host Minecraft/Velocity
+```
+
+P2P / direct transport remains future work.
+
+### Diagram
+
+See `docs/v1-architecture.md` for the full V1 architecture diagram.

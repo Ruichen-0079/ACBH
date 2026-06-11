@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
+	"github.com/Ruichen-0079/ACBH/agent/internal/playerproxy"
 	"github.com/Ruichen-0079/ACBH/agent/internal/relay"
 	"github.com/spf13/cobra"
 )
@@ -14,6 +15,7 @@ func newRelayCmd() *cobra.Command {
 		Short: "Connect as a relay tunnel endpoint",
 	}
 	cmd.AddCommand(newRelayHostCmd())
+	cmd.AddCommand(newRelayPlayerCmd())
 	return cmd
 }
 
@@ -117,6 +119,89 @@ func runRelayHost(cmd *cobra.Command, opts relayHostOptions) error {
 	})
 
 	if err := client.Run(cmd.Context()); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func newRelayPlayerCmd() *cobra.Command {
+	var opts relayPlayerOptions
+	cmd := &cobra.Command{
+		Use:   "player",
+		Short: "Listen locally and connect as a player-side relay tunnel proxy",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRelayPlayer(cmd, opts)
+		},
+	}
+
+	cmd.Flags().StringVar(&opts.coordinatorURL, "coordinator-url", "", "Coordinator base URL (e.g. http://public-node:8080)")
+	cmd.Flags().StringVar(&opts.groupID, "group-id", "", "ACBH group ID")
+	cmd.Flags().StringVar(&opts.playerID, "player-id", "", "Player session ID")
+	cmd.Flags().StringVar(&opts.playerToken, "player-token", "", "Player session token")
+	cmd.Flags().StringVar(&opts.sessionID, "session-id", "", "Tunnel session ID to connect to")
+	cmd.Flags().StringVar(&opts.listenAddress, "listen-address", "127.0.0.1:25565", "Local TCP address to listen on")
+
+	return cmd
+}
+
+type relayPlayerOptions struct {
+	coordinatorURL string
+	groupID        string
+	playerID       string
+	playerToken    string
+	sessionID      string
+	listenAddress  string
+}
+
+func runRelayPlayer(cmd *cobra.Command, opts relayPlayerOptions) error {
+	if opts.coordinatorURL == "" {
+		cfg, _, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("--coordinator-url is required (could not load config: %w)", err)
+		}
+		opts.coordinatorURL = cfg.CoordinatorURL
+	}
+	if opts.groupID == "" {
+		cfg, _, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("--group-id is required (could not load config: %w)", err)
+		}
+		opts.groupID = cfg.GroupID
+	}
+
+	if opts.groupID == "" {
+		return fmt.Errorf("--group-id is required")
+	}
+	if opts.playerID == "" {
+		return fmt.Errorf("--player-id is required")
+	}
+	if opts.playerToken == "" {
+		return fmt.Errorf("--player-token is required")
+	}
+	if opts.sessionID == "" {
+		return fmt.Errorf("--session-id is required")
+	}
+	if opts.coordinatorURL == "" {
+		return fmt.Errorf("--coordinator-url is required")
+	}
+
+	if _, err := coordinator.NewClient(opts.coordinatorURL); err != nil {
+		return fmt.Errorf("invalid coordinator URL: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Listening on %s, connecting to relay tunnel session %s...\n", opts.listenAddress, opts.sessionID)
+
+	proxy := playerproxy.NewPlayerProxy(playerproxy.PlayerProxyOptions{
+		CoordinatorURL: opts.coordinatorURL,
+		GroupID:        opts.groupID,
+		SessionID:      opts.sessionID,
+		PlayerID:       opts.playerID,
+		PlayerToken:    opts.playerToken,
+		ListenAddress:  opts.listenAddress,
+	})
+
+	if err := proxy.Run(cmd.Context()); err != nil {
 		return err
 	}
 
