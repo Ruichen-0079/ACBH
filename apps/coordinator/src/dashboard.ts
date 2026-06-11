@@ -134,7 +134,32 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <!-- Agent -->
 <div class="panel" id="panel-agent">
 <h2>Agent \u5de5\u4f5c\u6d41</h2>
-<p style="color:var(--muted);font-size:13px;margin-bottom:12px">\u5f53\u524d\u4e3a\u547d\u4ee4\u6a21\u5f0f\uff1a\u590d\u5236\u5230\u672c\u673a\u7ec8\u7aef\u6216\u4ea4\u7ed9 OpenCode \u6267\u884c\u3002\u5c06\u6765\u53ef\u8fde\u63a5\u672c\u5730 Agent API \u76f4\u63a5\u64cd\u63a7\u3002</p>
+
+<div class="card" style="margin-bottom:16px">
+<h3>Agent \u672c\u5730\u63a7\u5236</h3>
+<div class="row"><div><label>Agent \u672c\u5730 API \u5730\u5740</label><input id="agentApiUrl" value="http://127.0.0.1:6122"/></div><div><label>\u672c\u5730\u63a7\u5236\u4ee4\u724c</label><input id="agentToken" placeholder="\u4ece acbh-agent control serve \u590d\u5236"/></div></div>
+<div class="actions">
+<button onclick="connectAgent()">\u8fde\u63a5\u672c\u673a Agent</button>
+<button class="sec" onclick="disconnectAgent()">\u65ad\u5f00</button>
+</div>
+<div id="agentMode" style="margin-top:8px;font-size:13px;color:var(--muted)">\u547d\u4ee4\u6a21\u5f0f\uff1a\u672a\u8fde\u63a5\u672c\u673a Agent\uff0c\u4ec5\u751f\u6210\u547d\u4ee4</div>
+<hr style="border-color:var(--border);margin:14px 0">
+
+<h3>\u672c\u5730\u64cd\u4f5c</h3>
+<div class="actions">
+<button onclick="agentDoctor()">\u8fd0\u884c doctor</button>
+<button class="sec" onclick="agentScan()">\u626b\u63cf server-pack</button>
+<button class="sec" onclick="agentSafeSync()">safe-sync world</button>
+<button class="sec" onclick="agentPush('server-pack')">push server-pack</button>
+<button class="sec" onclick="agentPush('world')">push world</button>
+<button class="sec" onclick="agentPull('server-pack')">pull server-pack</button>
+<button class="sec" onclick="agentPull('world')">pull world</button>
+</div>
+</div>
+
+<hr style="border-color:var(--border);margin:14px 0">
+<h3>\u547d\u4ee4\u751f\u6210\uff08\u5907\u7528\uff09</h3>
+<p style="color:var(--muted);font-size:13px;margin-bottom:12px">\u590d\u5236\u5230\u672c\u673a\u7ec8\u7aef\u6216\u4ea4\u7ed9 OpenCode \u6267\u884c\u3002</p>
 
 <h3>\u57fa\u672c\u914d\u7f6e</h3>
 <div class="row"><div><label>\u5e73\u53f0</label><select id="platform"><option>windows</option><option>linux</option><option>darwin</option></select></div><div><label>Shell</label><select id="shellType"><option>powershell</option><option>bash</option></select></div></div>
@@ -150,7 +175,6 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <h3>\u5236\u54c1 ID</h3>
 <div class="row"><div><label>server-pack ID</label><input id="serverPackId" value="win-server-pack-001"/></div><div><label>world-snapshot ID</label><input id="worldSnapshotId" value="win-world-safe-001"/></div></div>
 
-<h3>\u751f\u6210\u547d\u4ee4</h3>
 <div class="actions">
 <button onclick="genLogin()">\u767b\u5f55\u547d\u4ee4</button>
 <button class="sec" onclick="genDoctor()">doctor \u547d\u4ee4</button>
@@ -245,7 +269,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <script>
 var $=function(id){return document.getElementById(id);};
-var keys=["coordinatorUrl","groupId","accessKey","hostId","hostToken","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","rconPassword","ocWorkspace"];
+var keys=["coordinatorUrl","groupId","accessKey","hostId","hostToken","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","rconPassword","ocWorkspace","agentApiUrl","agentToken"];
 
 function setMsg(v){$("quickMsg").textContent=v;}
 function baseUrl(){return $("coordinatorUrl").value.replace(/\\/$/,"");}
@@ -461,6 +485,105 @@ function getAllCommands(){
     e+" pull --artifact-kind server-pack --artifact-id "+pack+" --output-dir "+bdir,
     e+" pull --artifact-kind world-snapshot --artifact-id "+world+" --output-dir "+bdir
   ].join("\n\n");
+}
+
+var agentConnected=false;
+
+function setAgentMode(connected){
+  agentConnected=connected;
+  var m=$("agentMode");
+  if(connected){
+    m.innerHTML='<span style="color:'+String.fromCharCode(35)+'86efac">\u2714 \u672c\u5730\u63a7\u5236\u6a21\u5f0f\uff1a\u5df2\u8fde\u63a5 Agent</span>';
+  }else{
+    m.innerHTML='<span style="color:'+String.fromCharCode(35)+'fbbf24">\u26a0 \u547d\u4ee4\u6a21\u5f0f\uff1a\u672a\u8fde\u63a5\u672c\u673a Agent\uff0c\u4ec5\u751f\u6210\u547d\u4ee4</span>';
+  }
+}
+
+async function connectAgent(){
+  var url=$("agentApiUrl").value.replace(/\\/$/,"");
+  var tok=$("agentToken").value;
+  if(!tok){setMsg("\u8bf7\u5148\u8f93\u5165\u672c\u5730\u63a7\u5236\u4ee4\u724c");return;}
+  try{
+    var r=await fetch(url+"/health");
+    var b=await r.json();
+    if(b.ok){
+      setMsg("\u5df2\u8fde\u63a5 Agent: "+b.platform+" PID "+b.pid);
+      setAgentMode(true);saveLocal();
+    }else{
+      setMsg("\u8fde\u63a5\u5931\u8d25: Agent health check returned ok=false");
+    }
+  }catch(e){setMsg("\u8fde\u63a5\u5931\u8d25: "+errMsg(e));setAgentMode(false);}
+}
+
+function disconnectAgent(){setAgentMode(false);setMsg("\u5df2\u65ad\u5f00 Agent \u8fde\u63a5\uff0c\u5207\u6362\u5230\u547d\u4ee4\u6a21\u5f0f");}
+
+async function agentCall(path,body){
+  var url=$("agentApiUrl").value.replace(/\\/$/,"");
+  var tok=$("agentToken").value;
+  var r=await fetch(url+path,{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+tok},body:JSON.stringify(body)});
+  var t=await r.text();var b;
+  try{b=JSON.parse(t);}catch(e){b={ok:false,error:t};}
+  if(!r.ok&&!b.error)b.error=r.status+" "+r.statusText;
+  return b;
+}
+
+async function agentDoctor(){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  setMsg("\u8fd0\u884c doctor...");
+  try{
+    var b=await agentCall("/v1/doctor",{serverDir:$("serverDir").value});
+    $("agentCommands").value=JSON.stringify(b,null,2);
+    switchTab("agent");setMsg(b.ok?"doctor \u5b8c\u6210":"doctor \u5931\u8d25");
+  }catch(e){setMsg(errMsg(e));}
+}
+
+async function agentScan(){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  setMsg("\u626b\u63cf server-pack...");
+  try{
+    var g=$("groupId").value,h=$("hostId").value||"<host-id>",pack=$("serverPackId").value,dir=$("serverDir").value;
+    var sep=isBash()?"/":"\\";var sp=dir+sep+"server-pack.manifest.json";
+    var b=await agentCall("/v1/scan",{serverDir:dir,artifactKind:"server-pack",artifactId:pack,groupId:g,creatorHostId:h,output:sp});
+    $("agentCommands").value=JSON.stringify(b,null,2);
+    switchTab("agent");setMsg(b.ok?"\u626b\u63cf\u5b8c\u6210: "+JSON.stringify(b.summary):"\u626b\u63cf\u5931\u8d25: "+(b.error||""));
+  }catch(e){setMsg(errMsg(e));}
+}
+
+async function agentSafeSync(){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  setMsg("safe-sync world...");
+  try{
+    var g=$("groupId").value,h=$("hostId").value||"<host-id>",world=$("worldSnapshotId").value,pack=$("serverPackId").value,dir=$("serverDir").value;
+    var sep=isBash()?"/":"\\";var wm=dir+sep+"world.manifest.json";
+    var rh=$("rconHost").value||"127.0.0.1",rp=parseInt($("rconPort").value)||25575,rpw=$("rconPassword").value||"acbh-test";
+    var b=await agentCall("/v1/safe-sync",{serverDir:dir,rconHost:rh,rconPort:rp,rconPassword:rpw,artifactId:world,groupId:g,creatorHostId:h,serverPackVersion:pack,output:wm});
+    $("agentCommands").value=JSON.stringify(b,null,2);
+    switchTab("agent");setMsg(b.ok?"safe-sync \u5b8c\u6210: "+JSON.stringify(b.summary):"safe-sync \u5931\u8d25: "+(b.error||""));
+  }catch(e){setMsg(errMsg(e));}
+}
+
+async function agentPush(which){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  setMsg("push "+which+"...");
+  try{
+    var dir=$("serverDir").value,sep=isBash()?"/":"\\";
+    var mf=dir+sep+(which==="world"?"world":"server-pack")+".manifest.json";
+    var b=await agentCall("/v1/push",{coordinatorUrl:baseUrl(),serverDir:dir,manifest:mf});
+    $("agentCommands").value=JSON.stringify(b,null,2);
+    switchTab("agent");setMsg(b.ok?"push "+which+" \u5b8c\u6210":"push \u5931\u8d25: "+(b.error||""));
+  }catch(e){setMsg(errMsg(e));}
+}
+
+async function agentPull(which){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  setMsg("pull "+which+"...");
+  try{
+    var bdir=$("serverBDir").value,pack=$("serverPackId").value,world=$("worldSnapshotId").value;
+    var aid=which==="world"?world:pack;
+    var b=await agentCall("/v1/pull",{coordinatorUrl:baseUrl(),artifactKind:which==="world"?"world-snapshot":"server-pack",artifactId:aid,outputDir:bdir});
+    $("agentCommands").value=JSON.stringify(b,null,2);
+    switchTab("agent");setMsg(b.ok?"pull "+which+" \u5b8c\u6210":"pull \u5931\u8d25: "+(b.error||""));
+  }catch(e){setMsg(errMsg(e));}
 }
 
 function switchTab(name){
