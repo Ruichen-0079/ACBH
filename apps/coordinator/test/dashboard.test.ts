@@ -34,6 +34,16 @@ test("dashboard route serves the Chinese control center with Agent local control
     assert.match(response.body, /safe-sync/u);
     assert.match(response.body, /push/u);
     assert.match(response.body, /pull/u);
+    assert.match(response.body, /\u670d\u52a1\u5668\u63a7\u5236/u);
+    assert.match(response.body, /\u542f\u52a8\u670d\u52a1\u5668/u);
+    assert.match(response.body, /\u505c\u6b62\u670d\u52a1\u5668/u);
+    assert.match(response.body, /\u67e5\u770b\u72b6\u6001/u);
+    assert.match(response.body, /\u672c\u5730\u63a7\u5236\u6a21\u5f0f/u);
+    assert.match(response.body, /\u547d\u4ee4\u6a21\u5f0f/u);
+    assert.match(response.body, /\u670d\u52a1\u7aef\u76ee\u5f55/u);
+    assert.match(response.body, /\u542f\u52a8 Jar/u);
+    assert.match(response.body, /JVM \u53c2\u6570/u);
+    assert.match(response.body, /RCON \u5bc6\u7801/u);
   } finally {
     await app.close();
   }

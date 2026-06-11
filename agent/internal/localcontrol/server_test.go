@@ -249,3 +249,275 @@ func TestTokenNotInErrors(t *testing.T) {
 		t.Error("error message must not contain the token value")
 	}
 }
+
+func TestServerStatusRequiresToken(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	body := bytes.NewBufferString(`{"serverDir":"/tmp"}`)
+	req, _ := http.NewRequest("POST", "http://"+addr+"/v1/server/status", body)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 401 {
+		t.Errorf("expected 401 without token, got %d", resp.StatusCode)
+	}
+}
+
+func TestServerStatusValidTokenReturnsSchema(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	body := bytes.NewBufferString(`{}`)
+	req, _ := http.NewRequest("POST", "http://"+addr+"/v1/server/status", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer srv-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result["ok"] != true {
+		t.Error("expected ok=true in server status response")
+	}
+	if _, ok := result["running"]; !ok {
+		t.Error("expected running field in server status response")
+	}
+}
+
+func TestServerStartMalformedJSON(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	body := bytes.NewBufferString("not json")
+	req, _ := http.NewRequest("POST", "http://"+addr+"/v1/server/start", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer srv-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for malformed JSON, got %d", resp.StatusCode)
+	}
+}
+
+func TestServerStartMissingServerDir(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	body := bytes.NewBufferString(`{}`)
+	req, _ := http.NewRequest("POST", "http://"+addr+"/v1/server/start", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer srv-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for missing serverDir, got %d", resp.StatusCode)
+	}
+}
+
+func TestServerEndpointTokenNotInErrors(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "my-server-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	endpoints := []string{"/v1/server/status", "/v1/server/start", "/v1/server/stop"}
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			body := bytes.NewBufferString(`{}`)
+			req, _ := http.NewRequest("POST", "http://"+addr+ep, body)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Authorization", "Bearer wrong-token")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			var result map[string]any
+			json.NewDecoder(resp.Body).Decode(&result)
+
+			errStr, _ := result["error"].(string)
+			if strings.Contains(errStr, "my-server-token") {
+				t.Error("error message must not contain the token value")
+			}
+		})
+	}
+}
+
+func TestServerEndpointMethodNotAllowed(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	endpoints := []string{"/v1/server/status", "/v1/server/start", "/v1/server/stop"}
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", "http://"+addr+ep, nil)
+			req.Header.Set("Authorization", "Bearer srv-token")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("request failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 405 {
+				t.Errorf("expected 405 for GET on %s, got %d", ep, resp.StatusCode)
+			}
+		})
+	}
+}
+
+func TestServerStartDefaultValues(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	body := bytes.NewBufferString(`{"serverDir":"/tmp/test-dir"}`)
+	req, _ := http.NewRequest("POST", "http://"+addr+"/v1/server/start", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer srv-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	errStr, _ := result["error"].(string)
+	if strings.Contains(errStr, "srv-token") {
+		t.Error("error response must not contain the token value")
+	}
+}
+
+func TestServerStopNotRunning(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	body := bytes.NewBufferString(`{}`)
+	req, _ := http.NewRequest("POST", "http://"+addr+"/v1/server/stop", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer srv-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 for stop when not running, got %d", resp.StatusCode)
+	}
+
+	var result map[string]any
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	if result["stopped"] != false {
+		t.Error("expected stopped=false when server is not running")
+	}
+}
+
+func TestServerCORSHeaders(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	addr := srv.ListenAddr
+
+	endpoints := []string{"/v1/server/status", "/v1/server/start", "/v1/server/stop"}
+	for _, ep := range endpoints {
+		t.Run(ep, func(t *testing.T) {
+			req, _ := http.NewRequest("OPTIONS", "http://"+addr+ep, nil)
+			req.Header.Set("Origin", "http://localhost:6121")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("OPTIONS failed: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 204 {
+				t.Errorf("expected 204 for OPTIONS on %s, got %d", ep, resp.StatusCode)
+			}
+			if resp.Header.Get("Access-Control-Allow-Origin") != "http://localhost:6121" {
+				t.Errorf("expected CORS origin on %s", ep)
+			}
+		})
+	}
+}
