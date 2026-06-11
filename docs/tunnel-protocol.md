@@ -280,4 +280,45 @@ sessions past their `expiresAt`.
 - Direct candidate signaling (STUN/ICE exchange).
 - QUIC or WebRTC data channel between player proxy and host agent.
 - Automatic direct-to-relay fallback with connectivity probing.
-- Proper player authentication (tokens or access key verification).
+- Player local proxy implementation.
+
+## Host Agent relay client (PR28)
+
+The Host Agent (`acbh-agent`) includes a relay host command for connecting
+as the host side of a relay tunnel session.
+
+### CLI usage
+
+```
+acbh-agent relay host \
+  --coordinator-url http://public-node:8080 \
+  --group-id grp_abc \
+  --host-id host_abc \
+  --host-token ht_xxx \
+  --host-generation 3 \
+  --session-id tun_abc \
+  --target-address 127.0.0.1:25565
+```
+
+Flags default to values from the Agent config file when available.
+
+### Behavior
+
+- Connects to the Coordinator relay WebSocket endpoint
+  `/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/host` with host
+  auth headers.
+- Dials the TCP target address (typically the local Minecraft server).
+- Forwards WebSocket binary frames to TCP.
+- Forwards TCP bytes to WebSocket as binary frames.
+- Uses a 32 KiB buffer by default (configurable).
+- Supports context cancellation for graceful shutdown.
+- Closes both sides if either side fails or closes.
+
+### Security
+
+- The host's local Minecraft address (`--target-address`) is never exposed
+  to the Coordinator or to players. The target address is a local-only
+  configuration on the Host Agent.
+- Host token is never logged or included in error messages.
+- Binary payloads are forwarded opaque and never logged.
+- No Minecraft protocol parsing is performed.

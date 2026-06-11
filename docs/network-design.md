@@ -155,3 +155,20 @@ The relay-only byte forwarding path has been implemented:
 - Relay runtime state (RelayPair, byte counters, active WebSocket references)
   is **not included** in the Coordinator persistence snapshot. After restart,
   hosts and players must reconnect and create new sessions.
+
+## Host Agent relay client (PR28)
+
+The Host Agent relay tunnel client is implemented:
+
+- **CLI command**: `acbh-agent relay host` connects to the Coordinator relay
+  WebSocket endpoint and forwards all binary frames to/from a local TCP target
+  (typically `127.0.0.1:25565`, the local Minecraft server).
+- **Auth**: Sends `X-ACBH-Host-ID`, `X-ACBH-Host-Token`, and
+  `X-ACBH-Host-Generation` headers; flags default from Agent config.
+- **Forwarding**: WebSocket binary messages are forwarded to TCP; TCP bytes
+  are chunked into WebSocket binary messages (32 KiB buffer default).
+- **Cleanup**: Context cancellation and connection errors trigger clean close
+  of both sides.
+- The host's local Minecraft address (`--target-address`) is never exposed to
+  the Coordinator or players.
+- Next step: Player local proxy implementation.

@@ -60,6 +60,7 @@ func newRootCmd() *cobra.Command {
 		newElectionCmd(),
 		newTakeoverCmd(),
 		newGcCmd(),
+		newRelayCmd(),
 	)
 	return rootCmd
 }
