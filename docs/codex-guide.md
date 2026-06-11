@@ -78,6 +78,25 @@ Create a runnable repository skeleton:
 - #11 End-to-end takeover demo
 - #26 Network / Relay architecture groundwork
 
+## PR32: Relay-only local demo runner
+
+A self-contained local demo runner has been added:
+
+- `agent/cmd/relay-demo/main.go` — in-process demo: relay pair server, TCP echo, Host relay client, Player proxy, test client
+- `examples/relay-only-demo/run.sh` — convenience script
+- `examples/relay-only-demo/README.md` — documentation with quick start and options
+- Tests: single write echo, multi-frame ordering, clean shutdown on Ctrl+C
+- Uses random ports by default; host target and player listen addresses are independently configurable
+- No real Minecraft server or Coordinator required
+
+## PR31: Relay E2E smoke test
+
+Relay-only end-to-end smoke test has been added:
+
+- `agent/internal/relay/relay_e2e_test.go` — `TestRelayE2ESmoke`, `TestRelayE2ENoSecretsInErrors`, `TestRelayE2ECancellationNoHang`
+- Verifies full relay chain: TCP client -> Player local proxy -> relay pair server -> Host relay client -> TCP echo server
+- Tests: single write echo, multiple frame ordering, no secrets in errors, cancellation does not hang
+
 ## PR29: Player local TCP proxy
 
 Player local TCP proxy has been implemented:

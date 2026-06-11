@@ -276,10 +276,28 @@ sessions past their `expiresAt`.
 
 ## Future work
 
-- WebSocket or QUIC byte-forwarding relay on the Public Node.
-- Direct candidate signaling (STUN/ICE exchange).
 - QUIC or WebRTC data channel between player proxy and host agent.
 - Automatic direct-to-relay fallback with connectivity probing.
+- Direct P2P transport.
+
+## Local demo
+
+A self-contained local demo is available. Run from the repo root:
+
+```
+cd agent && go run ./cmd/relay-demo
+```
+
+Or use the convenience script:
+
+```
+examples/relay-only-demo/run.sh
+```
+
+The demo starts an in-memory relay pair server, TCP echo server,
+Host relay client, Player proxy, and a test client — all with
+random ports. No real Minecraft server or Coordinator is needed.
+See `examples/relay-only-demo/README.md`.
 
 ## Host Agent relay client (PR28)
 
