@@ -203,3 +203,9 @@ P2P / direct transport remains future work.
 ### Diagram
 
 See `docs/v1-architecture.md` for the full V1 architecture diagram.
+
+### Local demo
+
+A self-contained local demo is available at `examples/relay-only-demo/`.
+Run `./run.sh` or `cd agent && go run ./cmd/relay-demo` from the repo root.
+See `examples/relay-only-demo/README.md` for details.
