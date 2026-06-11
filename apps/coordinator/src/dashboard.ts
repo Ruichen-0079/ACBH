@@ -155,6 +155,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <button class="sec" onclick="agentPull('server-pack')">pull server-pack</button>
 <button class="sec" onclick="agentPull('world')">pull world</button>
 </div>
+<p style="color:var(--muted);font-size:12px;margin-top:10px">server-pack \u5305\u542b\u670d\u52a1\u7aef\u542f\u52a8\u6240\u9700\u6587\u4ef6\uff1aeula.txt &middot; server.properties &middot; mods &middot; config &middot; libraries &middot; .fabric/server &middot; \u9876\u5c42\u542f\u52a8 jar</p>
 </div>
 
 <hr style="border-color:var(--border);margin:14px 0">
@@ -240,6 +241,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <li><span class="text"><strong>pull \u5230 server-b</strong><br>\u62c9\u53d6\u5236\u54c1\u5230\u6062\u590d\u76ee\u5f55</span></li>
 <li><span class="text"><strong>\u626b\u63cf\u6062\u590d\u76ee\u5f55</strong><br><code>acbh-agent scan --server-dir &lt;server-b&gt; --output restore.manifest.json</code></span></li>
 <li><span class="text"><strong>validate manifest</strong><br><code>acbh-agent manifest validate --file restore.manifest.json</code></span></li>
+<li><span class="text"><strong>\u786e\u8ba4 server.properties \u5b58\u5728</strong><br>\u786e\u8ba4\u6062\u590d\u76ee\u5f55\u5305\u542b <code>server.properties</code></span></li>
 <li><span class="text"><strong>\u542f\u52a8\u6062\u590d\u540e\u7684\u670d\u52a1\u7aef\u9a8c\u8bc1</strong><br>\u7528\u5ba2\u6237\u7aef\u8fde\u63a5 server-b \u9a8c\u8bc1\u4e16\u754c\u5b8c\u6574\u6027</span></li>
 </ol>
 </div>

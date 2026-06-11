@@ -47,6 +47,7 @@ func TestScanServerPack(t *testing.T) {
 	writeFile(t, root, "plugins/Vault.jar", "plugin")
 	writeFile(t, root, "fabric-server-mc.1.20.1-loader.0.16.7-launcher.1.0.1.jar", "launcher")
 	writeFile(t, root, "server.jar", "server")
+	writeFile(t, root, "server.properties", "motd=ACBH")
 	writeFile(t, root, "libraries/com/google/guava/guava.jar", "library")
 	writeFile(t, root, ".fabric/server/fabric-loader-server.jar", "fabric-server")
 	writeFile(t, root, "eula.txt", "eula=true")
@@ -60,8 +61,8 @@ func TestScanServerPack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan() error = %v", err)
 	}
-	if len(got.Files) != 8 {
-		t.Fatalf("len(files) = %d, want 8: %#v", len(got.Files), got.Files)
+	if len(got.Files) != 9 {
+		t.Fatalf("len(files) = %d, want 9: %#v", len(got.Files), got.Files)
 	}
 	for _, file := range got.Files {
 		if file.Class != fileclass.ServerPack {
@@ -92,6 +93,47 @@ func TestScanAdminState(t *testing.T) {
 	for _, file := range got.Files {
 		if file.Class != fileclass.AdminState {
 			t.Fatalf("file class = %q, want admin-state", file.Class)
+		}
+	}
+}
+
+func TestScanServerPackIncludesServerProperties(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "server.properties", "motd=ACBH")
+	writeFile(t, root, "eula.txt", "eula=true")
+	writeFile(t, root, "server.jar", "server")
+	writeFile(t, root, "world/level.dat", "world")
+
+	got, _, err := Scan(testOptions(root, manifest.ServerPack, "pack_000001"))
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	found := false
+	for _, f := range got.Files {
+		if f.Path == "server.properties" {
+			found = true
+			if f.Class != fileclass.ServerPack {
+				t.Fatalf("server.properties class = %q, want server-pack", f.Class)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("server.properties not included in server-pack scan")
+	}
+}
+
+func TestScanWorldSnapshotExcludesServerProperties(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "server.properties", "motd=ACBH")
+	writeFile(t, root, "world/region/r.0.0.mca", "world-data")
+
+	got, _, err := Scan(testOptions(root, manifest.WorldSnapshot, "snap_000001"))
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	for _, f := range got.Files {
+		if f.Path == "server.properties" {
+			t.Fatalf("server.properties should not be included in world-snapshot scan")
 		}
 	}
 }

@@ -106,6 +106,9 @@ func Scan(opts Options) (manifest.Manifest, Report, error) {
 			addSample(&report.UnknownSample, normalized)
 			return nil
 		}
+		if opts.ArtifactKind == manifest.ServerPack && normalized == "server.properties" {
+			class = fileclass.ServerPack
+		}
 		if !manifest.ClassAllowedForArtifact(opts.ArtifactKind, class) {
 			return nil
 		}
