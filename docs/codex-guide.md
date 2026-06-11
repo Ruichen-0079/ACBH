@@ -78,6 +78,13 @@ Create a runnable repository skeleton:
 - #11 End-to-end takeover demo
 - #26 Network / Relay architecture groundwork
 
+## PR35: V1 release checklist and release notes
+
+V1 release preparation documentation has been added:
+
+- `docs/v1-release-checklist.md` — 10-section smoke checklist covering Coordinator, Agent, relay E2E, demo, packaging, CI workflow, git hygiene, secrets, user flow, and known limitations
+- `docs/v1-release-notes.md` — comprehensive release notes: capabilities (Coordinator, Agent, relay/proxy), local demo, release packaging, security, limitations, next milestones
+
 ## PR34: Release artifact workflow
 
 GitHub Actions workflow for agent release artifacts has been added:

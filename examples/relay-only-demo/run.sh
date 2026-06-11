@@ -8,7 +8,7 @@ AGENT_DIR="$REPO_ROOT/agent"
 echo "=== ACBH Relay-Only Demo ==="
 echo ""
 
-"$REPO_ROOT/pnpm" --filter @acbh/coordinator build > /dev/null 2>&1
+pnpm --filter @acbh/coordinator build > /dev/null 2>&1
 
 cd "$AGENT_DIR"
 go run ./cmd/relay-demo "$@"

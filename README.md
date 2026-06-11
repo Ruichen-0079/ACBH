@@ -366,3 +366,11 @@ It proves Host A timeout detection, Host B selection, one-time assignment accept
 - `docs/election-design.md`
 - `docs/security.md`
 - `docs/codex-guide.md`
+
+## V1 release
+
+- `docs/v1-release-checklist.md` — Smoke checklist for V1 release preparation
+- `docs/v1-release-notes.md` — V1 capabilities, security, limitations, next milestones
+- `docs/release-packaging.md` — How to build distributable Agent binaries
+- `docs/tunnel-protocol.md` — Relay and player proxy protocol details
+- `docs/network-design.md` — Network and relay architecture
