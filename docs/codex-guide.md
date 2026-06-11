@@ -78,6 +78,15 @@ Create a runnable repository skeleton:
 - #11 End-to-end takeover demo
 - #26 Network / Relay architecture groundwork
 
+## PR33: Agent release packaging
+
+Agent release packaging scripts and docs have been added:
+
+- `scripts/build-agent-release.sh` — builds `acbh-agent` and `relay-demo` binaries for linux/amd64, linux/arm64, windows/amd64, darwin/amd64, darwin/arm64
+- `docs/release-packaging.md` — how to build, run, and verify artifacts
+- Binaries are written to `dist/` (gitignored) with SHA256 checksums
+- Uses `CGO_ENABLED=0` for static binaries, `-trimpath -ldflags="-s -w"` for small output
+
 ## PR32: Relay-only local demo runner
 
 A self-contained local demo runner has been added:
