@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/artifactsync"
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
+	"github.com/Ruichen-0079/ACBH/agent/internal/mcserver"
 	"github.com/Ruichen-0079/ACBH/agent/internal/rcon"
 	"github.com/Ruichen-0079/ACBH/agent/internal/scanner"
 )
@@ -55,6 +57,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/safe-sync", s.withAuth(s.handleSafeSync))
 	mux.HandleFunc("/v1/push", s.withAuth(s.handlePush))
 	mux.HandleFunc("/v1/pull", s.withAuth(s.handlePull))
+	mux.HandleFunc("/v1/server/status", s.withAuth(s.handleServerStatus))
+	mux.HandleFunc("/v1/server/start", s.withAuth(s.handleServerStart))
+	mux.HandleFunc("/v1/server/stop", s.withAuth(s.handleServerStop))
 
 	ln, err := net.Listen("tcp", s.ListenAddr)
 	if err != nil {
@@ -409,6 +414,194 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		"ok":      true,
 		"summary": summary,
 	})
+}
+
+func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		ServerDir string `json:"serverDir"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+		return
+	}
+
+	runtimeDir, err := s.serverRuntimeDir()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	status, err := mcserver.GetStatus(runtimeDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	resp := map[string]any{"ok": true}
+	if status.Running {
+		resp["running"] = true
+		resp["state"] = map[string]any{
+			"pid":       status.State.PID,
+			"status":    status.State.Status,
+			"serverDir": status.State.ServerDir,
+			"command":   status.State.Command,
+			"startedAt": status.State.StartedAt,
+			"stdoutLog": status.State.StdoutLog,
+			"stderrLog": status.State.StderrLog,
+		}
+	} else if status.Stale {
+		resp["stale"] = true
+		resp["state"] = map[string]any{
+			"pid":       status.State.PID,
+			"status":    status.State.Status,
+			"serverDir": status.State.ServerDir,
+		}
+	} else {
+		resp["running"] = false
+		resp["message"] = "server not running"
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		ServerDir    string   `json:"serverDir"`
+		JavaPath     string   `json:"javaPath"`
+		JarPath      string   `json:"jarPath"`
+		JVMArgs      []string `json:"jvmArgs"`
+		ServerArgs   []string `json:"serverArgs"`
+		RCONHost     string   `json:"rconHost"`
+		RCONPort     int      `json:"rconPort"`
+		RCONPassword string   `json:"rconPassword"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+		return
+	}
+	if req.ServerDir == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "serverDir is required"})
+		return
+	}
+	if req.JavaPath == "" {
+		req.JavaPath = "java"
+	}
+	if req.JarPath == "" {
+		req.JarPath = "fabric-server-launch.jar"
+	}
+	if len(req.ServerArgs) == 0 {
+		req.ServerArgs = []string{"nogui"}
+	}
+
+	cmd := buildServerCommand(req.JavaPath, req.JarPath, req.JVMArgs, req.ServerArgs)
+
+	logDir := filepath.Join(req.ServerDir, "logs")
+	runtimeDir, err := s.serverRuntimeDir()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "create runtime dir: " + err.Error()})
+		return
+	}
+
+	executable, err := os.Executable()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "find Agent executable: " + err.Error()})
+		return
+	}
+
+	state, err := mcserver.Start(r.Context(), executable, mcserver.StartOptions{
+		ServerDir:   req.ServerDir,
+		Command:     cmd,
+		LogDir:      logDir,
+		RuntimeDir:  runtimeDir,
+		StopTimeout: 30 * time.Second,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "failed to start server: " + err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": "Server started",
+		"state": map[string]any{
+			"pid":       state.PID,
+			"status":    state.Status,
+			"serverDir": state.ServerDir,
+			"command":   state.Command,
+			"startedAt": state.StartedAt,
+			"stdoutLog": state.StdoutLog,
+			"stderrLog": state.StderrLog,
+		},
+	})
+}
+
+func (s *Server) handleServerStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		ServerDir      string `json:"serverDir"`
+		RCONHost       string `json:"rconHost"`
+		RCONPort       int    `json:"rconPort"`
+		RCONPassword   string `json:"rconPassword"`
+		TimeoutSeconds int    `json:"timeoutSeconds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+		return
+	}
+
+	runtimeDir, err := s.serverRuntimeDir()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	state, stopped, err := mcserver.Stop(runtimeDir)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "failed to stop server: " + err.Error()})
+		return
+	}
+	if !stopped {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "stopped": false, "message": "Server is not running"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"stopped": true,
+		"message": "Server stopped",
+		"pid":     state.PID,
+	})
+}
+
+func (s *Server) serverRuntimeDir() (string, error) {
+	configDir, err := agentconfig.DefaultDir()
+	if err != nil {
+		return "", fmt.Errorf("find config directory: %w", err)
+	}
+	return filepath.Join(configDir, "runtime"), nil
+}
+
+func buildServerCommand(javaPath, jarPath string, jvmArgs, serverArgs []string) string {
+	parts := []string{javaPath}
+	parts = append(parts, jvmArgs...)
+	parts = append(parts, "-jar", jarPath)
+	parts = append(parts, serverArgs...)
+	return strings.Join(parts, " ")
 }
 
 func (s *Server) resolveConfig(coordinatorURL string) agentconfig.Config {

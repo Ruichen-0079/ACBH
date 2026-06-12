@@ -158,6 +158,19 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <p style="color:var(--muted);font-size:12px;margin-top:10px">server-pack \u5305\u542b\u670d\u52a1\u7aef\u542f\u52a8\u6240\u9700\u6587\u4ef6\uff1aeula.txt &middot; server.properties &middot; mods &middot; config &middot; libraries &middot; .fabric/server &middot; \u9876\u5c42\u542f\u52a8 jar</p>
 </div>
 
+<div class="card" style="margin-bottom:16px">
+<h3>\u670d\u52a1\u5668\u63a7\u5236</h3>
+<div class="row"><div><label>\u670d\u52a1\u7aef\u76ee\u5f55</label><input id="srvDir" value=""/></div><div><label>\u542f\u52a8 Jar</label><input id="srvJar" value="fabric-server-launch.jar"/></div></div>
+<div class="row"><div><label>Java \u8def\u5f84</label><input id="srvJava" value="java"/></div><div><label>JVM \u53c2\u6570</label><input id="srvJvmArgs" value="-Xmx2G -Xms1G"/></div></div>
+<div class="row"><div><label>Server \u53c2\u6570</label><input id="srvArgs" value="nogui"/></div><div><label>RCON \u5bc6\u7801</label><input id="srvRconPassword" type="password"/></div></div>
+<div class="actions">
+<button onclick="agentSrvStatus()">\u67e5\u770b\u72b6\u6001</button>
+<button class="sec" onclick="agentSrvStart()">\u542f\u52a8\u670d\u52a1\u5668</button>
+<button class="sec" onclick="agentSrvStop()">\u505c\u6b62\u670d\u52a1\u5668</button>
+</div>
+<pre id="srvOut" style="margin-top:12px;max-height:200px;overflow-y:auto"></pre>
+</div>
+
 <hr style="border-color:var(--border);margin:14px 0">
 <h3>\u547d\u4ee4\u751f\u6210\uff08\u5907\u7528\uff09</h3>
 <p style="color:var(--muted);font-size:13px;margin-bottom:12px">\u590d\u5236\u5230\u672c\u673a\u7ec8\u7aef\u6216\u4ea4\u7ed9 OpenCode \u6267\u884c\u3002</p>
@@ -234,7 +247,11 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <li><span class="text"><strong>\u521b\u5efa\u7ec4</strong><br>\u5728 Coordinator \u680f\u70b9\u51fb\u201c\u521b\u5efa\u7ec4\u201d</span><button class="sm sec" onclick="switchTab('coordinator');createGroup()" style="margin-top:4px">\u8df3\u8f6c</button></li>
 <li><span class="text"><strong>\u5728 Agent \u673a\u5668\u767b\u5f55</strong><br>\u8fd0\u884c\u751f\u6210\u7684\u767b\u5f55\u547d\u4ee4</span><button class="sm sec" onclick="switchTab('agent')" style="margin-top:4px">\u8df3\u8f6c</button></li>
 <li><span class="text"><strong>doctor \u68c0\u67e5\u73af\u5883</strong><br>\u786e\u8ba4 Java \u548c\u670d\u52a1\u5668\u76ee\u5f55\u53ef\u7528</span></li>
-<li><span class="text"><strong>\u542f\u52a8 Minecraft \u670d\u52a1\u7aef</strong><br>\u786e\u4fdd RCON \u5df2\u542f\u7528 (server.properties: enable-rcon=true)</span></li>
+<li><span class="text"><strong>\u542f\u52a8\u672c\u5730 Agent \u63a7\u5236\u670d\u52a1</strong><br><code>acbh-agent control serve --listen 127.0.0.1:6131 --token &lt;token&gt;</code></span></li>
+<li><span class="text"><strong>\u5728 Dashboard \u8fde\u63a5\u672c\u5730 Agent API</strong><br>\u8f93\u5165 token \u540e\u70b9\u51fb\u201c\u8fde\u63a5\u672c\u673a Agent\u201d</span><button class="sm sec" onclick="switchTab('agent')" style="margin-top:4px">\u8df3\u8f6c</button></li>
+<li><span class="text"><strong>\u786e\u8ba4\u670d\u52a1\u5668\u72b6\u6001</strong><br>\u70b9\u51fb\u201c\u67e5\u770b\u72b6\u6001\u201d\u786e\u8ba4\u670d\u52a1\u5668\u672a\u8fd0\u884c</span></li>
+<li><span class="text"><strong>\u542f\u52a8\u670d\u52a1\u5668</strong><br>\u70b9\u51fb\u201c\u542f\u52a8\u670d\u52a1\u5668\u201d\u542f\u52a8 Minecraft \u670d\u52a1\u7aef</span></li>
+<li><span class="text"><strong>\u505c\u6b62\u670d\u52a1\u5668</strong><br>\u6d4b\u8bd5\u540e\u70b9\u51fb\u201c\u505c\u6b62\u670d\u52a1\u5668\u201d\u5173\u95ed\u670d\u52a1\u7aef</span></li>
 <li><span class="text"><strong>\u626b\u63cf server-pack</strong><br>\u751f\u6210\u670d\u52a1\u5668\u5305\u6e05\u5355</span><button class="sm sec" onclick="switchTab('agent')" style="margin-top:4px">\u8df3\u8f6c</button></li>
 <li><span class="text"><strong>safe-sync world</strong><br>RCON save-all flush \u540e\u626b\u63cf\u4e16\u754c\u5feb\u7167</span></li>
 <li><span class="text"><strong>push \u4e0a\u4f20</strong><br>\u4e0a\u4f20 server-pack \u548c world-snapshot</span></li>
@@ -271,7 +288,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <script>
 var $=function(id){return document.getElementById(id);};
-var keys=["coordinatorUrl","groupId","accessKey","hostId","hostToken","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","rconPassword","ocWorkspace","agentApiUrl","agentToken"];
+var keys=["coordinatorUrl","groupId","accessKey","hostId","hostToken","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","rconPassword","ocWorkspace","agentApiUrl","agentToken","srvDir","srvJava","srvJar","srvJvmArgs","srvArgs","srvRconPassword"];
 
 function setMsg(v){$("quickMsg").textContent=v;}
 function baseUrl(){return $("coordinatorUrl").value.replace(/\\/$/,"");}
@@ -586,6 +603,56 @@ async function agentPull(which){
     $("agentCommands").value=JSON.stringify(b,null,2);
     switchTab("agent");setMsg(b.ok?"pull "+which+" \u5b8c\u6210":"pull \u5931\u8d25: "+(b.error||""));
   }catch(e){setMsg(errMsg(e));}
+}
+
+async function agentSrvStatus(){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  setMsg("\u67e5\u770b\u670d\u52a1\u5668\u72b6\u6001...");
+  try{
+    var dir=$("srvDir").value||$("serverDir").value;
+    var b=await agentCall("/v1/server/status",{serverDir:dir});
+    $("srvOut").textContent=JSON.stringify(b,null,2);
+    if(b.running)setMsg("\u670d\u52a1\u5668\u8fd0\u884c\u4e2d PID "+b.state.pid);
+    else if(b.stale)setMsg("\u670d\u52a1\u5668\u72b6\u6001\u5f02\u5e38\uff08\u8fdb\u7a0b\u53ef\u80fd\u5df2\u7ec8\u6b62\uff09");
+    else setMsg(b.message||"\u670d\u52a1\u5668\u672a\u8fd0\u884c");
+  }catch(e){$("srvOut").textContent=errMsg(e);setMsg(errMsg(e));}
+}
+
+async function agentSrvStart(){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  setMsg("\u542f\u52a8\u670d\u52a1\u5668...");
+  try{
+    var dir=$("srvDir").value||$("serverDir").value;
+    if(!dir){setMsg("\u9519\u8bef\uff1a\u8bf7\u5148\u8f93\u5165\u670d\u52a1\u7aef\u76ee\u5f55");return;}
+    var jvmArgsStr=$("srvJvmArgs").value.trim();
+    var jvmArgs=jvmArgsStr?jvmArgsStr.split(/\\s+/):["-Xmx2G","-Xms1G"];
+    var serverArgsStr=$("srvArgs").value.trim();
+    var serverArgs=serverArgsStr?serverArgsStr.split(/\\s+/):["nogui"];
+    var b=await agentCall("/v1/server/start",{
+      serverDir:dir,
+      javaPath:$("srvJava").value||"java",
+      jarPath:$("srvJar").value||"fabric-server-launch.jar",
+      jvmArgs:jvmArgs,
+      serverArgs:serverArgs,
+      rconPassword:$("srvRconPassword").value||""
+    });
+    $("srvOut").textContent=JSON.stringify(b,null,2);
+    setMsg(b.ok?(b.message||"\u670d\u52a1\u5668\u5df2\u542f\u52a8"):("\u542f\u52a8\u5931\u8d25: "+(b.error||"")));
+  }catch(e){$("srvOut").textContent=errMsg(e);setMsg(errMsg(e));}
+}
+
+async function agentSrvStop(){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  setMsg("\u505c\u6b62\u670d\u52a1\u5668...");
+  try{
+    var dir=$("srvDir").value||$("serverDir").value;
+    var b=await agentCall("/v1/server/stop",{
+      serverDir:dir,
+      rconPassword:$("srvRconPassword").value||""
+    });
+    $("srvOut").textContent=JSON.stringify(b,null,2);
+    setMsg(b.ok?(b.stopped?(b.message||"\u670d\u52a1\u5668\u5df2\u505c\u6b62"):(b.message||"\u670d\u52a1\u5668\u672a\u8fd0\u884c")):("\u505c\u6b62\u5931\u8d25: "+(b.error||"")));
+  }catch(e){$("srvOut").textContent=errMsg(e);setMsg(errMsg(e));}
 }
 
 function switchTab(name){
