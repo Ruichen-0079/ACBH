@@ -32,6 +32,7 @@ const joinGroupSchema = z.object({
 
 const registerHostSchema = z.object({
   groupId: z.string().min(1),
+  accessKey: z.string().min(1).optional(),
   memberId: z.string().min(1),
   deviceName: z.string().trim().min(1).max(120),
   platform: z.string().trim().min(1).max(40),
@@ -647,8 +648,15 @@ export async function registerRoutes(
     if (!body) {
       return reply;
     }
+    const accessKey = body.accessKey;
+    if (!accessKey) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        message: "Group access key is required",
+      });
+    }
 
-    return handleStoreCall(reply, () => store.registerHost(body));
+    return handleStoreCall(reply, () => store.registerHost({ ...body, accessKey }));
   });
 
   app.post("/v1/hosts/heartbeat", async (request, reply) => {
@@ -759,7 +767,12 @@ export async function registerRoutes(
       return reply;
     }
 
-    return handleStoreCall(reply, () => store.getGroupState(params.groupId));
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestGroupAccess(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      return store.getGroupState(params.groupId);
+    });
   });
 
   app.get("/v1/groups/:groupId/artifacts", async (request, reply) => {
@@ -1046,6 +1059,40 @@ function verifyRequestHost(
     hostToken: result.data.hostToken,
   });
 
+  return true;
+}
+
+function verifyRequestGroupAccess(
+  store: InMemoryCoordinatorStore,
+  groupId: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): boolean {
+  const hostId = singleHeader(request.headers["x-acbh-host-id"]);
+  const hostToken = singleHeader(request.headers["x-acbh-host-token"]);
+
+  if (hostId !== undefined || hostToken !== undefined) {
+    if (!hostId || !hostToken) {
+      reply.code(401).send({
+        error: "Unauthorized",
+        message: "Complete host authentication headers are required",
+      });
+      return false;
+    }
+    store.verifyHost({ groupId, hostId, hostToken });
+    return true;
+  }
+
+  const accessKey = singleHeader(request.headers["x-acbh-access-key"]);
+  if (!accessKey) {
+    reply.code(401).send({
+      error: "Unauthorized",
+      message: "Group access key or host authentication is required",
+    });
+    return false;
+  }
+
+  store.verifyGroupAccessKey(groupId, accessKey);
   return true;
 }
 

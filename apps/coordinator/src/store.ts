@@ -472,9 +472,7 @@ export class InMemoryCoordinatorStore {
   } {
     const group = this.requireGroup(input.groupId);
 
-    if (!verifySecret(input.accessKey, group.accessKeyHash)) {
-      throw new StoreError(401, "Invalid access key");
-    }
+    this.verifyAccessKey(group, input.accessKey);
 
     const now = this.nowIso();
     const memberId = createId("mem");
@@ -492,12 +490,14 @@ export class InMemoryCoordinatorStore {
 
   registerHost(input: {
     groupId: string;
+    accessKey: string;
     memberId: string;
     deviceName: string;
     platform: string;
     agentVersion: string;
   }): { hostId: string; hostToken: string } {
     const group = this.requireGroup(input.groupId);
+    this.verifyAccessKey(group, input.accessKey);
 
     if (!group.members.has(input.memberId)) {
       throw new StoreError(404, "Member does not exist in group");
@@ -530,6 +530,11 @@ export class InMemoryCoordinatorStore {
 
     this.triggerMutation();
     return { hostId, hostToken };
+  }
+
+  verifyGroupAccessKey(groupId: string, accessKey: string): void {
+    const group = this.requireGroup(groupId);
+    this.verifyAccessKey(group, accessKey);
   }
 
   updateHeartbeat(input: {
@@ -1331,6 +1336,12 @@ export class InMemoryCoordinatorStore {
   private verifyHostToken(host: HostRecord, hostToken: string): void {
     if (!verifySecret(hostToken, host.hostTokenHash)) {
       throw new StoreError(401, "Invalid host token");
+    }
+  }
+
+  private verifyAccessKey(group: GroupRecord, accessKey: string): void {
+    if (!verifySecret(accessKey, group.accessKeyHash)) {
+      throw new StoreError(401, "Invalid access key");
     }
   }
 

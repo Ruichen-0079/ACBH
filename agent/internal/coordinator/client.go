@@ -34,6 +34,7 @@ type JoinGroupResponse struct {
 
 type RegisterHostRequest struct {
 	GroupID      string `json:"groupId"`
+	AccessKey    string `json:"accessKey"`
 	MemberID     string `json:"memberId"`
 	DeviceName   string `json:"deviceName"`
 	Platform     string `json:"platform"`

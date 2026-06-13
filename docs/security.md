@@ -25,9 +25,11 @@ Rules:
 
 A Host Token is unique to one Agent installation/device.
 
-Required for:
+An existing group Access Key is required to register a host. The registration
+response returns the new Host Token once and never echoes the Access Key.
 
-- host registration;
+A Host Token is required for:
+
 - heartbeat;
 - snapshot upload;
 - takeover execution.
@@ -38,6 +40,15 @@ Rules:
 - Store a hash.
 - Allow revocation.
 - Token must be scoped to one group and one host.
+
+## Group state access
+
+Group state and debug state endpoints are not public. They require either:
+
+- the group's Access Key via `x-acbh-access-key`; or
+- a valid Host ID and Host Token for the same group.
+
+Responses must never include Access Keys, Host Tokens, or their hashes.
 
 ## Artifact push and pull
 

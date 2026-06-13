@@ -8,7 +8,7 @@ import { buildApp } from "../src/app.js";
 import { createInMemoryCoordinatorStore } from "../src/store.js";
 import { LocalFilesystemStorage, type ArtifactManifest } from "../src/storage/index.js";
 
-test("in-memory group join, host registration, heartbeat, and debug state", async (t) => {
+test("host registration and group state require group-scoped authentication", async (t) => {
   const app = await buildTestApp(t);
 
   try {
@@ -49,11 +49,41 @@ test("in-memory group join, host registration, heartbeat, and debug state", asyn
     const joined = joinResponse.json<{ memberId: string; role: string }>();
     assert.equal(joined.role, "member");
 
+    const anonymousRegister = await app.inject({
+      method: "POST",
+      url: "/v1/hosts/register",
+      payload: {
+        groupId: created.groupId,
+        memberId: joined.memberId,
+        deviceName: "PlayerA-PC",
+        platform: "windows",
+        agentVersion: "0.1.0",
+      },
+    });
+    assert.equal(anonymousRegister.statusCode, 401);
+
+    const wrongKey = "wrong-access-key";
+    const deniedRegister = await app.inject({
+      method: "POST",
+      url: "/v1/hosts/register",
+      payload: {
+        groupId: created.groupId,
+        accessKey: wrongKey,
+        memberId: joined.memberId,
+        deviceName: "PlayerA-PC",
+        platform: "windows",
+        agentVersion: "0.1.0",
+      },
+    });
+    assert.equal(deniedRegister.statusCode, 401);
+    assert.equal(deniedRegister.body.includes(wrongKey), false);
+
     const registerResponse = await app.inject({
       method: "POST",
       url: "/v1/hosts/register",
       payload: {
         groupId: created.groupId,
+        accessKey: created.accessKey,
         memberId: joined.memberId,
         deviceName: "PlayerA-PC",
         platform: "windows",
@@ -81,9 +111,20 @@ test("in-memory group join, host registration, heartbeat, and debug state", asyn
       status: "standby",
     });
 
+    const anonymousState = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${created.groupId}/state`,
+    });
+    assert.equal(anonymousState.statusCode, 401);
+    assert.equal(anonymousState.body.includes(created.accessKey), false);
+    assert.equal(anonymousState.body.includes(registered.hostToken), false);
+
     const stateResponse = await app.inject({
       method: "GET",
       url: `/v1/groups/${created.groupId}/state`,
+      headers: {
+        "x-acbh-access-key": created.accessKey,
+      },
     });
     assert.equal(stateResponse.statusCode, 200);
     const stateText = stateResponse.body;
@@ -101,6 +142,51 @@ test("in-memory group join, host registration, heartbeat, and debug state", asyn
     assert.equal(state.hosts.length, 1);
     assert.equal(stateText.includes(created.accessKey), false);
     assert.equal(stateText.includes(registered.hostToken), false);
+
+    const hostAuthenticatedState = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${created.groupId}/state`,
+      headers: hostHeaders(registered.hostId, registered.hostToken),
+    });
+    assert.equal(hostAuthenticatedState.statusCode, 200);
+
+    const otherGroup = (
+      await app.inject({
+        method: "POST",
+        url: "/v1/groups",
+        payload: {
+          name: "Other Server",
+          ownerName: "Other Owner",
+        },
+      })
+    ).json<{ groupId: string; accessKey: string }>();
+
+    const crossGroupRegister = await app.inject({
+      method: "POST",
+      url: "/v1/hosts/register",
+      payload: {
+        groupId: created.groupId,
+        accessKey: otherGroup.accessKey,
+        memberId: joined.memberId,
+        deviceName: "Cross-group-PC",
+        platform: "windows",
+        agentVersion: "0.1.0",
+      },
+    });
+    assert.equal(crossGroupRegister.statusCode, 401);
+    assert.equal(crossGroupRegister.body.includes(otherGroup.accessKey), false);
+    assert.equal(crossGroupRegister.body.includes(registered.hostToken), false);
+
+    const crossGroupState = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${created.groupId}/state`,
+      headers: {
+        "x-acbh-access-key": otherGroup.accessKey,
+      },
+    });
+    assert.equal(crossGroupState.statusCode, 401);
+    assert.equal(crossGroupState.body.includes(otherGroup.accessKey), false);
+    assert.equal(crossGroupState.body.includes(registered.hostToken), false);
   } finally {
     await app.close();
   }
@@ -575,6 +661,7 @@ async function createJoinedHost(app: Awaited<ReturnType<typeof buildApp>>): Prom
     url: "/v1/hosts/register",
     payload: {
       groupId: created.groupId,
+      accessKey: created.accessKey,
       memberId: joined.memberId,
       deviceName: "PlayerA-PC",
       platform: "windows",
