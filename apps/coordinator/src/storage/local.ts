@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -161,7 +161,23 @@ export class LocalFilesystemStorage implements CoordinatorStorage {
 
     const manifestPath = this.manifestPath(groupId, artifactKind, artifactId);
     await mkdir(path.dirname(manifestPath), { recursive: true });
-    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    const temporaryPath = `${manifestPath}.${randomUUID()}.tmp`;
+    const content = `${JSON.stringify(manifest, null, 2)}\n`;
+
+    try {
+      const handle = await open(temporaryPath, "wx");
+      try {
+        await handle.writeFile(content, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+
+      params.beforeCommit?.();
+      await rename(temporaryPath, manifestPath);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
   }
 
   async readManifest(params: ReadManifestParams): Promise<ArtifactManifest> {

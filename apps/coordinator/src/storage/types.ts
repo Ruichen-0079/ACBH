@@ -65,6 +65,7 @@ export type SaveManifestParams = {
   artifactKind: ArtifactKind;
   artifactId: string;
   manifest: ArtifactManifest;
+  beforeCommit?: () => void;
 };
 
 export type ReadManifestParams = {
