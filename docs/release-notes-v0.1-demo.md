@@ -61,6 +61,18 @@ The Dashboard at `http://127.0.0.1:6121/dashboard` provides:
   accept, complete, fail assignments
 - **Events**: page-local operation log with credential redaction
 
+## Recommended deployment path
+
+- Follow the [single VPS dual-stack deployment guide](zh-CN/deploy-single-vps-dual-stack.md)
+  for a low-cost public entry with Velocity A/Fabric A and a standby
+  Velocity B/Fabric B pair.
+- v0.1-demo recommends two public player ports with manual or semi-automatic
+  failover. Players reconnect to the standby entry after a fault.
+- The Dashboard can assist the artifact push, pull, restore, server start, and
+  takeover rehearsal.
+- Automatic Velocity backend switching is planned for v0.2 and is not part of
+  v0.1-demo.
+
 ## CLI demo smoke
 
 ```bash

@@ -1,0 +1,19 @@
+[Unit]
+Description=ACBH Coordinator and Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minecraft
+WorkingDirectory=/opt/mc-stack/acbh/coordinator
+Environment=HOST=127.0.0.1
+Environment=PORT=6121
+Environment=ACBH_STORAGE_ROOT=/opt/mc-stack/acbh/data/storage
+Environment=ACBH_COORDINATOR_STATE_PATH=/opt/mc-stack/acbh/data/coordinator-state.json
+ExecStart=/usr/bin/node /opt/mc-stack/acbh/coordinator/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

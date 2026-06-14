@@ -1,0 +1,7 @@
+# Fabric B example. Keep the backend and RCON on loopback.
+server-ip=127.0.0.1
+server-port=25576
+enable-rcon=true
+rcon.port=25577
+rcon.password=CHANGE_ME
+motd=ACBH Fabric B
