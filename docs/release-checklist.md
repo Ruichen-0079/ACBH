@@ -28,7 +28,7 @@ powershell scripts/verify-all.ps1 # Windows
 - [ ] `go vet` clean
 - [ ] `go test ./... -count=1` all pass
 - [ ] `pnpm build:coordinator` succeeds
-- [ ] `pnpm --filter @acbh/coordinator test` all pass (minimum 116 tests)
+- [ ] `pnpm --filter @acbh/coordinator test` all pass (minimum 123 tests)
 - [ ] No `FAIL` lines in test output
 
 ## 3. Demo smoke

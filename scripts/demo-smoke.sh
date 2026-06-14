@@ -17,6 +17,34 @@ info "ACBH Demo Smoke"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
+export XDG_CONFIG_HOME="$TMPDIR/xdg"
+export ACBH_STORAGE_ROOT="$TMPDIR/storage"
+export ACBH_COORDINATOR_STATE_PATH="$TMPDIR/coordinator-state.json"
+
+curl_auth() {
+  local method="$1" url="$2" host_id="$3" host_token="$4" access_key="$5" data="$6"
+  local h_file="$TMPDIR/curl_headers$$"
+
+  {
+    echo "Content-Type: application/json"
+    if [ -n "$host_id" ]; then
+      echo "x-acbh-host-id: $host_id"
+      echo "x-acbh-host-token: $host_token"
+    fi
+    if [ -n "$access_key" ]; then
+      echo "x-acbh-access-key: $access_key"
+    fi
+  } > "$h_file"
+
+  if [ -n "$data" ]; then
+    local d_file="$TMPDIR/curl_body$$"
+    echo "$data" > "$d_file"
+    curl -sf -X "$method" "$url" -H "@$h_file" -d "@$d_file"
+  else
+    curl -sf -X "$method" "$url" -H "@$h_file"
+  fi
+}
+
 export ACBH_STORAGE_ROOT="$TMPDIR/storage"
 export ACBH_COORDINATOR_STATE_PATH="$TMPDIR/coordinator-state.json"
 
@@ -36,7 +64,11 @@ export HOST="127.0.0.1"
 
 pnpm --filter @acbh/coordinator start &
 COORD_PID=$!
-sleep 2
+# Wait for coordinator to become ready
+for i in $(seq 1 15); do
+  if curl -sf "http://127.0.0.1:$COORDINATOR_PORT/health" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
 
 COORDINATOR_URL="http://127.0.0.1:$COORDINATOR_PORT"
 
@@ -50,7 +82,10 @@ info "Coordinator is healthy"
 info "Creating group..."
 GROUP=$(curl -sf -X POST "$COORDINATOR_URL/v1/groups" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Demo Group","ownerName":"Demo Owner"}')
+  -d @<(cat <<EOF
+{"name":"Demo Group","ownerName":"Demo Owner"}
+EOF
+))
 GROUP_ID=$(echo "$GROUP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["groupId"])')
 ACCESS_KEY=$(echo "$GROUP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["accessKey"])')
 echo "Group: $GROUP_ID"
@@ -59,21 +94,47 @@ echo "Group: $GROUP_ID"
 info "Registering host..."
 MEMBER=$(curl -sf -X POST "$COORDINATOR_URL/v1/groups/$GROUP_ID/join" \
   -H 'Content-Type: application/json' \
-  -d "{\"accessKey\":\"$ACCESS_KEY\",\"displayName\":\"Demo Host\"}")
+  -d @<(cat <<EOF
+{"accessKey":"$ACCESS_KEY","displayName":"Demo Host"}
+EOF
+))
 MEMBER_ID=$(echo "$MEMBER" | python3 -c 'import sys,json; print(json.load(sys.stdin)["memberId"])')
 
 HOST=$(curl -sf -X POST "$COORDINATOR_URL/v1/hosts/register" \
   -H 'Content-Type: application/json' \
-  -d "{\"groupId\":\"$GROUP_ID\",\"accessKey\":\"$ACCESS_KEY\",\"memberId\":\"$MEMBER_ID\",\"deviceName\":\"demo-device\",\"platform\":\"linux\",\"agentVersion\":\"0.1.0\"}")
+  -d @<(cat <<EOF
+{"groupId":"$GROUP_ID","accessKey":"$ACCESS_KEY","memberId":"$MEMBER_ID","deviceName":"demo-device","platform":"linux","agentVersion":"0.1.0"}
+EOF
+))
 HOST_ID=$(echo "$HOST" | python3 -c 'import sys,json; print(json.load(sys.stdin)["hostId"])')
 HOST_TOKEN=$(echo "$HOST" | python3 -c 'import sys,json; print(json.load(sys.stdin)["hostToken"])')
 info "Host registered: $HOST_ID"
+
+# Write agent config so agent commands can reach the demo coordinator
+AGENT_CONFIG_DIR="$TMPDIR/xdg/acbh"
+mkdir -p "$AGENT_CONFIG_DIR"
+cat > "$AGENT_CONFIG_DIR/config.yaml" << AGENTEOF
+{
+  "coordinatorUrl": "$COORDINATOR_URL",
+  "groupId": "$GROUP_ID",
+  "memberId": "$MEMBER_ID",
+  "hostId": "$HOST_ID",
+  "hostToken": "$HOST_TOKEN",
+  "displayName": "Demo Host",
+  "deviceName": "demo-device",
+  "platform": "linux",
+  "agentVersion": "0.1.0"
+}
+AGENTEOF
 
 # ── 6. Heartbeat ──────────────────────────────────────────
 info "Sending heartbeat..."
 HB=$(curl -sf -X POST "$COORDINATOR_URL/v1/hosts/heartbeat" \
   -H 'Content-Type: application/json' \
-  -d "{\"groupId\":\"$GROUP_ID\",\"hostId\":\"$HOST_ID\",\"hostToken\":\"$HOST_TOKEN\",\"status\":\"standby\"}")
+  -d @<(cat <<EOF
+{"groupId":"$GROUP_ID","hostId":"$HOST_ID","hostToken":"$HOST_TOKEN","status":"standby"}
+EOF
+))
 echo "$HB" | grep -q '"ok":true' || fail "Heartbeat failed"
 info "Heartbeat OK"
 
@@ -106,9 +167,7 @@ info "Push complete"
 
 # ── 9. Check latest artifact ──────────────────────────────
 info "Checking latest artifact..."
-LATEST=$(curl -sf "$COORDINATOR_URL/v1/groups/$GROUP_ID/artifacts/latest?artifactKind=world-snapshot" \
-  -H "x-acbh-host-id: $HOST_ID" \
-  -H "x-acbh-host-token: $HOST_TOKEN")
+LATEST=$(curl_auth GET "$COORDINATOR_URL/v1/groups/$GROUP_ID/artifacts/latest?artifactKind=world-snapshot" "$HOST_ID" "$HOST_TOKEN" "" "")
 echo "$LATEST" | grep -q '"artifactId":"snap_demo_001"' || fail "Latest artifact not found"
 info "Latest artifact confirmed"
 
@@ -129,8 +188,7 @@ fi
 
 # ── 11. Group state ───────────────────────────────────────
 info "Checking group state..."
-STATE=$(curl -sf "$COORDINATOR_URL/v1/groups/$GROUP_ID/state" \
-  -H "x-acbh-access-key: $ACCESS_KEY")
+STATE=$(curl_auth GET "$COORDINATOR_URL/v1/groups/$GROUP_ID/state" "" "" "$ACCESS_KEY" "")
 echo "$STATE" | grep -q "$GROUP_ID" || fail "Group state check failed"
 # Must not leak access key
 if echo "$STATE" | grep -q "$ACCESS_KEY"; then
