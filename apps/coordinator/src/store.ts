@@ -164,9 +164,18 @@ export type DeletedArtifact = {
 
 export type GcResult = {
   dryRun: boolean;
+  blocked: boolean;
+  blockers: GcBlocker[];
   deletedArtifacts: DeletedArtifact[];
   deletedObjectCount: number;
   protectedArtifactIds: string[];
+};
+
+export type GcBlocker = {
+  groupId: string;
+  artifactKind: ArtifactKind;
+  artifactId: string;
+  reason: string;
 };
 
 export interface GcBackend {
@@ -300,6 +309,19 @@ export class StoreError extends Error {
   ) {
     super(message);
     this.name = "StoreError";
+  }
+}
+
+export class GcBlockedError extends StoreError {
+  constructor(public readonly blockers: GcBlocker[]) {
+    const first = blockers[0];
+    super(
+      409,
+      first
+        ? `Artifact GC blocked by retained manifest read failure: groupId=${first.groupId} artifactKind=${first.artifactKind} artifactId=${first.artifactId} reason=${first.reason}`
+        : "Artifact GC blocked by retained manifest read failure",
+    );
+    this.name = "GcBlockedError";
   }
 }
 
@@ -1064,21 +1086,16 @@ export class InMemoryCoordinatorStore {
       });
     }
 
-    if (input.dryRun) {
-      return {
-        dryRun: true,
-        deletedArtifacts: candidates,
-        deletedObjectCount: 0,
-        protectedArtifactIds: protectedLog,
-      };
-    }
-
     const retainedSha256s = new Set<string>();
+    const blockers: GcBlocker[] = [];
     for (const kind of ALL_ARTIFACT_KINDS) {
       const artifactsByKind = group.artifacts.get(kind);
       if (!artifactsByKind) continue;
       for (const [artifactId, artifact] of artifactsByKind) {
-        if (protectedIds.has(artifactId) || !candidates.some((c) => c.artifactId === artifactId)) {
+        if (
+          artifact.status !== "uploading" &&
+          (protectedIds.has(artifactId) || !candidates.some((c) => c.artifactId === artifactId))
+        ) {
           try {
             const files = await input.backend.readManifestFiles({
               groupId: artifact.groupId,
@@ -1090,11 +1107,32 @@ export class InMemoryCoordinatorStore {
                 retainedSha256s.add(file.sha256);
               }
             }
-          } catch {
-            protectedLog.push(`${artifactId} (manifest read error, treating as retained)`);
+          } catch (error) {
+            blockers.push({
+              groupId: artifact.groupId,
+              artifactKind: artifact.artifactKind,
+              artifactId: artifact.artifactId,
+              reason: describeManifestReadFailure(error),
+            });
+            protectedLog.push(`${artifactId} (manifest read failure blocks object GC)`);
           }
         }
       }
+    }
+
+    if (input.dryRun) {
+      return {
+        dryRun: true,
+        blocked: blockers.length > 0,
+        blockers,
+        deletedArtifacts: candidates,
+        deletedObjectCount: 0,
+        protectedArtifactIds: protectedLog,
+      };
+    }
+
+    if (blockers.length > 0) {
+      throw new GcBlockedError(blockers);
     }
 
     for (const candidate of candidates) {
@@ -1134,6 +1172,8 @@ export class InMemoryCoordinatorStore {
     this.triggerMutation();
     return {
       dryRun: false,
+      blocked: false,
+      blockers: [],
       deletedArtifacts: candidates,
       deletedObjectCount,
       protectedArtifactIds: protectedLog,
@@ -1492,6 +1532,22 @@ function positiveEnvInteger(name: string, fallback: number): number {
   if (raw === undefined || raw.trim() === "") return fallback;
   const parsed = Number(raw);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function describeManifestReadFailure(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "manifest read failed";
+  }
+  if (error.name === "StorageNotFoundError") {
+    return "manifest does not exist";
+  }
+  if (error.name === "SyntaxError") {
+    return "manifest contains invalid JSON";
+  }
+  if (error.name === "StorageValidationError") {
+    return "manifest validation failed";
+  }
+  return "manifest storage read failed";
 }
 
 function createId(prefix: string): string {

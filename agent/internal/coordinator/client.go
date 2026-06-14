@@ -403,8 +403,17 @@ type GcDeletedArtifact struct {
 	Status       string `json:"status"`
 }
 
+type GcBlocker struct {
+	GroupID      string `json:"groupId"`
+	ArtifactKind string `json:"artifactKind"`
+	ArtifactID   string `json:"artifactId"`
+	Reason       string `json:"reason"`
+}
+
 type GcResponse struct {
 	DryRun               bool                `json:"dryRun"`
+	Blocked              bool                `json:"blocked"`
+	Blockers             []GcBlocker         `json:"blockers"`
 	DeletedArtifacts     []GcDeletedArtifact `json:"deletedArtifacts"`
 	DeletedObjectCount   int                 `json:"deletedObjectCount"`
 	ProtectedArtifactIds []string            `json:"protectedArtifactIds"`
