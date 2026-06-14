@@ -463,7 +463,7 @@ func normalizeStartOptions(opts StartOptions) (StartOptions, error) {
 		return opts, errors.New("server directory is not a directory")
 	}
 	if len(opts.CommandArgv) > 0 {
-		if len(opts.CommandArgv) == 0 || opts.CommandArgv[0] == "" {
+		if opts.CommandArgv[0] == "" {
 			return opts, errors.New("server command argv must contain a non-empty executable")
 		}
 		if opts.Command == "" {

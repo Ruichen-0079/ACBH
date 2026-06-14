@@ -14,6 +14,12 @@ const fileClasses = new Set<FileClass>([
   "unknown",
 ]);
 
+const classAllowedForArtifact: Record<ArtifactKind, Set<FileClass>> = {
+  "world-snapshot": new Set<FileClass>(["world-runtime", "plugin-runtime-data"]),
+  "server-pack": new Set<FileClass>(["server-pack"]),
+  "admin-state": new Set<FileClass>(["admin-state"]),
+};
+
 export function validateStorageId(label: string, value: string): string {
   if (!idPattern.test(value) || value === "." || value === "..") {
     throw new StorageValidationError(`${label} is not a safe storage identifier`);
@@ -106,9 +112,16 @@ export function validateManifest(manifest: ArtifactManifest): ArtifactManifest {
     if (file.class === "ignored" || file.class === "unknown") {
       throw new StorageValidationError("manifest file class must not be ignored or unknown");
     }
+    const allowed = classAllowedForArtifact[manifest.artifactKind];
+    if (!allowed.has(file.class)) {
+      throw new StorageValidationError(`manifest file class ${file.class} is not allowed for ${manifest.artifactKind}`);
+    }
   }
 
-  if (manifest.summary) {
+  if (!manifest.summary) {
+    throw new StorageValidationError("manifest summary is required");
+  }
+  {
     const included = (manifest.files ?? []).filter((f) => !f.deleted).length;
     const deleted = (manifest.files ?? []).filter((f) => f.deleted).length;
     if (manifest.summary.includedFiles !== included) {

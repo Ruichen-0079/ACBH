@@ -331,6 +331,13 @@ function sampleManifest(
         fileClass: artifactKind === "world-snapshot" ? "world-runtime" : artifactKind,
       },
     ],
+    summary: {
+      includedFiles: 1,
+      ignoredFiles: 0,
+      unknownFiles: 0,
+      deletedFiles: 0,
+      totalBytes: fileContent.byteLength,
+    },
     ...overrides,
   };
 }
