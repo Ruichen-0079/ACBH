@@ -461,6 +461,8 @@ Current release branch: `release/v0.1-demo-prep`
   limitations, platform verification
 - CLI demo: `bash scripts/demo-smoke.sh`
 - GUI demo: `pnpm dev:coordinator` → `http://127.0.0.1:6121/dashboard`
+- [Release packaging](docs/release-packaging.md) — how to build `dist/release/v0.1-demo`
+  artifacts for Linux and Windows
 - [Release checklist](docs/release-checklist.md) — 9-section pre-release verification
 - Go tests: 14 packages (all pass), Coordinator tests: 123/123
 - Verified on Fedora 41 and Windows 11 (PowerShell)
