@@ -627,7 +627,7 @@ async function setupRelayTest(): Promise<TestContext> {
 
   const group = store.createGroup({ name: "RelayTest", ownerName: "Owner" });
   const joined = store.joinGroup({ groupId: group.groupId, accessKey: group.accessKey, displayName: "Host" });
-  const hostReg = store.registerHost({ groupId: group.groupId, memberId: joined.memberId, deviceName: "host", platform: "test", agentVersion: "0.1.0" });
+  const hostReg = store.registerHost({ groupId: group.groupId, accessKey: group.accessKey, memberId: joined.memberId, deviceName: "host", platform: "test", agentVersion: "0.1.0" });
 
   const host: HostInfo = { groupId: group.groupId, hostId: hostReg.hostId, hostToken: hostReg.hostToken, hostGeneration: 1 };
 
@@ -646,13 +646,13 @@ async function setupRelayTest(): Promise<TestContext> {
 function makeHost(store: ReturnType<typeof createInMemoryCoordinatorStore>, name: string): HostInfo {
   const group = store.createGroup({ name: `Test-${name}`, ownerName: "Owner" });
   const joined = store.joinGroup({ groupId: group.groupId, accessKey: group.accessKey, displayName: name });
-  const host = store.registerHost({ groupId: group.groupId, memberId: joined.memberId, deviceName: name, platform: "test", agentVersion: "0.1.0" });
+  const host = store.registerHost({ groupId: group.groupId, accessKey: group.accessKey, memberId: joined.memberId, deviceName: name, platform: "test", agentVersion: "0.1.0" });
   return { groupId: group.groupId, hostId: host.hostId, hostToken: host.hostToken, hostGeneration: 1 };
 }
 
 function joinAndRegister(store: ReturnType<typeof createInMemoryCoordinatorStore>, groupId: string, accessKey: string, name: string): HostInfo {
   const joined = store.joinGroup({ groupId, accessKey, displayName: name });
-  const host = store.registerHost({ groupId, memberId: joined.memberId, deviceName: name, platform: "test", agentVersion: "0.1.0" });
+  const host = store.registerHost({ groupId, accessKey, memberId: joined.memberId, deviceName: name, platform: "test", agentVersion: "0.1.0" });
   return { groupId, hostId: host.hostId, hostToken: host.hostToken, hostGeneration: 1 };
 }
 

@@ -92,7 +92,7 @@ Register a host candidate device. Save the returned one-time `hostToken`:
 ```bash
 curl -s http://localhost:6121/v1/hosts/register \
   -H "content-type: application/json" \
-  -d '{"groupId":"<groupId>","memberId":"<memberId>","deviceName":"PlayerA-PC","platform":"windows","agentVersion":"0.1.0"}'
+  -d '{"groupId":"<groupId>","accessKey":"<accessKey>","memberId":"<memberId>","deviceName":"PlayerA-PC","platform":"windows","agentVersion":"0.1.0"}'
 ```
 
 Send a heartbeat:
@@ -106,7 +106,8 @@ curl -s http://localhost:6121/v1/hosts/heartbeat \
 Inspect debug state. This does not return access keys or host tokens:
 
 ```bash
-curl -s http://localhost:6121/v1/groups/<groupId>/state
+curl -s http://localhost:6121/v1/groups/<groupId>/state \
+  -H "x-acbh-access-key: <accessKey>"
 ```
 
 ## Agent CLI example
@@ -149,7 +150,9 @@ go run . daemon --interval 10s --status standby
 Then inspect Coordinator state:
 
 ```bash
-curl -s http://localhost:6121/v1/groups/<groupId>/state
+curl -s http://localhost:6121/v1/groups/<groupId>/state \
+  -H "x-acbh-host-id: <hostId>" \
+  -H "x-acbh-host-token: <hostToken>"
 ```
 
 ## Agent local server process manager

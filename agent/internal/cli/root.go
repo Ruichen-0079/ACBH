@@ -939,6 +939,7 @@ func runLogin(ctx context.Context, cmd *cobra.Command, opts loginOptions) error 
 
 	registered, err := client.RegisterHost(ctx, coordinator.RegisterHostRequest{
 		GroupID:      opts.groupID,
+		AccessKey:    opts.accessKey,
 		MemberID:     joined.MemberID,
 		DeviceName:   opts.deviceName,
 		Platform:     opts.platform,

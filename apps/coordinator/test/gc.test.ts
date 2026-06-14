@@ -90,6 +90,7 @@ function createTestHost(store: ReturnType<typeof createInMemoryCoordinatorStore>
   const joined = store.joinGroup({ groupId: group.groupId, accessKey: group.accessKey, displayName: "Test" });
   const host = store.registerHost({
     groupId: group.groupId,
+    accessKey: group.accessKey,
     memberId: joined.memberId,
     deviceName: "gc-host",
     platform: "test",
@@ -102,6 +103,7 @@ function addTestHost(store: ReturnType<typeof createInMemoryCoordinatorStore>, g
   const joined = store.joinGroup({ groupId: group.groupId, accessKey: group.accessKey, displayName: "Other" });
   const host = store.registerHost({
     groupId: group.groupId,
+    accessKey: group.accessKey,
     memberId: joined.memberId,
     deviceName: "gc-host-b",
     platform: "test",

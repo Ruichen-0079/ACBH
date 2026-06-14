@@ -563,6 +563,7 @@ function createHost(store: ReturnType<typeof createInMemoryCoordinatorStore>): T
   });
   const host = store.registerHost({
     groupId: group.groupId,
+    accessKey: group.accessKey,
     memberId: joined.memberId,
     deviceName: "host-a",
     platform: "test",
@@ -583,6 +584,7 @@ function addHost(
   });
   const host = store.registerHost({
     groupId: group.groupId,
+    accessKey: group.accessKey,
     memberId: joined.memberId,
     deviceName: name,
     platform: "test",

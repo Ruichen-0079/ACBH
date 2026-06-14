@@ -36,6 +36,7 @@ function createHost(store: InMemoryCoordinatorStore) {
   const { groupId, accessKey, ownerMemberId } = store.createGroup({ name: "test", ownerName: "alice" });
   const { hostId, hostToken } = store.registerHost({
     groupId,
+    accessKey,
     memberId: ownerMemberId,
     deviceName: "test-device",
     platform: "linux",
