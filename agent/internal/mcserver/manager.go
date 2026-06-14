@@ -30,6 +30,7 @@ var newSupervisorCommand = func(executable string, args ...string) *exec.Cmd {
 type StartOptions struct {
 	ServerDir   string
 	Command     string
+	CommandArgv []string
 	LogDir      string
 	RuntimeDir  string
 	StopTimeout time.Duration
@@ -127,6 +128,9 @@ func Start(ctx context.Context, executable string, opts StartOptions) (State, er
 		"--stop-timeout", opts.StopTimeout.String(),
 		"--lock-nonce", nonce,
 	}
+	if encoded := EncodeCommandArgv(opts.CommandArgv); encoded != "" {
+		args = append(args, "--command-argv", encoded)
+	}
 	cmd := newSupervisorCommand(executable, args...)
 	configureDetachedProcess(cmd)
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
@@ -178,9 +182,14 @@ func RunSupervisor(ctx context.Context, opts SupervisorOptions) error {
 	}
 	defer deleteLockWithRetry(lockPath, opts.LockNonce)
 
-	args, err := ParseCommand(normalized.Command)
-	if err != nil {
-		return err
+	var args []string
+	if len(normalized.CommandArgv) > 0 {
+		args = normalized.CommandArgv
+	} else {
+		args, err = ParseCommand(normalized.Command)
+		if err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(normalized.LogDir, 0o700); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
@@ -225,6 +234,7 @@ func RunSupervisor(ctx context.Context, opts SupervisorOptions) error {
 		SupervisorPID: os.Getpid(),
 		ServerDir:     normalized.ServerDir,
 		Command:       normalized.Command,
+		CommandArgv:   normalized.CommandArgv,
 		StartedAt:     time.Now().UTC(),
 		StdoutLog:     stdoutPath,
 		StderrLog:     stderrPath,
@@ -452,8 +462,17 @@ func normalizeStartOptions(opts StartOptions) (StartOptions, error) {
 	if !info.IsDir() {
 		return opts, errors.New("server directory is not a directory")
 	}
-	if _, err := ParseCommand(opts.Command); err != nil {
-		return opts, err
+	if len(opts.CommandArgv) > 0 {
+		if opts.CommandArgv[0] == "" {
+			return opts, errors.New("server command argv must contain a non-empty executable")
+		}
+		if opts.Command == "" {
+			opts.Command = DisplayCommand(opts.CommandArgv)
+		}
+	} else {
+		if _, err := ParseCommand(opts.Command); err != nil {
+			return opts, err
+		}
 	}
 	if opts.RuntimeDir == "" {
 		return opts, errors.New("runtime directory is required")
@@ -574,6 +593,29 @@ func normalizeExitError(err error) error {
 		}
 	}
 	return err
+}
+
+func DisplayCommand(argv []string) string {
+	return strings.Join(argv, " ")
+}
+
+func EncodeCommandArgv(argv []string) string {
+	if len(argv) == 0 {
+		return ""
+	}
+	data, _ := json.Marshal(argv)
+	return string(data)
+}
+
+func DecodeCommandArgv(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var argv []string
+	if err := json.Unmarshal([]byte(raw), &argv); err != nil {
+		return nil
+	}
+	return argv
 }
 
 func isTimeout(err error) bool {

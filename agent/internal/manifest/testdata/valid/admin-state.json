@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "artifactKind": "admin-state",
+  "artifactId": "admin_valid_001",
+  "groupId": "grp_valid",
+  "createdAt": "2026-06-06T00:00:00Z",
+  "creatorHostId": "host_valid",
+  "parentArtifactId": null,
+  "serverPackVersion": null,
+  "files": [
+    {
+      "path": "server.properties",
+      "class": "admin-state",
+      "size": 256,
+      "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "modifiedAt": "2026-06-06T00:00:00Z",
+      "deleted": false
+    }
+  ],
+  "summary": {
+    "includedFiles": 1,
+    "ignoredFiles": 0,
+    "unknownFiles": 0,
+    "deletedFiles": 0,
+    "totalBytes": 256
+  }
+}

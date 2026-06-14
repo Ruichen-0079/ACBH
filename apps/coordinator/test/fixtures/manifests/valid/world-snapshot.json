@@ -1,0 +1,35 @@
+{
+  "manifestVersion": 1,
+  "artifactKind": "world-snapshot",
+  "artifactId": "snap_valid_001",
+  "groupId": "grp_valid",
+  "createdAt": "2026-06-06T00:00:00Z",
+  "creatorHostId": "host_valid",
+  "parentArtifactId": null,
+  "serverPackVersion": "pack_valid_001",
+  "files": [
+    {
+      "path": "world/region/r.0.0.mca",
+      "class": "world-runtime",
+      "size": 4096,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "modifiedAt": "2026-06-06T00:00:00Z",
+      "deleted": false
+    },
+    {
+      "path": "world/region/r.1.0.mca",
+      "class": "world-runtime",
+      "size": 0,
+      "sha256": "",
+      "modifiedAt": "2026-06-06T00:00:00Z",
+      "deleted": true
+    }
+  ],
+  "summary": {
+    "includedFiles": 1,
+    "ignoredFiles": 0,
+    "unknownFiles": 0,
+    "deletedFiles": 1,
+    "totalBytes": 4096
+  }
+}

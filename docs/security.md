@@ -4,11 +4,18 @@ ACBH V1 uses a minimal security model focused on preventing unauthorized hosts a
 
 ## Roles
 
-- `owner`: manages group and recovery.
-- `admin`: manages members and host candidates.
-- `host_candidate`: may be elected as host.
-- `member`: may view group connection metadata.
-- `guest`: no Agent privileges.
+- `owner`: manages group and recovery (created at group creation; one per group).
+- `member`: joined the group via access key. May register hosts. Not used for any elevated auth check beyond group membership validation.
+- `host`: a registered Agent that may heartbeat, upload artifacts, participate in elections, execute takeover. Requires a `hostToken`.
+- `player`: an external peer that may create tunnel sessions for relay connections. Requires a `playerToken`, scoped to one group.
+- `guest`: no Agent privileges (public endpoints only).
+
+Role boundaries:
+- A host token is valid only for the group it was registered in. Cross-group use returns 404.
+- A player token cannot call host API endpoints (artifact, election, takeover) and returns 401.
+- A host token cannot call player tunnel endpoints and returns 401.
+- Tokens are rejected when `expiresAt <= now`. Expiry returns 401 with code `token_expired`.
+- Error responses never contain raw token values.
 
 ## Access Key
 
@@ -223,3 +230,48 @@ The Player local TCP proxy (`acbh-agent relay player`) enforces:
 - The proxy does not parse the Minecraft protocol.
 - Context cancellation triggers clean shutdown of listener, local TCP
   connections, and WebSocket connections.
+
+## Manifest schema Go/TypeScript unification
+
+Manifest validation is unified across Go (Agent scanner/loader) and TypeScript
+(Coordinator storage). Shared test fixtures ensure both sides enforce the same
+constraints.
+
+Common rules:
+
+- `manifestVersion` is optional. When present it must equal `1`.
+- `artifactKind` must be one of `server-pack`, `world-snapshot`, `admin-state`.
+- `artifactId`, `groupId`, `creatorHostId` are required non-blank identifiers
+  matching `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`.
+- `createdAt` is a required valid ISO 8601 timestamp.
+- `serverPackVersion` is required for `world-snapshot` manifests.
+- `parentArtifactId` is `null` or a valid identifier.
+- `files` must be an array sorted by path with no duplicate entries.
+- Each file entry requires `class` (one of the six `FileClass` values;
+  `ignored` and `unknown` are rejected). The legacy `fileClass` key is
+  normalized to `class` when only `fileClass` is present.
+- `size` must be a non-negative safe integer.
+- `sha256` must be a 64-character lowercase hex string for non-deleted files.
+  Deleted tombstone entries must set `sha256: ""` and `size: 0`.
+- `modifiedAt` is required for non-deleted files.
+- File paths must be relative POSIX paths, cannot contain `\`, and must not
+  traverse directories.
+- `summary` fields (`includedFiles`, `deletedFiles`, `totalBytes`) must match
+  the file list.
+
+## Server start command and argv
+
+The server start command avoids shell interpretation. The local control API
+and the internal supervisor use structured `argv` (`[]string`):
+
+- The local control API endpoint receives `jvmArgs` and `serverArgs` as JSON
+  string arrays. The Agent builds the `java <jvmArgs> -jar <jarPath>
+  <serverArgs>` command as an argv slice and passes it to the supervisor
+  without string join-then-reparse.
+- The CLI `--command` flag accepts a legacy space-separated string and is
+  parsed by `ParseCommand()` for backward compatibility. Structured argv is
+  preferred for new configurations.
+- The supervisor launches the Minecraft process via `exec.Command` directly,
+  never through a shell.
+- Paths containing spaces work correctly with structured argv.
+- Shell metacharacters are never interpreted.

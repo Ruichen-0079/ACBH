@@ -1,0 +1,26 @@
+{
+  "manifestVersion": 1,
+  "artifactKind": "world-snapshot",
+  "artifactId": "snap_bad_hash",
+  "groupId": "grp_bad",
+  "createdAt": "2026-06-06T00:00:00Z",
+  "creatorHostId": "host_bad",
+  "serverPackVersion": "pack_001",
+  "files": [
+    {
+      "path": "world/region/r.0.0.mca",
+      "class": "world-runtime",
+      "size": 4096,
+      "sha256": "deadbeef",
+      "modifiedAt": "2026-06-06T00:00:00Z",
+      "deleted": false
+    }
+  ],
+  "summary": {
+    "includedFiles": 1,
+    "ignoredFiles": 0,
+    "unknownFiles": 0,
+    "deletedFiles": 0,
+    "totalBytes": 4096
+  }
+}

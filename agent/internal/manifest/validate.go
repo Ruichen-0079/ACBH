@@ -13,7 +13,7 @@ var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func Validate(m Manifest) error {
 	switch {
-	case m.ManifestVersion != ManifestVersion:
+	case m.ManifestVersion != 0 && m.ManifestVersion != ManifestVersion:
 		return fmt.Errorf("manifestVersion must be %d", ManifestVersion)
 	case !IsValidArtifactKind(m.ArtifactKind):
 		return fmt.Errorf("invalid artifactKind %q", m.ArtifactKind)

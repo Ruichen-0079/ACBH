@@ -59,6 +59,7 @@ async function saveArtifactMeta(
 ) {
   const content = Buffer.from("hello-world-object");
   const objectSha256 = sha256raw(content);
+  const fileClass = kind === "world-snapshot" ? "world-runtime" : kind;
   const manifest = {
     manifestVersion: 1,
     artifactKind: kind,
@@ -68,7 +69,7 @@ async function saveArtifactMeta(
     creatorHostId,
     parentArtifactId: null,
     serverPackVersion: kind === "world-snapshot" ? "pack_000001" : null,
-    files: [{ path: "test.file", size: content.byteLength, sha256: objectSha256, modifiedAt: "2026-06-01T00:00:00.000Z", deleted: false }],
+    files: [{ path: "test.file", class: fileClass, size: content.byteLength, sha256: objectSha256, modifiedAt: "2026-06-01T00:00:00.000Z", deleted: false }],
     summary: { includedFiles: 1, ignoredFiles: 0, unknownFiles: 0, deletedFiles: 0, totalBytes: content.byteLength },
   };
   await storage.saveObject({ groupId, sha256: objectSha256, content });

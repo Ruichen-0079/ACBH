@@ -136,20 +136,23 @@ func newServerSuperviseCmd() *cobra.Command {
 		Use:    "supervise",
 		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			startOpts := mcserver.StartOptions{
+				ServerDir:   opts.serverDir,
+				Command:     opts.command,
+				CommandArgv: mcserver.DecodeCommandArgv(opts.commandArgv),
+				LogDir:      opts.logDir,
+				RuntimeDir:  opts.runtimeDir,
+				StopTimeout: opts.stopTimeout,
+			}
 			return mcserver.RunSupervisor(cmd.Context(), mcserver.SupervisorOptions{
-				StartOptions: mcserver.StartOptions{
-					ServerDir:   opts.serverDir,
-					Command:     opts.command,
-					LogDir:      opts.logDir,
-					RuntimeDir:  opts.runtimeDir,
-					StopTimeout: opts.stopTimeout,
-				},
-				LockNonce: opts.lockNonce,
+				StartOptions: startOpts,
+				LockNonce:    opts.lockNonce,
 			})
 		},
 	}
 	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "")
 	cmd.Flags().StringVar(&opts.command, "command", "", "")
+	cmd.Flags().StringVar(&opts.commandArgv, "command-argv", "", "")
 	cmd.Flags().StringVar(&opts.logDir, "log-dir", "", "")
 	cmd.Flags().StringVar(&opts.runtimeDir, "runtime-dir", "", "")
 	cmd.Flags().DurationVar(&opts.stopTimeout, "stop-timeout", defaultServerStopTimeout, "")
@@ -552,8 +555,9 @@ type serverStartOptions struct {
 
 type serverSupervisorOptions struct {
 	serverStartOptions
-	runtimeDir string
-	lockNonce  string
+	runtimeDir  string
+	lockNonce   string
+	commandArgv string
 }
 
 func runServerStart(ctx context.Context, cmd *cobra.Command, opts serverStartOptions) error {

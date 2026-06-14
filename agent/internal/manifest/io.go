@@ -20,7 +20,10 @@ func LoadFile(path string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read manifest: %w", err)
 	}
+	return UnmarshalAndValidate(data)
+}
 
+func UnmarshalAndValidate(data []byte) (Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return Manifest{}, fmt.Errorf("parse manifest JSON: %w", err)
@@ -28,7 +31,6 @@ func LoadFile(path string) (Manifest, error) {
 	if err := Validate(m); err != nil {
 		return Manifest{}, err
 	}
-
 	return m, nil
 }
 

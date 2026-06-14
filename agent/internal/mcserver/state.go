@@ -19,6 +19,7 @@ type State struct {
 	SupervisorPID int       `json:"supervisorPid"`
 	ServerDir     string    `json:"serverDir"`
 	Command       string    `json:"command"`
+	CommandArgv   []string  `json:"commandArgv,omitempty"`
 	StartedAt     time.Time `json:"startedAt"`
 	StdoutLog     string    `json:"stdoutLog"`
 	StderrLog     string    `json:"stderrLog"`
