@@ -181,3 +181,17 @@ cd agent && go vet ./...
 - [选举设计](./docs/election-design.zh-CN.md)
 - [安全说明](./docs/security.zh-CN.md)
 - [Codex 开发指南](./docs/codex-guide.zh-CN.md)
+
+## v0.1-demo
+
+当前发布分支：`release/v0.1-demo-prep`
+
+- [Release notes](docs/release-notes-v0.1-demo.md)（英文）— 已完成能力、安全默认值、已知限制、平台验证
+- CLI demo：`bash scripts/demo-smoke.sh`
+- GUI demo：`pnpm dev:coordinator` → `http://127.0.0.1:6121/dashboard`
+- [Release checklist](docs/release-checklist.md)（英文）— 9 部分发布前验证清单
+- Go tests：14 包全部通过，Coordinator tests：123/123
+- 已在 Fedora 41 和 Windows 11 (PowerShell) 上验证
+
+**不适用于生产环境。** 默认仅本地回环，内存存储，无 TLS。
+仅限本地开发使用。
