@@ -204,8 +204,8 @@ func Pull(ctx context.Context, opts PullOptions) (PullSummary, error) {
 	if err != nil {
 		return PullSummary{}, fmt.Errorf("resolve output directory: %w", err)
 	}
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return PullSummary{}, fmt.Errorf("create output directory: %w", err)
+	if err := prepareRestoreRoot(outputDir); err != nil {
+		return PullSummary{}, err
 	}
 
 	summary := PullSummary{
@@ -214,14 +214,25 @@ func Pull(ctx context.Context, opts PullOptions) (PullSummary, error) {
 	}
 
 	for _, file := range downloaded.Manifest.Files {
-		path, err := safeJoin(outputDir, file.Path)
+		path, err := resolveRestoreTarget(outputDir, file.Path)
 		if err != nil {
 			return PullSummary{}, err
 		}
 
 		if file.Deleted {
+			parentsExist, err := checkExistingRestoreParentDirectories(outputDir, path)
+			if err != nil {
+				return PullSummary{}, fmt.Errorf("check delete path %s: %w", file.Path, err)
+			}
+			targetExists := false
+			if parentsExist {
+				targetExists, err = checkRestoreFinalPath(path)
+				if err != nil {
+					return PullSummary{}, fmt.Errorf("check delete target %s: %w", file.Path, err)
+				}
+			}
 			if !opts.ApplyDeletes {
-				if exists(path) {
+				if targetExists {
 					summary.PendingDeletes++
 				}
 				continue
@@ -233,15 +244,31 @@ func Pull(ctx context.Context, opts PullOptions) (PullSummary, error) {
 			continue
 		}
 
-		if actual, _, err := hashFile(path); err == nil && actual == file.SHA256 {
-			summary.SkippedFiles++
-			continue
+		if err := ensureRestoreParentDirectories(outputDir, path); err != nil {
+			return PullSummary{}, fmt.Errorf("prepare restore path %s: %w", file.Path, err)
 		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return PullSummary{}, fmt.Errorf("create parent directory for %s: %w", file.Path, err)
+		targetExists, err := checkRestoreFinalPath(path)
+		if err != nil {
+			return PullSummary{}, fmt.Errorf("check restore target %s: %w", file.Path, err)
+		}
+		if targetExists {
+			actual, _, err := hashFile(path)
+			if err != nil {
+				return PullSummary{}, fmt.Errorf("read restore target %s: %w", file.Path, err)
+			}
+			if actual == file.SHA256 {
+				summary.SkippedFiles++
+				continue
+			}
+		}
+		if err := ensureRestoreParentDirectories(outputDir, path); err != nil {
+			return PullSummary{}, fmt.Errorf("recheck restore path %s: %w", file.Path, err)
+		}
+		if _, err := checkRestoreFinalPath(path); err != nil {
+			return PullSummary{}, fmt.Errorf("recheck restore target %s: %w", file.Path, err)
 		}
 
-		size, err := downloadVerifiedObject(ctx, opts.Client, auth, file.SHA256, file.Size, path)
+		size, err := downloadVerifiedObject(ctx, opts.Client, auth, file.SHA256, file.Size, outputDir, path)
 		if err != nil {
 			return PullSummary{}, fmt.Errorf("restore %s: %w", file.Path, err)
 		}
@@ -295,6 +322,7 @@ func downloadVerifiedObject(
 	auth coordinator.ArtifactAuth,
 	expectedSHA string,
 	expectedSize int64,
+	restoreRoot string,
 	targetPath string,
 ) (int64, error) {
 	body, _, err := client.DownloadObjectStream(ctx, auth, expectedSHA)
@@ -343,6 +371,12 @@ func downloadVerifiedObject(
 	if err := os.Chmod(temporaryPath, 0o644); err != nil {
 		return 0, fmt.Errorf("set file mode: %w", err)
 	}
+	if err := ensureRestoreParentDirectories(restoreRoot, targetPath); err != nil {
+		return 0, fmt.Errorf("recheck restore directory: %w", err)
+	}
+	if _, err := checkRestoreFinalPath(targetPath); err != nil {
+		return 0, fmt.Errorf("recheck restore target: %w", err)
+	}
 	if err := replaceFile(temporaryPath, targetPath); err != nil {
 		return 0, err
 	}
@@ -351,8 +385,14 @@ func downloadVerifiedObject(
 }
 
 func replaceFile(temporaryPath string, targetPath string) error {
+	if _, err := checkRestoreFinalPath(targetPath); err != nil {
+		return err
+	}
 	if err := os.Rename(temporaryPath, targetPath); err == nil {
 		return nil
+	}
+	if _, err := checkRestoreFinalPath(targetPath); err != nil {
+		return err
 	}
 	if err := os.Remove(targetPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("replace target file: %w", err)
@@ -361,9 +401,4 @@ func replaceFile(temporaryPath string, targetPath string) error {
 		return fmt.Errorf("move verified object into place: %w", err)
 	}
 	return nil
-}
-
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
