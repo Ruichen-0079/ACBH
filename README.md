@@ -453,6 +453,21 @@ It proves Host A timeout detection, Host B selection, one-time assignment accept
 - `docs/election-design.md`
 - `docs/codex-guide.md`
 
+## v0.1-demo
+
+Current release branch: `release/v0.1-demo-prep`
+
+- [Release notes](docs/release-notes-v0.1-demo.md) — completed capabilities, security defaults, known
+  limitations, platform verification
+- CLI demo: `bash scripts/demo-smoke.sh`
+- GUI demo: `pnpm dev:coordinator` → `http://127.0.0.1:6121/dashboard`
+- [Release checklist](docs/release-checklist.md) — 9-section pre-release verification
+- Go tests: 14 packages (all pass), Coordinator tests: 123/123
+- Verified on Fedora 41 and Windows 11 (PowerShell)
+
+**Not production ready.** Loopback-only, in-memory by default, no TLS.
+Plain-text HTTP on localhost is acceptable for local development only.
+
 ## V1 release
 
 - `docs/v1-release-checklist.md` — Smoke checklist for V1 release preparation
