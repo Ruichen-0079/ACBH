@@ -5,11 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
+	"github.com/Ruichen-0079/ACBH/agent/internal/mcserver"
 )
 
 func TestHealthEndpoint(t *testing.T) {
@@ -360,6 +364,62 @@ func TestServerStartMissingServerDir(t *testing.T) {
 
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 for missing serverDir, got %d", resp.StatusCode)
+	}
+}
+
+func TestServerStartUsesSharedProcessLock(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configRoot)
+	if runtime.GOOS == "windows" {
+		t.Setenv("AppData", configRoot)
+	}
+	configDir, err := agentconfig.DefaultDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := filepath.Join(configDir, "runtime")
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverDir := t.TempDir()
+	if err := mcserver.CreateLock(mcserver.LockPath(runtimeDir), mcserver.ProcessLock{
+		PID: os.Getpid(), Hostname: hostname, CreatedAt: time.Now().UTC(),
+		ServerDir: serverDir, Nonce: "local-control-lock", Owner: "supervisor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServer("127.0.0.1:0", "srv-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	body, _ := json.Marshal(map[string]any{
+		"serverDir": serverDir,
+		"javaPath":  "java",
+		"jarPath":   "server.jar",
+	})
+	req, _ := http.NewRequest("POST", "http://"+srv.ListenAddr+"/v1/server/start", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer srv-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	}
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	message, _ := result["error"].(string)
+	if !strings.Contains(message, "process lock already exists") {
+		t.Fatalf("error = %q, want process lock failure", message)
 	}
 }
 

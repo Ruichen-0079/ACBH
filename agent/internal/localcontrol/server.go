@@ -455,10 +455,21 @@ func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if status.Stale {
 		resp["stale"] = true
-		resp["state"] = map[string]any{
-			"pid":       status.State.PID,
-			"status":    status.State.Status,
-			"serverDir": status.State.ServerDir,
+		resp["unknown"] = status.Unknown
+		resp["reason"] = status.Reason
+		if status.State.PID > 0 {
+			resp["state"] = map[string]any{
+				"pid":       status.State.PID,
+				"status":    status.State.Status,
+				"serverDir": status.State.ServerDir,
+			}
+		} else {
+			resp["lock"] = map[string]any{
+				"pid":       status.Lock.PID,
+				"owner":     status.Lock.Owner,
+				"serverDir": status.Lock.ServerDir,
+				"createdAt": status.Lock.CreatedAt,
+			}
 		}
 	} else {
 		resp["running"] = false
