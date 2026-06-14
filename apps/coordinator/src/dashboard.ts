@@ -122,11 +122,12 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <pre id="groupOut"></pre>
 
 <h3 style="margin-top:20px">\u7ec4\u914d\u7f6e</h3>
-<div class="row"><div><label>\u7ec4 ID</label><input id="groupId"/></div><div><label>Access Key</label><input id="accessKey"/></div></div>
-<div class="row"><div><label>\u4e3b\u673a ID</label><input id="hostId" placeholder="Agent \u767b\u5f55\u540e\u81ea\u52a8\u586b\u5145"/></div><div><label>\u4e3b\u673a\u4ee4\u724c (Host Token)</label><input id="hostToken" placeholder="\u4ece Agent config.yaml \u590d\u5236"/></div></div>
+<div class="row"><div><label>\u7ec4 ID</label><input id="groupId"/></div><div><label>Access Key</label><input id="accessKey" type="password" autocomplete="off"/></div></div>
+<div class="row"><div><label>\u4e3b\u673a ID</label><input id="hostId" placeholder="Agent \u767b\u5f55\u540e\u81ea\u52a8\u586b\u5145"/></div><div><label>\u4e3b\u673a\u4ee4\u724c (Host Token)</label><input id="hostToken" type="password" autocomplete="off" placeholder="\u4ece Agent config.yaml \u590d\u5236"/></div></div>
 <div class="warn"><strong>\u8b66\u544a</strong>\uff1a\u4ec5\u5728\u53ef\u4fe1\u672c\u673a\u4f7f\u7528\u3002\u4e0d\u8981\u5728\u516c\u5171\u7535\u8111\u4fdd\u5b58 accessKey \u6216 hostToken\u3002</div>
 <div class="actions">
 <button onclick="saveLocal()">\u4fdd\u5b58\u672c\u5730</button>
+<button class="danger" onclick="forgetSecrets()">\u6e05\u9664\u51ed\u636e</button>
 <button class="sec" onclick="loadState()">\u52a0\u8f7d\u7ec4\u72b6\u6001</button>
 </div>
 </div>
@@ -137,7 +138,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <div class="card" style="margin-bottom:16px">
 <h3>Agent \u672c\u5730\u63a7\u5236</h3>
-<div class="row"><div><label>Agent \u672c\u5730 API \u5730\u5740</label><input id="agentApiUrl" value="http://127.0.0.1:6122"/></div><div><label>\u672c\u5730\u63a7\u5236\u4ee4\u724c</label><input id="agentToken" placeholder="\u4ece acbh-agent control serve \u590d\u5236"/></div></div>
+<div class="row"><div><label>Agent \u672c\u5730 API \u5730\u5740</label><input id="agentApiUrl" value="http://127.0.0.1:6122"/></div><div><label>\u672c\u5730\u63a7\u5236\u4ee4\u724c</label><input id="agentToken" type="password" autocomplete="off" placeholder="\u4ece control-token \u6587\u4ef6\u8bfb\u53d6"/></div></div>
 <div class="actions">
 <button onclick="connectAgent()">\u8fde\u63a5\u672c\u673a Agent</button>
 <button class="sec" onclick="disconnectAgent()">\u65ad\u5f00</button>
@@ -184,7 +185,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <div class="row"><div><label>Server A \u76ee\u5f55 (\u4e3b\u673a)</label><input id="serverDir" value="C:\\ACBH-Test\\server-a"/></div><div><label>Server B \u76ee\u5f55 (\u6062\u590d\u76ee\u6807)</label><input id="serverBDir" value="C:\\ACBH-Test\\server-b"/></div></div>
 
 <h3>RCON \u914d\u7f6e</h3>
-<div class="row"><div><label>RCON Host</label><input id="rconHost" value="127.0.0.1"/></div><div><label>RCON Port</label><input id="rconPort" value="25575"/></div><div><label>RCON Password</label><input id="rconPassword" value="acbh-test"/></div></div>
+<div class="row"><div><label>RCON Host</label><input id="rconHost" value="127.0.0.1"/></div><div><label>RCON Port</label><input id="rconPort" value="25575"/></div><div><label>RCON Password</label><input id="rconPassword" type="password" autocomplete="off"/></div></div>
 
 <h3>\u5236\u54c1 ID</h3>
 <div class="row"><div><label>server-pack ID</label><input id="serverPackId" value="win-server-pack-001"/></div><div><label>world-snapshot ID</label><input id="worldSnapshotId" value="win-world-safe-001"/></div></div>
@@ -288,26 +289,41 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <script>
 var $=function(id){return document.getElementById(id);};
-var keys=["coordinatorUrl","groupId","accessKey","hostId","hostToken","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","rconPassword","ocWorkspace","agentApiUrl","agentToken","srvDir","srvJava","srvJar","srvJvmArgs","srvArgs","srvRconPassword"];
+var persistedKeys=["coordinatorUrl","groupId","hostId","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","ocWorkspace","agentApiUrl","srvDir","srvJava","srvJar","srvJvmArgs","srvArgs"];
+var secretKeys=["accessKey","hostToken","agentToken","rconPassword","srvRconPassword","localControlToken","secret"];
 
 function setMsg(v){$("quickMsg").textContent=v;}
 function baseUrl(){return $("coordinatorUrl").value.replace(/\\/$/,"");}
-function errMsg(e){return e.message||String(e);}
+function errMsg(e){return e&&e.message?e.message:"Request failed";}
 
 function saveLocal(){
-  for(var i=0;i<keys.length;i++){
-    var k=keys[i],el=$(k);
+  for(var i=0;i<persistedKeys.length;i++){
+    var k=persistedKeys[i],el=$(k);
     if(el&&el.value!==undefined)localStorage.setItem("acbh."+k,el.value);
   }
-  setMsg("\u5df2\u4fdd\u5b58\u672c\u5730\u8bbe\u7f6e\u3002");
+  setMsg("\u5df2\u4fdd\u5b58\u975e\u654f\u611f\u8bbe\u7f6e\u3002\u51ed\u636e\u4ec5\u4fdd\u7559\u5728\u5f53\u524d\u9875\u9762\u5185\u5b58\u4e2d\u3002");
 }
 
 function restoreLocal(){
+  for(var s=0;s<secretKeys.length;s++)localStorage.removeItem("acbh."+secretKeys[s]);
   $("coordinatorUrl").value=localStorage.getItem("acbh.coordinatorUrl")||location.origin;
-  for(var i=1;i<keys.length;i++){
-    var v=localStorage.getItem("acbh."+keys[i]),el=$(keys[i]);
+  for(var i=1;i<persistedKeys.length;i++){
+    var v=localStorage.getItem("acbh."+persistedKeys[i]),el=$(persistedKeys[i]);
     if(v&&el)el.value=v;
   }
+}
+
+function forgetSecrets(){
+  for(var i=0;i<secretKeys.length;i++){
+    localStorage.removeItem("acbh."+secretKeys[i]);
+    var el=$(secretKeys[i]);if(el)el.value="";
+  }
+  agentConnected=false;setAgentMode(false);
+  setMsg("\u5df2\u6e05\u9664\u5f53\u524d\u9875\u9762\u51ed\u636e\u548c\u65e7\u7248\u672c\u5730\u5b58\u50a8\u3002");
+}
+
+function authError(status){
+  if(status===401||status===403)setMsg("\u51ed\u636e\u65e0\u6548\u6216\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165\u3002");
 }
 
 async function api(path,options){
@@ -315,8 +331,13 @@ async function api(path,options){
   var h=Object.assign({"content-type":"application/json"},options.headers||{});
   var res=await fetch(baseUrl()+path,Object.assign({},options,{headers:h}));
   var t=await res.text();
-  try{var body=JSON.parse(t);}catch(e){body=t;}
-  if(!res.ok)throw new Error(res.status+" "+res.statusText+": "+(typeof body==="string"?body:JSON.stringify(body)));
+  try{var body=JSON.parse(t);}catch(e){body={};}
+  if(!res.ok){
+    authError(res.status);
+    var code=body&&body.code?" ["+body.code+"]":"";
+    var message=body&&body.message?body.message:res.statusText;
+    throw new Error(res.status+code+" "+message);
+  }
   return body;
 }
 
@@ -352,7 +373,7 @@ async function createGroup(){
   try{
     var b=await api("/v1/groups",{method:"POST",body:JSON.stringify({name:$("groupName").value,ownerName:$("ownerName").value})});
     $("groupId").value=b.groupId;$("accessKey").value=b.accessKey;
-    $("groupOut").textContent=JSON.stringify(b,null,2);
+    $("groupOut").textContent=JSON.stringify({groupId:b.groupId,ownerMemberId:b.ownerMemberId,accessKey:"[stored in memory only]"},null,2);
     $("ovGroup").textContent=b.groupId;$("ovHost").textContent="--";
     saveLocal();setMsg("\u7ec4\u5df2\u521b\u5efa: "+b.groupId);
   }catch(e){$("groupOut").textContent=errMsg(e);setMsg(errMsg(e));}
@@ -361,7 +382,9 @@ async function createGroup(){
 async function loadState(){
   try{
     var gid=$("groupId").value;
-    var b=await api("/v1/groups/"+encodeURIComponent(gid)+"/state");
+    var h=hostHeaders();
+    if(!h["x-acbh-host-token"]&&$("accessKey").value)h["x-acbh-access-key"]=$("accessKey").value;
+    var b=await api("/v1/groups/"+encodeURIComponent(gid)+"/state",{headers:h});
     $("ovGroup").textContent=gid;
     if(b.currentHostId){$("ovHost").textContent=b.currentHostId;}
     setMsg("\u7ec4\u72b6\u6001\u5df2\u52a0\u8f7d");
@@ -534,15 +557,22 @@ async function connectAgent(){
   }catch(e){setMsg("\u8fde\u63a5\u5931\u8d25: "+errMsg(e));setAgentMode(false);}
 }
 
-function disconnectAgent(){setAgentMode(false);setMsg("\u5df2\u65ad\u5f00 Agent \u8fde\u63a5\uff0c\u5207\u6362\u5230\u547d\u4ee4\u6a21\u5f0f");}
+function disconnectAgent(){setAgentMode(false);setMsg("\u5df2\u65ad\u5f00 Agent \u8fde\u63a5\uff0c\u51ed\u636e\u4ecd\u4ec5\u4fdd\u7559\u5728\u5185\u5b58\u4e2d");}
 
 async function agentCall(path,body){
   var url=$("agentApiUrl").value.replace(/\\/$/,"");
   var tok=$("agentToken").value;
   var r=await fetch(url+path,{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+tok},body:JSON.stringify(body)});
   var t=await r.text();var b;
-  try{b=JSON.parse(t);}catch(e){b={ok:false,error:t};}
-  if(!r.ok&&!b.error)b.error=r.status+" "+r.statusText;
+  try{b=JSON.parse(t);}catch(e){b={ok:false};}
+  if(!r.ok){
+    if(r.status===401||r.status===403){
+      $("agentToken").value="";setAgentMode(false);
+      b={ok:false,error:"Local control credential is invalid; enter it again",code:"local_control_auth_failed"};
+    }else{
+      b={ok:false,error:(b&&b.error)||"Local Agent request failed",code:(b&&b.code)||"local_control_request_failed"};
+    }
+  }
   return b;
 }
 

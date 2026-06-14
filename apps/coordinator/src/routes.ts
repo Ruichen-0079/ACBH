@@ -508,6 +508,9 @@ export async function registerRoutes(
     }
 
     return handleStoreCall(reply, () => {
+      if (!verifyRequestPlayer(store, params.groupId, body.playerId, request, reply)) {
+        return reply;
+      }
       const session = store.createTunnelSession({
         groupId: params.groupId,
         playerId: body.playerId,
@@ -524,6 +527,9 @@ export async function registerRoutes(
 
     return handleStoreCall(reply, () => {
       const session = store.getTunnelSession(params.groupId, params.sessionId);
+      if (!verifyRequestPlayer(store, params.groupId, session.playerId, request, reply)) {
+        return reply;
+      }
       return { ...session };
     });
   });
@@ -948,6 +954,7 @@ function handleStoreCall<T>(reply: FastifyReply, call: () => T): T | FastifyRepl
       return reply.code(error.statusCode).send({
         error: statusText(error.statusCode),
         message: error.message,
+        ...(error.code ? { code: error.code } : {}),
       });
     }
 
@@ -1076,6 +1083,33 @@ function verifyRequestHost(
     hostToken: result.data.hostToken,
   });
 
+  return true;
+}
+
+function verifyRequestPlayer(
+  store: InMemoryCoordinatorStore,
+  groupId: string,
+  playerId: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): boolean {
+  const headerPlayerId = singleHeader(request.headers["x-acbh-player-id"]);
+  const playerToken = singleHeader(request.headers["x-acbh-player-token"]);
+  if (!headerPlayerId || !playerToken) {
+    reply.code(401).send({
+      error: "Unauthorized",
+      message: "Player authentication headers are required",
+    });
+    return false;
+  }
+  if (headerPlayerId !== playerId) {
+    reply.code(403).send({
+      error: "Forbidden",
+      message: "Player credential does not match this session",
+    });
+    return false;
+  }
+  store.verifyPlayerToken(groupId, playerId, playerToken);
   return true;
 }
 

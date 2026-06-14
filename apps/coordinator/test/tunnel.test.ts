@@ -173,6 +173,114 @@ test("player session expires and is cleaned up", () => {
   );
 });
 
+test("player token expiry is enforced at and after the boundary", () => {
+  const clock = testClock("2026-06-06T00:00:00.000Z");
+  const store = createInMemoryCoordinatorStore({ now: clock.now, tunnelSessionTtlMs: 5_000 });
+  const host = createHost(store);
+  const player = store.createPlayerSession({ groupId: host.groupId, displayName: "Steve" });
+
+  store.verifyPlayerToken(host.groupId, player.playerId, required(player.playerToken));
+  clock.advance(5_000);
+
+  assert.throws(
+    () => store.verifyPlayerToken(host.groupId, player.playerId, required(player.playerToken)),
+    (error: unknown) =>
+      error instanceof StoreError &&
+      error.statusCode === 401 &&
+      error.code === "token_expired" &&
+      !error.message.includes(required(player.playerToken)),
+  );
+});
+
+test("player token is scoped to its group and role", () => {
+  const store = createInMemoryCoordinatorStore();
+  const hostA = createHost(store);
+  const hostB = createHost(store);
+  const player = store.createPlayerSession({ groupId: hostA.groupId, displayName: "Steve" });
+
+  assert.throws(
+    () => store.verifyPlayerToken(hostB.groupId, player.playerId, required(player.playerToken)),
+    /Player session does not exist/,
+  );
+  assert.throws(
+    () => store.verifyPlayerToken(hostA.groupId, player.playerId, hostA.hostToken),
+    /Invalid player token/,
+  );
+});
+
+test("tunnel session routes require matching player authentication", async () => {
+  const clock = testClock("2026-06-06T00:00:00.000Z");
+  const store = createInMemoryCoordinatorStore({ now: clock.now, tunnelSessionTtlMs: 5_000 });
+  const host = createHost(store);
+  heartbeat(store, host, { status: "standby", javaAvailable: true });
+  const election = store.runElection({ groupId: host.groupId, reason: "no-current-host" });
+  const assignmentId = required(election.assignment?.assignmentId);
+  const poll = store.pollTakeover(host);
+  const takeoverToken = required(poll.assignment?.takeoverToken);
+  store.acceptTakeover({ ...host, assignmentId, takeoverToken });
+  store.completeTakeover({ ...host, assignmentId, takeoverToken });
+  const player = store.createPlayerSession({ groupId: host.groupId, displayName: "Steve" });
+  const app = await buildApp({ logger: false, store });
+
+  try {
+    const anonymous = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${host.groupId}/tunnel-sessions`,
+      payload: { playerId: player.playerId },
+    });
+    assert.equal(anonymous.statusCode, 401);
+
+    const wrongRole = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${host.groupId}/tunnel-sessions`,
+      headers: {
+        "x-acbh-player-id": player.playerId,
+        "x-acbh-player-token": host.hostToken,
+      },
+      payload: { playerId: player.playerId },
+    });
+    assert.equal(wrongRole.statusCode, 401);
+    assert.equal(wrongRole.body.includes(host.hostToken), false);
+
+    const created = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${host.groupId}/tunnel-sessions`,
+      headers: {
+        "x-acbh-player-id": player.playerId,
+        "x-acbh-player-token": required(player.playerToken),
+      },
+      payload: { playerId: player.playerId },
+    });
+    assert.equal(created.statusCode, 200);
+    const tunnel = created.json<TunnelSession>();
+
+    const fetched = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${host.groupId}/tunnel-sessions/${tunnel.sessionId}`,
+      headers: {
+        "x-acbh-player-id": player.playerId,
+        "x-acbh-player-token": required(player.playerToken),
+      },
+    });
+    assert.equal(fetched.statusCode, 200);
+
+    clock.advance(5_000);
+    const expired = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${host.groupId}/tunnel-sessions/${tunnel.sessionId}`,
+      headers: {
+        "x-acbh-player-id": player.playerId,
+        "x-acbh-player-token": required(player.playerToken),
+      },
+    });
+    assert.equal(expired.statusCode, 401);
+    assert.equal(expired.json<{ code: string }>().code, "token_expired");
+    assert.equal(expired.body.includes(required(player.playerToken)), false);
+  } finally {
+    await app.close();
+  }
+});
+
 test("tunnel session response does not expose host token or takeover token material", () => {
   const store = createInMemoryCoordinatorStore();
   const host = createHost(store);

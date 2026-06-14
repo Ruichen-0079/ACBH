@@ -44,6 +44,19 @@ test("dashboard route serves the Chinese control center with Agent local control
     assert.match(response.body, /\u542f\u52a8 Jar/u);
     assert.match(response.body, /JVM \u53c2\u6570/u);
     assert.match(response.body, /RCON \u5bc6\u7801/u);
+    assert.match(response.body, /var persistedKeys=/);
+    assert.match(response.body, /var secretKeys=/);
+    assert.match(response.body, /persistedKeys=\["coordinatorUrl","groupId","hostId"/);
+    assert.doesNotMatch(response.body, /persistedKeys=\[[^\]]*"accessKey"/);
+    assert.doesNotMatch(response.body, /persistedKeys=\[[^\]]*"hostToken"/);
+    assert.doesNotMatch(response.body, /persistedKeys=\[[^\]]*"agentToken"/);
+    assert.match(response.body, /localStorage\.removeItem\("acbh\."\+secretKeys/);
+    assert.match(response.body, /localStorage\.setItem\("acbh\."\+k,el\.value\)/);
+    assert.match(response.body, /id="accessKey" type="password"/);
+    assert.match(response.body, /id="hostToken" type="password"/);
+    assert.match(response.body, /id="agentToken" type="password"/);
+    assert.match(response.body, /function forgetSecrets\(\)/);
+    assert.match(response.body, /local_control_auth_failed/);
   } finally {
     await app.close();
   }

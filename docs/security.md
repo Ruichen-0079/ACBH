@@ -156,6 +156,10 @@ Rules:
   raw player token.
 - Player relay WebSocket connections require `X-ACBH-Player-ID` and
   `X-ACBH-Player-Token` headers. Invalid tokens are rejected.
+- Player tokens are rejected when `expiresAt <= now`. Expired credentials
+  return `401` with code `token_expired`, without returning the raw token.
+- Tunnel session create and read endpoints require matching
+  `X-ACBH-Player-ID` and `X-ACBH-Player-Token` headers.
 - Host relay WebSocket connections require `X-ACBH-Host-ID`,
   `X-ACBH-Host-Token`, and `X-ACBH-Host-Generation` headers.
 - Host tunnel presence must never expose the local Minecraft address to
@@ -167,6 +171,25 @@ Rules:
 - Production deployment should use HTTPS/WSS for transport security.
 - No host token, takeover token, or player token material is exposed through
   tunnel session responses or relay endpoints.
+
+## Local control and Dashboard secrets
+
+The Agent local control API is a privileged local interface.
+
+- `acbh-agent control serve` binds to `127.0.0.1:6122` by default.
+- Non-loopback binding is refused unless `--allow-remote-control` is supplied.
+  The Agent logs a warning when that explicit override is used.
+- All operations except `/health` require the same bearer-token middleware.
+- The generated token is stored in `<user config dir>/acbh/control-token` with
+  restrictive permissions. Logs and normal command output show only a masked
+  token.
+- Browser CORS access is limited to `localhost`, `127.0.0.1`, and `::1`
+  origins by default.
+- Operation failures return a stable error code and request ID. Detailed
+  errors, including local paths, remain in the Agent's local log.
+- The Dashboard never stores access keys, host tokens, RCON passwords, or the
+  local control token in `localStorage`. It removes legacy secret keys at
+  startup and keeps current credentials in page memory only.
 
 ## Host Agent relay client security (PR28)
 

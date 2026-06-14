@@ -306,6 +306,7 @@ export class StoreError extends Error {
   constructor(
     public readonly statusCode: number,
     message: string,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = "StoreError";
@@ -1250,6 +1251,10 @@ export class InMemoryCoordinatorStore {
     if (!record) {
       throw new StoreError(404, "Player session does not exist");
     }
+    const expiresMs = Date.parse(record.expiresAt);
+    if (!Number.isFinite(expiresMs) || expiresMs <= this.now().getTime()) {
+      throw new StoreError(401, "Player token has expired", "token_expired");
+    }
     if (!verifySecret(playerToken, record.playerTokenHash)) {
       throw new StoreError(401, "Invalid player token");
     }
@@ -1261,6 +1266,10 @@ export class InMemoryCoordinatorStore {
     const playerSession = group.playerSessions.get(input.playerId);
     if (!playerSession) {
       throw new StoreError(404, "Player session does not exist");
+    }
+    const playerExpiresMs = Date.parse(playerSession.expiresAt);
+    if (!Number.isFinite(playerExpiresMs) || playerExpiresMs <= this.now().getTime()) {
+      throw new StoreError(401, "Player token has expired", "token_expired");
     }
 
     if (group.currentHostId === null) {
