@@ -206,6 +206,16 @@ go run . server repair-state --server-dir /path/to/server
 
 Launch commands are parsed into an executable and arguments without a shell. Shell operators such as pipes and redirection are not supported. Server process control is local-only; it does not elect a host, perform automatic takeover, send heartbeats, or run artifact synchronization.
 
+### Structured argv (recommended)
+
+The local control API (`POST /v1/server/start`) accepts `jvmArgs` and `serverArgs` as JSON string arrays. The Agent passes these directly to the supervisor as an argv slice, avoiding the vulnerabilities of string join-then-reparse.
+
+### Legacy `--command` string
+
+The CLI `--command` flag accepts a space-separated command string for backward compatibility. It is parsed by `ParseCommand()` which handles quoting and whitespace but cannot recover original intent if an argument contains unquoted spaces (e.g. Windows paths like `C:\Program Files\...`). New configurations should prefer structured argv when possible, and always quote paths containing spaces in `--command`.
+
+The Agent config `server.command` field is a legacy string. It remains supported for backward compatibility with existing `config.yaml` files.
+
 ## Agent local manifest examples
 
 The Agent can scan a local Minecraft server directory and generate manifests for one artifact kind at a time. This is local manifest generation only; it does not upload files and it is not RCON safe sync.

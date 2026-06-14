@@ -573,7 +573,8 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 
 	state, err := mcserver.Start(r.Context(), executable, mcserver.StartOptions{
 		ServerDir:   req.ServerDir,
-		Command:     cmd,
+		Command:     cmd.display,
+		CommandArgv: cmd.argv,
 		LogDir:      logDir,
 		RuntimeDir:  runtimeDir,
 		StopTimeout: 30 * time.Second,
@@ -647,12 +648,21 @@ func (s *Server) serverRuntimeDir() (string, error) {
 	return filepath.Join(configDir, "runtime"), nil
 }
 
-func buildServerCommand(javaPath, jarPath string, jvmArgs, serverArgs []string) string {
-	parts := []string{javaPath}
-	parts = append(parts, jvmArgs...)
-	parts = append(parts, "-jar", jarPath)
-	parts = append(parts, serverArgs...)
-	return strings.Join(parts, " ")
+type serverCommand struct {
+	display string
+	argv    []string
+}
+
+func buildServerCommand(javaPath, jarPath string, jvmArgs, serverArgs []string) serverCommand {
+	argv := make([]string, 0, 1+len(jvmArgs)+2+len(serverArgs))
+	argv = append(argv, javaPath)
+	argv = append(argv, jvmArgs...)
+	argv = append(argv, "-jar", jarPath)
+	argv = append(argv, serverArgs...)
+	return serverCommand{
+		display: mcserver.DisplayCommand(argv),
+		argv:    argv,
+	}
 }
 
 func (s *Server) resolveConfig(coordinatorURL string) agentconfig.Config {

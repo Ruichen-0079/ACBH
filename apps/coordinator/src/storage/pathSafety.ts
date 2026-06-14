@@ -51,6 +51,9 @@ export function artifactKindDirectory(kind: ArtifactKind): string {
 }
 
 export function validateManifest(manifest: ArtifactManifest): ArtifactManifest {
+  if (manifest.manifestVersion !== undefined && manifest.manifestVersion !== 1) {
+    throw new StorageValidationError("manifest manifestVersion must be 1 when present");
+  }
   validateArtifactKind(manifest.artifactKind);
   validateStorageId("manifest artifactId", manifest.artifactId);
   validateStorageId("manifest groupId", manifest.groupId);
@@ -68,8 +71,13 @@ export function validateManifest(manifest: ArtifactManifest): ArtifactManifest {
     throw new StorageValidationError("manifest files must be an array");
   }
 
+  let seenPath = "";
   for (const file of manifest.files) {
     validateManifestPath(file.path);
+    if (file.path <= seenPath) {
+      throw new StorageValidationError("manifest files must be sorted by path with no duplicates");
+    }
+    seenPath = file.path;
     if (!Number.isSafeInteger(file.size) || file.size < 0) {
       throw new StorageValidationError("manifest file size must be a non-negative safe integer");
     }
@@ -86,11 +94,37 @@ export function validateManifest(manifest: ArtifactManifest): ArtifactManifest {
     } else {
       validateSha256(file.sha256);
     }
-    if (file.class !== undefined && !fileClasses.has(file.class)) {
+    if (file.fileClass !== undefined && file.class === undefined) {
+      file.class = file.fileClass;
+    }
+    if (file.class === undefined) {
+      throw new StorageValidationError("manifest file class is required");
+    }
+    if (!fileClasses.has(file.class)) {
       throw new StorageValidationError("manifest file class is not supported");
     }
-    if (file.fileClass !== undefined && !fileClasses.has(file.fileClass)) {
-      throw new StorageValidationError("manifest file fileClass is not supported");
+    if (file.class === "ignored" || file.class === "unknown") {
+      throw new StorageValidationError("manifest file class must not be ignored or unknown");
+    }
+  }
+
+  if (manifest.summary) {
+    const included = (manifest.files ?? []).filter((f) => !f.deleted).length;
+    const deleted = (manifest.files ?? []).filter((f) => f.deleted).length;
+    if (manifest.summary.includedFiles !== included) {
+      throw new StorageValidationError("manifest summary includedFiles must match file list");
+    }
+    if (manifest.summary.deletedFiles !== deleted) {
+      throw new StorageValidationError("manifest summary deletedFiles must match file list");
+    }
+    if (manifest.summary.ignoredFiles < 0 || manifest.summary.unknownFiles < 0) {
+      throw new StorageValidationError("manifest summary counts must be non-negative");
+    }
+    const totalBytes = (manifest.files ?? [])
+      .filter((f) => !f.deleted)
+      .reduce((sum, f) => sum + f.size, 0);
+    if (manifest.summary.totalBytes !== totalBytes) {
+      throw new StorageValidationError("manifest summary totalBytes must match file list");
     }
   }
 

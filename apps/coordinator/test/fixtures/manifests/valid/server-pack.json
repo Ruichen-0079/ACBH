@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "artifactKind": "server-pack",
+  "artifactId": "pack_valid_001",
+  "groupId": "grp_valid",
+  "createdAt": "2026-06-06T00:00:00Z",
+  "creatorHostId": "host_valid",
+  "parentArtifactId": null,
+  "serverPackVersion": null,
+  "files": [
+    {
+      "path": "mods/fabric-api-0.92.0.jar",
+      "class": "server-pack",
+      "size": 2048000,
+      "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+      "modifiedAt": "2026-06-06T00:00:00Z",
+      "deleted": false
+    }
+  ],
+  "summary": {
+    "includedFiles": 1,
+    "ignoredFiles": 0,
+    "unknownFiles": 0,
+    "deletedFiles": 0,
+    "totalBytes": 2048000
+  }
+}
