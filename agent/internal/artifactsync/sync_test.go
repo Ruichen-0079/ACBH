@@ -186,6 +186,196 @@ func TestPullWritesFilesUnderOutputDir(t *testing.T) {
 	}
 }
 
+func TestPullRejectsTraversalAndAbsoluteManifestPaths(t *testing.T) {
+	for _, unsafePath := range []string{
+		"../evil",
+		"/outside/evil",
+		`C:\outside\evil`,
+		`\\server\share\evil`,
+	} {
+		t.Run(unsafePath, func(t *testing.T) {
+			outputDir := t.TempDir()
+			m := testManifest(sha256Hex([]byte("region data")))
+			m.Files[0].Path = unsafePath
+			client := &fakeClient{manifest: m}
+
+			_, err := Pull(context.Background(), PullOptions{
+				ArtifactKind: manifest.WorldSnapshot,
+				ArtifactID:   "snap_000001",
+				OutputDir:    outputDir,
+				Config:       testConfig(),
+				Client:       client,
+			})
+			if err == nil {
+				t.Fatalf("Pull() accepted unsafe path %q", unsafePath)
+			}
+		})
+	}
+}
+
+func TestPullRejectsExistingSymlinkParent(t *testing.T) {
+	outputDir := t.TempDir()
+	outsideDir := t.TempDir()
+	if err := os.Symlink(outsideDir, filepath.Join(outputDir, "world")); err != nil {
+		t.Skipf("directory symlink is unavailable: %v", err)
+	}
+	content := []byte("region data")
+	client := &fakeClient{
+		manifest: testManifest(sha256Hex(content)),
+		objects:  map[string][]byte{sha256Hex(content): content},
+	}
+
+	_, err := Pull(context.Background(), PullOptions{
+		ArtifactKind: manifest.WorldSnapshot,
+		ArtifactID:   "snap_000001",
+		OutputDir:    outputDir,
+		Config:       testConfig(),
+		Client:       client,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("Pull() error = %v, want symlink rejection", err)
+	}
+	if fileExists(filepath.Join(outsideDir, "region", "r.0.0.mca")) {
+		t.Fatal("restore wrote through a symlink parent")
+	}
+}
+
+func TestPullRejectsSymlinkInOutputDirectoryPath(t *testing.T) {
+	baseDir := t.TempDir()
+	outsideDir := t.TempDir()
+	linkPath := filepath.Join(baseDir, "linked-output")
+	if err := os.Symlink(outsideDir, linkPath); err != nil {
+		t.Skipf("directory symlink is unavailable: %v", err)
+	}
+	outputDir := filepath.Join(linkPath, "server")
+	content := []byte("region data")
+	client := &fakeClient{
+		manifest: testManifest(sha256Hex(content)),
+		objects:  map[string][]byte{sha256Hex(content): content},
+	}
+
+	_, err := Pull(context.Background(), PullOptions{
+		ArtifactKind: manifest.WorldSnapshot,
+		ArtifactID:   "snap_000001",
+		OutputDir:    outputDir,
+		Config:       testConfig(),
+		Client:       client,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("Pull() error = %v, want output directory symlink rejection", err)
+	}
+	if fileExists(filepath.Join(outsideDir, "server")) {
+		t.Fatal("restore created output directories through a symlink")
+	}
+}
+
+func TestPullRejectsExistingSymlinkFinalTarget(t *testing.T) {
+	outputDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "outside.dat")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(outputDir, "world", "region", "r.0.0.mca")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsidePath, target); err != nil {
+		t.Skipf("file symlink is unavailable: %v", err)
+	}
+	content := []byte("region data")
+	client := &fakeClient{
+		manifest: testManifest(sha256Hex(content)),
+		objects:  map[string][]byte{sha256Hex(content): content},
+	}
+
+	_, err := Pull(context.Background(), PullOptions{
+		ArtifactKind: manifest.WorldSnapshot,
+		ArtifactID:   "snap_000001",
+		OutputDir:    outputDir,
+		Config:       testConfig(),
+		Client:       client,
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("Pull() error = %v, want symlink rejection", err)
+	}
+	if data, readErr := os.ReadFile(outsidePath); readErr != nil || string(data) != "outside" {
+		t.Fatalf("outside file changed: data=%q err=%v", data, readErr)
+	}
+}
+
+func TestPullDeleteRejectsSymlinkTarget(t *testing.T) {
+	outputDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsidePath := filepath.Join(outsideDir, "outside.dat")
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(outputDir, "world", "region", "r.1.0.mca")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsidePath, target); err != nil {
+		t.Skipf("file symlink is unavailable: %v", err)
+	}
+	m := testManifest(sha256Hex([]byte("region data")))
+	m.Files = []manifest.FileEntry{{
+		Path:    "world/region/r.1.0.mca",
+		Class:   fileclass.WorldRuntime,
+		Deleted: true,
+	}}
+	m.Summary = manifest.Summary{DeletedFiles: 1}
+
+	_, err := Pull(context.Background(), PullOptions{
+		ArtifactKind: manifest.WorldSnapshot,
+		ArtifactID:   "snap_000001",
+		OutputDir:    outputDir,
+		ApplyDeletes: true,
+		Config:       testConfig(),
+		Client:       &fakeClient{manifest: m},
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("Pull() error = %v, want symlink rejection", err)
+	}
+	if data, readErr := os.ReadFile(outsidePath); readErr != nil || string(data) != "outside" {
+		t.Fatalf("outside file changed: data=%q err=%v", data, readErr)
+	}
+}
+
+func TestRestorePathRejectsWindowsReservedNamesAndADS(t *testing.T) {
+	for _, unsafePath := range []string{
+		"world/CON",
+		"world/con.txt",
+		"world/AuX.dat",
+		"world/COM9.log",
+		"world/LPT1",
+		"world/file.txt:stream",
+		`C:\outside\file.txt`,
+	} {
+		t.Run(unsafePath, func(t *testing.T) {
+			if _, err := resolveRestoreTarget(t.TempDir(), unsafePath); err == nil {
+				t.Fatalf("resolveRestoreTarget() accepted %q", unsafePath)
+			}
+		})
+	}
+}
+
+func TestRestorePathDetectsWindowsReparsePointAttribute(t *testing.T) {
+	if !isReparsePointAttributes(fileAttributeReparsePoint) {
+		t.Fatal("reparse point attribute was not detected")
+	}
+	if isReparsePointAttributes(0) {
+		t.Fatal("ordinary attributes were treated as a reparse point")
+	}
+	err := validateRestoreDirectory("junction", restorePathEntry{
+		mode:         os.ModeDir,
+		reparsePoint: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "reparse point") {
+		t.Fatalf("validateRestoreDirectory() error = %v, want reparse point rejection", err)
+	}
+}
+
 func TestPullRejectsUnsafeManifestPaths(t *testing.T) {
 	outputDir := t.TempDir()
 	m := testManifest(sha256Hex([]byte("region data")))
