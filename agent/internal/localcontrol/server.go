@@ -72,6 +72,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/v1/doctor", s.withAuth(s.handleDoctor))
 	mux.HandleFunc("/v1/scan", s.withAuth(s.handleScan))
+	mux.HandleFunc("/v1/manifest/validate", s.withAuth(s.handleManifestValidate))
 	mux.HandleFunc("/v1/safe-sync", s.withAuth(s.handleSafeSync))
 	mux.HandleFunc("/v1/push", s.withAuth(s.handlePush))
 	mux.HandleFunc("/v1/pull", s.withAuth(s.handlePull))
@@ -279,6 +280,45 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 			"deleted":  report.DeletedFiles,
 			"bytes":    report.TotalBytes,
 		},
+	})
+}
+
+func (s *Server) handleManifestValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
+		return
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "path is required"})
+		return
+	}
+
+	loaded, err := manifest.LoadFile(req.Path)
+	if err != nil {
+		requestID := GenerateToken()[:12]
+		s.logger.Printf("request_id=%s code=manifest_invalid error=%v", requestID, err)
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":        false,
+			"error":     "manifest validation failed",
+			"code":      "manifest_invalid",
+			"requestId": requestID,
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"artifactKind": loaded.ArtifactKind,
+		"artifactId":   loaded.ArtifactID,
+		"fileCount":    len(loaded.Files),
+		"summary":      loaded.Summary,
 	})
 }
 
@@ -580,7 +620,7 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 		StopTimeout: 30 * time.Second,
 	})
 	if err != nil {
-		s.writeOperationError(w, "server_start_failed", err)
+		s.writeServerStartError(w, err)
 		return
 	}
 
@@ -709,6 +749,36 @@ func (s *Server) writeOperationError(w http.ResponseWriter, code string, err err
 	writeJSON(w, http.StatusInternalServerError, map[string]any{
 		"ok":        false,
 		"error":     "operation failed",
+		"code":      code,
+		"requestId": requestID,
+	})
+}
+
+func (s *Server) writeServerStartError(w http.ResponseWriter, err error) {
+	requestID := GenerateToken()[:12]
+	s.logger.Printf("request_id=%s code=server_start_failed error=%v", requestID, err)
+
+	message := "operation failed"
+	code := "server_start_failed"
+	status := http.StatusInternalServerError
+	detail := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(detail, "already running"):
+		message = "server is already running"
+		code = "server_already_running"
+		status = http.StatusConflict
+	case strings.Contains(detail, "process lock"),
+		strings.Contains(detail, "state is stale"),
+		strings.Contains(detail, "state cannot be read"),
+		strings.Contains(detail, "cannot be verified"):
+		message = "server state or process lock cannot be verified; run server repair-state after confirming the old server is stopped"
+		code = "server_state_blocked"
+		status = http.StatusConflict
+	}
+
+	writeJSON(w, status, map[string]any{
+		"ok":        false,
+		"error":     message,
 		"code":      code,
 		"requestId": requestID,
 	})

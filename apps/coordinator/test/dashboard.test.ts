@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import vm from "node:vm";
 import { buildApp } from "../src/app.js";
 
 test("dashboard route serves the Chinese control center with Agent local control", async () => {
@@ -46,7 +47,7 @@ test("dashboard route serves the Chinese control center with Agent local control
     assert.match(response.body, /RCON \u5bc6\u7801/u);
     assert.match(response.body, /var persistedKeys=/);
     assert.match(response.body, /var secretKeys=/);
-    assert.match(response.body, /persistedKeys=\["coordinatorUrl","groupId","hostId"/);
+    assert.match(response.body, /persistedKeys=\["coordinatorUrl","groupId","memberId","hostId"/);
     assert.doesNotMatch(response.body, /persistedKeys=\[[^\]]*"accessKey"/);
     assert.doesNotMatch(response.body, /persistedKeys=\[[^\]]*"hostToken"/);
     assert.doesNotMatch(response.body, /persistedKeys=\[[^\]]*"agentToken"/);
@@ -57,6 +58,29 @@ test("dashboard route serves the Chinese control center with Agent local control
     assert.match(response.body, /id="agentToken" type="password"/);
     assert.match(response.body, /function forgetSecrets\(\)/);
     assert.match(response.body, /local_control_auth_failed/);
+    assert.match(response.body, /Register host/);
+    assert.match(response.body, /Send heartbeat/);
+    assert.match(response.body, /Validate manifest/);
+    assert.match(response.body, /Election \/ Takeover/);
+    assert.match(response.body, /Events \/ Logs/);
+    assert.match(response.body, /function checkLocalControlUrl\(\)/);
+    assert.match(response.body, /This Local Control URL is not loopback/);
+    assert.match(response.body, /function redact\(v\)/);
+    assert.match(response.body, /if\(r\.status===401\|\|r\.status===403\)/);
+    assert.match(response.body, /\$\("agentToken"\)\.value=""/);
+    assert.match(response.body, /confirm\("Pull and restore/);
+    assert.match(response.body, /confirm\("Stop the managed Minecraft server/);
+    assert.match(response.body, /id="takeoverToken" type="password"/);
+    assert.match(response.body, /secretEnvSetup\("ACBH_ACCESS_KEY"/);
+    assert.match(response.body, /secretEnvSetup\("ACBH_RCON_PASSWORD"/);
+    assert.doesNotMatch(response.body, /"--access-key "\+\$\("accessKey"\)\.value/);
+    assert.doesNotMatch(response.body, /"--rcon-password "\+rpw/);
+    assert.doesNotMatch(response.body, /sessionStorage\./);
+    assert.doesNotMatch(response.body, /console\.log/);
+
+    const inlineScript = response.body.match(/<script>([\s\S]*?)<\/script>/u);
+    assert.ok(inlineScript, "dashboard inline script must exist");
+    assert.doesNotThrow(() => new vm.Script(inlineScript[1], { filename: "dashboard-inline.js" }));
   } finally {
     await app.close();
   }

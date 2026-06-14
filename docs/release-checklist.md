@@ -39,6 +39,9 @@ bash scripts/demo-smoke.sh
 
 - [ ] `ACBH Demo Smoke: ALL CHECKS PASSED`
 - [ ] Covers: build, health, group create, register host, heartbeat, scan, push, latest, pull, group state
+- [ ] Demo uses temporary config/storage paths and removes them on exit
+- [ ] Demo stops Coordinator on success, error, and interrupt
+- [ ] Demo curl authentication and JSON bodies are passed through protected files, not literal argv
 
 ## 4. Security checklist
 
@@ -47,6 +50,11 @@ bash scripts/demo-smoke.sh
 - [ ] Dashboard does not persist `accessKey`, `hostToken`, `agentToken`, `rconPassword` to localStorage
 - [ ] Dashboard `saveLocal()` only saves non-secret keys
 - [ ] Dashboard `forgetSecrets()` clears both localStorage and form fields
+- [ ] Dashboard does not use `sessionStorage`, IndexedDB, URL query strings, fragments, or console logs for secrets
+- [ ] Dashboard clears Local Control token after 401/403
+- [ ] Dashboard warns and confirms before connecting to a non-loopback Local Control URL
+- [ ] Dashboard confirms stop, restore, and takeover operations
+- [ ] Dashboard command generation does not interpolate access keys or RCON passwords into argv
 - [ ] Control token stored with `0600` permissions
 - [ ] Control token masked in logs/stdout output
 - [ ] Auth errors never contain plaintext token values
@@ -56,6 +64,7 @@ bash scripts/demo-smoke.sh
 - [ ] Player token rejected when `expiresAt <= now`
 - [ ] No hardcoded secrets in source, scripts, docs, or fixtures
 - [ ] `.env.example` and `config.example.json` use `change-me` placeholders only
+- [ ] Recommended docs and demo commands do not put credentials in process arguments
 
 ## 5. Manifest schema
 
@@ -81,6 +90,7 @@ bash scripts/demo-smoke.sh
 - [ ] `README.md` quick start instructions work end-to-end
 - [ ] `docs/security.md` reflects current security posture
 - [ ] `docs/demo.md` or equivalent explains how to run the demo
+- [ ] GUI demo covers group, host, Local Control, server status, artifacts, election, and events
 - [ ] `docs/release-checklist.md` (this file) is up to date
 - [ ] No broken links between docs
 
@@ -93,5 +103,6 @@ bash scripts/demo-smoke.sh
 ## 9. Notes for release
 
 - [ ] `CHANGELOG.md` or equivalent updated (if exists)
+- [ ] Release notes summarize security defaults, demo scope, and known limitations
 - [ ] Version string consistent (agent `agentconfig.AgentVersion`, coordinator `package.json`)
 - [ ] Release artifacts build (`bash scripts/build-agent-release.sh`)

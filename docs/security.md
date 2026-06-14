@@ -148,7 +148,15 @@ Never print these values in logs:
 - Takeover Token
 - storage credentials
 
-RCON passwords are runtime-only Agent inputs. `safe-sync` accepts the password from `--rcon-password` or `ACBH_RCON_PASSWORD`; it does not write the password to Agent config, manifests, Coordinator storage, or command output.
+The recommended Agent login path reads the group access key from
+`ACBH_ACCESS_KEY`. The legacy `--access-key` flag remains compatible, but
+Dashboard-generated commands and demo documentation do not put the key in
+process arguments.
+
+RCON passwords are runtime-only Agent inputs. The recommended `safe-sync` path
+uses `ACBH_RCON_PASSWORD`. The legacy `--rcon-password` flag remains compatible.
+The password is not written to Agent config, manifests, Coordinator storage, or
+command output.
 
 ## Player tunnel and session security
 
@@ -194,9 +202,17 @@ The Agent local control API is a privileged local interface.
   origins by default.
 - Operation failures return a stable error code and request ID. Detailed
   errors, including local paths, remain in the Agent's local log.
-- The Dashboard never stores access keys, host tokens, RCON passwords, or the
-  local control token in `localStorage`. It removes legacy secret keys at
-  startup and keeps current credentials in page memory only.
+- Manifest validation is exposed through the same authenticated Local Control
+  middleware and returns a generic error plus request ID on failure.
+- The Dashboard never stores access keys, host tokens, takeover tokens, player
+  tokens, RCON passwords, or the local control token in `localStorage`,
+  `sessionStorage`, IndexedDB, URLs, or console logs. It removes legacy secret
+  keys at startup and keeps current credentials in page memory only.
+- A `401` or `403` Local Control response clears the in-memory control token.
+- Non-loopback Local Control URLs display a warning and require an explicit
+  confirmation before connection.
+- Dashboard command generators use `ACBH_ACCESS_KEY` and
+  `ACBH_RCON_PASSWORD`; they do not interpolate credential values into argv.
 
 ## Host Agent relay client security (PR28)
 

@@ -81,6 +81,8 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <button class="tab" data-tab="agent">Agent</button>
 <button class="tab" data-tab="storage">Storage</button>
 <button class="tab" data-tab="artifacts">\u5236\u54c1</button>
+<button class="tab" data-tab="election">Election / Takeover</button>
+<button class="tab" data-tab="events">Events</button>
 <button class="tab" data-tab="opencode">OpenCode</button>
 <button class="tab" data-tab="checklist">\u68c0\u67e5\u6e05\u5355</button>
 </div>
@@ -122,14 +124,18 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <pre id="groupOut"></pre>
 
 <h3 style="margin-top:20px">\u7ec4\u914d\u7f6e</h3>
-<div class="row"><div><label>\u7ec4 ID</label><input id="groupId"/></div><div><label>Access Key</label><input id="accessKey" type="password" autocomplete="off"/></div></div>
-<div class="row"><div><label>\u4e3b\u673a ID</label><input id="hostId" placeholder="Agent \u767b\u5f55\u540e\u81ea\u52a8\u586b\u5145"/></div><div><label>\u4e3b\u673a\u4ee4\u724c (Host Token)</label><input id="hostToken" type="password" autocomplete="off" placeholder="\u4ece Agent config.yaml \u590d\u5236"/></div></div>
+<div class="row"><div><label>\u7ec4 ID</label><input id="groupId"/></div><div><label>Access Key</label><input id="accessKey" type="password" autocomplete="off"/><div class="actions"><button class="sm sec" onclick="toggleSecret('accessKey')">\u77ed\u6682\u663e\u793a</button><button class="sm sec" onclick="copySecret('accessKey')">\u590d\u5236</button></div></div></div>
+<div class="row"><div><label>Member ID</label><input id="memberId" placeholder="\u521b\u5efa\u7ec4\u540e\u81ea\u52a8\u586b\u5145"/></div><div><label>\u4e3b\u673a ID</label><input id="hostId" placeholder="Agent \u767b\u5f55\u540e\u81ea\u52a8\u586b\u5145"/></div><div><label>\u4e3b\u673a\u4ee4\u724c (Host Token)</label><input id="hostToken" type="password" autocomplete="off" placeholder="\u4ece Agent config.yaml \u590d\u5236"/><div class="actions"><button class="sm sec" onclick="toggleSecret('hostToken')">\u77ed\u6682\u663e\u793a</button></div></div></div>
+<div class="row"><div><label>Heartbeat \u72b6\u6001</label><select id="heartbeatStatus"><option>standby</option><option>online</option><option>hosting</option><option>unhealthy</option><option>offline</option></select></div><div><label>Agent Version</label><input id="agentVersion" value="0.1.0"/></div></div>
 <div class="warn"><strong>\u8b66\u544a</strong>\uff1a\u4ec5\u5728\u53ef\u4fe1\u672c\u673a\u4f7f\u7528\u3002\u4e0d\u8981\u5728\u516c\u5171\u7535\u8111\u4fdd\u5b58 accessKey \u6216 hostToken\u3002</div>
 <div class="actions">
 <button onclick="saveLocal()">\u4fdd\u5b58\u672c\u5730</button>
 <button class="danger" onclick="forgetSecrets()">\u6e05\u9664\u51ed\u636e</button>
+<button class="sec" onclick="registerHost()">Register host</button>
+<button class="sec" onclick="sendHeartbeat()">Send heartbeat</button>
 <button class="sec" onclick="loadState()">\u52a0\u8f7d\u7ec4\u72b6\u6001</button>
 </div>
+<pre id="groupStateOut" style="margin-top:12px"></pre>
 </div>
 
 <!-- Agent -->
@@ -138,7 +144,8 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <div class="card" style="margin-bottom:16px">
 <h3>Agent \u672c\u5730\u63a7\u5236</h3>
-<div class="row"><div><label>Agent \u672c\u5730 API \u5730\u5740</label><input id="agentApiUrl" value="http://127.0.0.1:6122"/></div><div><label>\u672c\u5730\u63a7\u5236\u4ee4\u724c</label><input id="agentToken" type="password" autocomplete="off" placeholder="\u4ece control-token \u6587\u4ef6\u8bfb\u53d6"/></div></div>
+<div class="row"><div><label>Agent \u672c\u5730 API \u5730\u5740</label><input id="agentApiUrl" value="http://127.0.0.1:6122" oninput="checkLocalControlUrl()"/></div><div><label>\u672c\u5730\u63a7\u5236\u4ee4\u724c</label><input id="agentToken" type="password" autocomplete="off" placeholder="\u4ece control-token \u6587\u4ef6\u8bfb\u53d6"/><div class="actions"><button class="sm sec" onclick="toggleSecret('agentToken')">\u77ed\u6682\u663e\u793a</button></div></div></div>
+<div class="warn" id="agentUrlWarning" style="display:none">\u8b66\u544a\uff1a\u8be5 Local Control \u5730\u5740\u4e0d\u662f loopback\u3002\u8fdc\u7a0b\u63a7\u5236\u4f1a\u6269\u5927\u51ed\u636e\u6cc4\u9732\u548c\u670d\u52a1\u5668\u64cd\u4f5c\u98ce\u9669\u3002</div>
 <div class="actions">
 <button onclick="connectAgent()">\u8fde\u63a5\u672c\u673a Agent</button>
 <button class="sec" onclick="disconnectAgent()">\u65ad\u5f00</button>
@@ -150,6 +157,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <div class="actions">
 <button onclick="agentDoctor()">\u8fd0\u884c doctor</button>
 <button class="sec" onclick="agentScan()">\u626b\u63cf server-pack</button>
+<button class="sec" onclick="agentValidateManifest()">Validate manifest</button>
 <button class="sec" onclick="agentSafeSync()">safe-sync world</button>
 <button class="sec" onclick="agentPush('server-pack')">push server-pack</button>
 <button class="sec" onclick="agentPush('world')">push world</button>
@@ -167,7 +175,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <div class="actions">
 <button onclick="agentSrvStatus()">\u67e5\u770b\u72b6\u6001</button>
 <button class="sec" onclick="agentSrvStart()">\u542f\u52a8\u670d\u52a1\u5668</button>
-<button class="sec" onclick="agentSrvStop()">\u505c\u6b62\u670d\u52a1\u5668</button>
+<button class="danger" onclick="agentSrvStop()">\u505c\u6b62\u670d\u52a1\u5668</button>
 </div>
 <pre id="srvOut" style="margin-top:12px;max-height:200px;overflow-y:auto"></pre>
 </div>
@@ -183,6 +191,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <h3>\u670d\u52a1\u5668\u76ee\u5f55</h3>
 <div class="row"><div><label>Server A \u76ee\u5f55 (\u4e3b\u673a)</label><input id="serverDir" value="C:\\ACBH-Test\\server-a"/></div><div><label>Server B \u76ee\u5f55 (\u6062\u590d\u76ee\u6807)</label><input id="serverBDir" value="C:\\ACBH-Test\\server-b"/></div></div>
+<label>Manifest \u8def\u5f84</label><input id="manifestPath" value="C:\\ACBH-Test\\server-a\\server-pack.manifest.json"/>
 
 <h3>RCON \u914d\u7f6e</h3>
 <div class="row"><div><label>RCON Host</label><input id="rconHost" value="127.0.0.1"/></div><div><label>RCON Port</label><input id="rconPort" value="25575"/></div><div><label>RCON Password</label><input id="rconPassword" type="password" autocomplete="off"/></div></div>
@@ -228,6 +237,32 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <pre id="artifactOut" style="margin-top:12px"></pre>
 </div>
 
+<!-- Election / Takeover -->
+<div class="panel" id="panel-election">
+<h2>Election / Takeover</h2>
+<div class="warn">\u6545\u969c\u63a5\u7ba1\u4f1a\u6539\u53d8 current host \u548c generation\uff0c\u4e0d\u662f\u666e\u901a\u91cd\u542f\u3002\u8bf7\u5148\u786e\u8ba4\u539f\u4e3b\u673a\u72b6\u6001\u3002</div>
+<div class="row"><div><label>Election reason</label><select id="electionReason"><option>manual</option><option>heartbeat-timeout</option><option>no-current-host</option></select></div><div><label>Assignment ID</label><input id="assignmentId"/></div></div>
+<div class="row"><div><label>Takeover Token</label><input id="takeoverToken" type="password" autocomplete="off"/><div class="actions"><button class="sm sec" onclick="toggleSecret('takeoverToken')">\u77ed\u6682\u663e\u793a</button></div></div><div><label>Failure reason</label><input id="takeoverFailureReason" value="local takeover failed"/></div></div>
+<div class="actions">
+<button onclick="refreshElection()">Refresh election status</button>
+<button class="sec" onclick="runElection()">Run election</button>
+<button class="sec" onclick="checkElectionTimeout()">Check timeout</button>
+<button class="sec" onclick="pollTakeover()">Poll assignment</button>
+<button class="sec" onclick="acceptTakeover()">Accept takeover</button>
+<button class="sec" onclick="completeTakeover()">Complete takeover</button>
+<button class="danger" onclick="failTakeover()">Fail takeover</button>
+</div>
+<pre id="electionOut" style="margin-top:12px"></pre>
+</div>
+
+<!-- Events -->
+<div class="panel" id="panel-events">
+<h2>Events / Logs</h2>
+<p style="color:var(--muted);font-size:13px;margin-bottom:12px">\u663e\u793a\u5f53\u524d\u9875\u9762\u6700\u8fd1\u64cd\u4f5c\u6458\u8981\u3002\u51ed\u636e\u4f1a\u5728\u8bb0\u5f55\u524d\u906e\u853d\uff0c\u4e0d\u4f1a\u5199\u5165\u6d4f\u89c8\u5668\u5b58\u50a8\u3002</p>
+<div class="actions"><button class="sec" onclick="clearEvents()">Clear events</button></div>
+<pre id="eventsOut" style="margin-top:12px"></pre>
+</div>
+
 <!-- OpenCode -->
 <div class="panel" id="panel-opencode">
 <h2>OpenCode \u4ea4\u63a5</h2>
@@ -248,7 +283,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <li><span class="text"><strong>\u521b\u5efa\u7ec4</strong><br>\u5728 Coordinator \u680f\u70b9\u51fb\u201c\u521b\u5efa\u7ec4\u201d</span><button class="sm sec" onclick="switchTab('coordinator');createGroup()" style="margin-top:4px">\u8df3\u8f6c</button></li>
 <li><span class="text"><strong>\u5728 Agent \u673a\u5668\u767b\u5f55</strong><br>\u8fd0\u884c\u751f\u6210\u7684\u767b\u5f55\u547d\u4ee4</span><button class="sm sec" onclick="switchTab('agent')" style="margin-top:4px">\u8df3\u8f6c</button></li>
 <li><span class="text"><strong>doctor \u68c0\u67e5\u73af\u5883</strong><br>\u786e\u8ba4 Java \u548c\u670d\u52a1\u5668\u76ee\u5f55\u53ef\u7528</span></li>
-<li><span class="text"><strong>\u542f\u52a8\u672c\u5730 Agent \u63a7\u5236\u670d\u52a1</strong><br><code>acbh-agent control serve --listen 127.0.0.1:6131 --token &lt;token&gt;</code></span></li>
+<li><span class="text"><strong>\u542f\u52a8\u672c\u5730 Agent \u63a7\u5236\u670d\u52a1</strong><br><code>acbh-agent control serve</code> \u5e76\u4ece control-token \u6587\u4ef6\u8bfb\u53d6\u51ed\u636e</span></li>
 <li><span class="text"><strong>\u5728 Dashboard \u8fde\u63a5\u672c\u5730 Agent API</strong><br>\u8f93\u5165 token \u540e\u70b9\u51fb\u201c\u8fde\u63a5\u672c\u673a Agent\u201d</span><button class="sm sec" onclick="switchTab('agent')" style="margin-top:4px">\u8df3\u8f6c</button></li>
 <li><span class="text"><strong>\u786e\u8ba4\u670d\u52a1\u5668\u72b6\u6001</strong><br>\u70b9\u51fb\u201c\u67e5\u770b\u72b6\u6001\u201d\u786e\u8ba4\u670d\u52a1\u5668\u672a\u8fd0\u884c</span></li>
 <li><span class="text"><strong>\u542f\u52a8\u670d\u52a1\u5668</strong><br>\u70b9\u51fb\u201c\u542f\u52a8\u670d\u52a1\u5668\u201d\u542f\u52a8 Minecraft \u670d\u52a1\u7aef</span></li>
@@ -289,12 +324,58 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <script>
 var $=function(id){return document.getElementById(id);};
-var persistedKeys=["coordinatorUrl","groupId","hostId","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","ocWorkspace","agentApiUrl","srvDir","srvJava","srvJar","srvJvmArgs","srvArgs"];
-var secretKeys=["accessKey","hostToken","agentToken","rconPassword","srvRconPassword","localControlToken","secret"];
+var persistedKeys=["coordinatorUrl","groupId","memberId","hostId","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","ocWorkspace","agentApiUrl","srvDir","srvJava","srvJar","srvJvmArgs","srvArgs","manifestPath","agentVersion"];
+var secretKeys=["accessKey","hostToken","agentToken","rconPassword","srvRconPassword","takeoverToken","playerToken","localControlToken","secret"];
+var recentEvents=[];
 
-function setMsg(v){$("quickMsg").textContent=v;}
+function redact(v){
+  var text=String(v===undefined?"":v);
+  for(var i=0;i<secretKeys.length;i++){
+    var el=$(secretKeys[i]),secret=el&&el.value?el.value:"";
+    if(secret&&secret.length>=4)text=text.split(secret).join("[redacted]");
+  }
+  return text;
+}
+function renderEvents(){
+  var out=$("eventsOut");
+  if(out)out.textContent=recentEvents.length?recentEvents.join("\\n"):"No events yet.";
+}
+function addEvent(v){
+  recentEvents.unshift(new Date().toLocaleTimeString()+"  "+redact(v));
+  recentEvents=recentEvents.slice(0,50);
+  renderEvents();
+}
+function clearEvents(){recentEvents=[];renderEvents();setMsg("Events cleared.");}
+function setMsg(v){var safe=redact(v);$("quickMsg").textContent=safe;addEvent(safe);}
 function baseUrl(){return $("coordinatorUrl").value.replace(/\\/$/,"");}
 function errMsg(e){return e&&e.message?e.message:"Request failed";}
+
+function toggleSecret(id){
+  var el=$(id);if(!el)return;
+  el.type=el.type==="password"?"text":"password";
+  if(el.type==="text")setTimeout(function(){if(el)el.type="password";},10000);
+}
+
+async function copySecret(id){
+  var el=$(id);
+  if(!el||!el.value){setMsg("No credential to copy.");return;}
+  await navigator.clipboard.writeText(el.value);
+  setMsg("Credential copied. It remains in page memory only.");
+}
+
+function isLoopbackControlUrl(value){
+  try{
+    var u=new URL(value);
+    var h=u.hostname.toLowerCase();
+    return u.protocol==="http:"&&(h==="localhost"||h==="127.0.0.1"||h==="::1"||h.indexOf("127.")===0);
+  }catch(e){return false;}
+}
+
+function checkLocalControlUrl(){
+  var safe=isLoopbackControlUrl($("agentApiUrl").value);
+  $("agentUrlWarning").style.display=safe?"none":"block";
+  return safe;
+}
 
 function saveLocal(){
   for(var i=0;i<persistedKeys.length;i++){
@@ -372,11 +453,43 @@ async function refreshStoragePanel(){
 async function createGroup(){
   try{
     var b=await api("/v1/groups",{method:"POST",body:JSON.stringify({name:$("groupName").value,ownerName:$("ownerName").value})});
-    $("groupId").value=b.groupId;$("accessKey").value=b.accessKey;
+    $("groupId").value=b.groupId;$("accessKey").value=b.accessKey;$("memberId").value=b.ownerMemberId||"";
     $("groupOut").textContent=JSON.stringify({groupId:b.groupId,ownerMemberId:b.ownerMemberId,accessKey:"[stored in memory only]"},null,2);
     $("ovGroup").textContent=b.groupId;$("ovHost").textContent="--";
     saveLocal();setMsg("\u7ec4\u5df2\u521b\u5efa: "+b.groupId);
   }catch(e){$("groupOut").textContent=errMsg(e);setMsg(errMsg(e));}
+}
+
+async function registerHost(){
+  try{
+    setMsg("Registering host...");
+    var b=await api("/v1/hosts/register",{method:"POST",body:JSON.stringify({
+      groupId:$("groupId").value,
+      accessKey:$("accessKey").value,
+      memberId:$("memberId").value,
+      deviceName:$("deviceName").value,
+      platform:$("platform").value,
+      agentVersion:$("agentVersion").value||"0.1.0"
+    })});
+    $("hostId").value=b.hostId;$("hostToken").value=b.hostToken;
+    $("ovHost").textContent=b.hostId;
+    $("groupOut").textContent=JSON.stringify({hostId:b.hostId,hostToken:"[stored in memory only]"},null,2);
+    saveLocal();setMsg("Host registered: "+b.hostId);
+  }catch(e){$("groupOut").textContent=redact(errMsg(e));setMsg(errMsg(e));}
+}
+
+async function sendHeartbeat(){
+  try{
+    setMsg("Sending heartbeat...");
+    var b=await api("/v1/hosts/heartbeat",{method:"POST",body:JSON.stringify({
+      groupId:$("groupId").value,
+      hostId:$("hostId").value,
+      hostToken:$("hostToken").value,
+      status:$("heartbeatStatus").value
+    })});
+    $("groupStateOut").textContent=JSON.stringify(b,null,2);
+    setMsg("Heartbeat sent.");
+  }catch(e){$("groupStateOut").textContent=redact(errMsg(e));setMsg(errMsg(e));}
 }
 
 async function loadState(){
@@ -385,6 +498,7 @@ async function loadState(){
     var h=hostHeaders();
     if(!h["x-acbh-host-token"]&&$("accessKey").value)h["x-acbh-access-key"]=$("accessKey").value;
     var b=await api("/v1/groups/"+encodeURIComponent(gid)+"/state",{headers:h});
+    $("groupStateOut").textContent=JSON.stringify(b,null,2);
     $("ovGroup").textContent=gid;
     if(b.currentHostId){$("ovHost").textContent=b.currentHostId;}
     setMsg("\u7ec4\u72b6\u6001\u5df2\u52a0\u8f7d");
@@ -423,14 +537,18 @@ async function loadManifest(){
 }
 
 // Shell helpers
-function exeName(){return $("agentExe").value||($("platform").value==="windows"?".\\acbh-agent-windows-amd64.exe":"./acbh-agent");}
+function exeName(){return $("agentExe").value||($("platform").value==="windows"?"."+String.fromCharCode(92)+"acbh-agent-windows-amd64.exe":"./acbh-agent");}
 function isBash(){return $("shellType").value==="bash";}
-function shellCont(){var nl=String.fromCharCode(10);return isBash()?" \\"+nl+"  ":" "+String.fromCharCode(96)+nl+"  ";}
+function shellCont(){var nl=String.fromCharCode(10);return isBash()?" "+String.fromCharCode(92)+nl+"  ":" "+String.fromCharCode(96)+nl+"  ";}
 function shellJoin(lines){return lines.join(shellCont());}
+function secretEnvSetup(name,label){
+  if(isBash())return 'read -rsp "'+label+': " '+name+"; export "+name+"; echo";
+  return '$acbhSecret = Read-Host "'+label+'" -AsSecureString\\n$env:'+name+' = [System.Net.NetworkCredential]::new("", $acbhSecret).Password';
+}
 
 function genLogin(){
-  var e=exeName();var cmd=shellJoin([e+" login","--coordinator "+baseUrl(),"--group-id "+$("groupId").value,"--access-key "+$("accessKey").value,'--name "'+$("displayName").value+'"','--device-name "'+$("deviceName").value+'"',"--platform "+$("platform").value]);
-  $("agentCommands").value=cmd;saveLocal();switchTab("agent");
+  var e=exeName();var cmd=shellJoin([e+" login","--coordinator "+baseUrl(),"--group-id "+$("groupId").value,'--name "'+$("displayName").value+'"','--device-name "'+$("deviceName").value+'"',"--platform "+$("platform").value]);
+  $("agentCommands").value=secretEnvSetup("ACBH_ACCESS_KEY","ACBH access key")+"\\n"+cmd;saveLocal();switchTab("agent");
 }
 
 function genDoctor(){
@@ -439,46 +557,48 @@ function genDoctor(){
 
 function genScan(){
   var e=exeName(),dir=$("serverDir").value,g=$("groupId").value,h=$("hostId").value||"<host-id>",pack=$("serverPackId").value;
-  var sep=isBash()?"/":"\\";var sp=dir+sep+"server-pack.manifest.json";
+  var sep=isBash()?"/":String.fromCharCode(92);var sp=dir+sep+"server-pack.manifest.json";
   $("agentCommands").value=shellJoin([e+" scan","--server-dir "+dir,"--artifact-kind server-pack","--artifact-id "+pack,"--group-id "+g,"--creator-host-id "+h,"--output "+sp]);
   switchTab("agent");
 }
 
 function genSafeSync(){
   var e=exeName(),dir=$("serverDir").value,g=$("groupId").value,h=$("hostId").value||"<host-id>",world=$("worldSnapshotId").value,pack=$("serverPackId").value;
-  var sep=isBash()?"/":"\\";var wm=dir+sep+"world.manifest.json";
-  var rh=$("rconHost").value||"127.0.0.1",rp=$("rconPort").value||"25575",rpw=$("rconPassword").value||"acbh-test";
-  $("agentCommands").value=shellJoin([e+" safe-sync","--server-dir "+dir,"--rcon-host "+rh,"--rcon-port "+rp,"--rcon-password "+rpw,"--artifact-id "+world,"--group-id "+g,"--creator-host-id "+h,"--server-pack-version "+pack,"--output "+wm]);
+  var sep=isBash()?"/":String.fromCharCode(92);var wm=dir+sep+"world.manifest.json";
+  var rh=$("rconHost").value||"127.0.0.1",rp=$("rconPort").value||"25575";
+  $("agentCommands").value=secretEnvSetup("ACBH_RCON_PASSWORD","RCON password")+"\\n"+shellJoin([e+" safe-sync","--server-dir "+dir,"--rcon-host "+rh,"--rcon-port "+rp,"--artifact-id "+world,"--group-id "+g,"--creator-host-id "+h,"--server-pack-version "+pack,"--output "+wm]);
   switchTab("agent");
 }
 
 function genPush(){
   var e=exeName(),dir=$("serverDir").value;
-  var sep=isBash()?"/":"\\";var sp=dir+sep+"server-pack.manifest.json",wm=dir+sep+"world.manifest.json";
-  $("agentCommands").value=[e+" push --server-dir "+dir+" --manifest "+sp,e+" push --server-dir "+dir+" --manifest "+wm].join("\n\n");
+  var sep=isBash()?"/":String.fromCharCode(92);var sp=dir+sep+"server-pack.manifest.json",wm=dir+sep+"world.manifest.json";
+  $("agentCommands").value=[e+" push --server-dir "+dir+" --manifest "+sp,e+" push --server-dir "+dir+" --manifest "+wm].join("\\n\\n");
   switchTab("agent");
 }
 
 function genPull(){
   var e=exeName(),bdir=$("serverBDir").value,pack=$("serverPackId").value,world=$("worldSnapshotId").value;
-  $("agentCommands").value=[e+" pull --artifact-kind server-pack --artifact-id "+pack+" --output-dir "+bdir,e+" pull --artifact-kind world-snapshot --artifact-id "+world+" --output-dir "+bdir].join("\n\n");
+  $("agentCommands").value=[e+" pull --artifact-kind server-pack --artifact-id "+pack+" --output-dir "+bdir,e+" pull --artifact-kind world-snapshot --artifact-id "+world+" --output-dir "+bdir].join("\\n\\n");
   switchTab("agent");
 }
 
 function genAll(){
   var e=exeName(),dir=$("serverDir").value,bdir=$("serverBDir").value,g=$("groupId").value,h=$("hostId").value||"<host-id>",pack=$("serverPackId").value,world=$("worldSnapshotId").value;
-  var rh=$("rconHost").value||"127.0.0.1",rp=$("rconPort").value||"25575",rpw=$("rconPassword").value||"acbh-test";
-  var sep=isBash()?"/":"\\";var sp=dir+sep+"server-pack.manifest.json",wm=dir+sep+"world.manifest.json";
+  var rh=$("rconHost").value||"127.0.0.1",rp=$("rconPort").value||"25575";
+  var sep=isBash()?"/":String.fromCharCode(92);var sp=dir+sep+"server-pack.manifest.json",wm=dir+sep+"world.manifest.json";
   $("agentCommands").value=[
-    shellJoin([e+" login","--coordinator "+baseUrl(),"--group-id "+g,"--access-key "+$("accessKey").value,'--name "'+$("displayName").value+'"','--device-name "'+$("deviceName").value+'"',"--platform "+$("platform").value]),
+    secretEnvSetup("ACBH_ACCESS_KEY","ACBH access key"),
+    shellJoin([e+" login","--coordinator "+baseUrl(),"--group-id "+g,'--name "'+$("displayName").value+'"','--device-name "'+$("deviceName").value+'"',"--platform "+$("platform").value]),
     e+" doctor",
     shellJoin([e+" scan","--server-dir "+dir,"--artifact-kind server-pack","--artifact-id "+pack,"--group-id "+g,"--creator-host-id "+h,"--output "+sp]),
-    shellJoin([e+" safe-sync","--server-dir "+dir,"--rcon-host "+rh,"--rcon-port "+rp,"--rcon-password "+rpw,"--artifact-id "+world,"--group-id "+g,"--creator-host-id "+h,"--server-pack-version "+pack,"--output "+wm]),
+    secretEnvSetup("ACBH_RCON_PASSWORD","RCON password"),
+    shellJoin([e+" safe-sync","--server-dir "+dir,"--rcon-host "+rh,"--rcon-port "+rp,"--artifact-id "+world,"--group-id "+g,"--creator-host-id "+h,"--server-pack-version "+pack,"--output "+wm]),
     e+" push --server-dir "+dir+" --manifest "+sp,
     e+" push --server-dir "+dir+" --manifest "+wm,
     e+" pull --artifact-kind server-pack --artifact-id "+pack+" --output-dir "+bdir,
     e+" pull --artifact-kind world-snapshot --artifact-id "+world+" --output-dir "+bdir
-  ].join("\n\n");
+  ].join("\\n\\n");
   switchTab("agent");
 }
 
@@ -509,24 +629,26 @@ function genOpenCode(){
   ];
   var cmd=getAllCommands();
   lines.push(cmd);
-  $("opencodePrompt").value=lines.join("\n");
+  $("opencodePrompt").value=lines.join("\\n");
   saveLocal();switchTab("opencode");
 }
 
 function getAllCommands(){
   var e=exeName(),dir=$("serverDir").value,bdir=$("serverBDir").value,g=$("groupId").value,h=$("hostId").value||"<host-id>",pack=$("serverPackId").value,world=$("worldSnapshotId").value;
-  var rh=$("rconHost").value||"127.0.0.1",rp=$("rconPort").value||"25575",rpw=$("rconPassword").value||"acbh-test";
-  var sep=isBash()?"/":"\\";var sp=dir+sep+"server-pack.manifest.json",wm=dir+sep+"world.manifest.json";
+  var rh=$("rconHost").value||"127.0.0.1",rp=$("rconPort").value||"25575";
+  var sep=isBash()?"/":String.fromCharCode(92);var sp=dir+sep+"server-pack.manifest.json",wm=dir+sep+"world.manifest.json";
   return [
-    shellJoin([e+" login","--coordinator "+baseUrl(),"--group-id "+g,"--access-key "+$("accessKey").value,'--name "'+$("displayName").value+'"','--device-name "'+$("deviceName").value+'"',"--platform "+$("platform").value]),
+    secretEnvSetup("ACBH_ACCESS_KEY","ACBH access key"),
+    shellJoin([e+" login","--coordinator "+baseUrl(),"--group-id "+g,'--name "'+$("displayName").value+'"','--device-name "'+$("deviceName").value+'"',"--platform "+$("platform").value]),
     e+" doctor",
     shellJoin([e+" scan","--server-dir "+dir,"--artifact-kind server-pack","--artifact-id "+pack,"--group-id "+g,"--creator-host-id "+h,"--output "+sp]),
-    shellJoin([e+" safe-sync","--server-dir "+dir,"--rcon-host "+rh,"--rcon-port "+rp,"--rcon-password "+rpw,"--artifact-id "+world,"--group-id "+g,"--creator-host-id "+h,"--server-pack-version "+pack,"--output "+wm]),
+    secretEnvSetup("ACBH_RCON_PASSWORD","RCON password"),
+    shellJoin([e+" safe-sync","--server-dir "+dir,"--rcon-host "+rh,"--rcon-port "+rp,"--artifact-id "+world,"--group-id "+g,"--creator-host-id "+h,"--server-pack-version "+pack,"--output "+wm]),
     e+" push --server-dir "+dir+" --manifest "+sp,
     e+" push --server-dir "+dir+" --manifest "+wm,
     e+" pull --artifact-kind server-pack --artifact-id "+pack+" --output-dir "+bdir,
     e+" pull --artifact-kind world-snapshot --artifact-id "+world+" --output-dir "+bdir
-  ].join("\n\n");
+  ].join("\\n\\n");
 }
 
 var agentConnected=false;
@@ -545,10 +667,16 @@ async function connectAgent(){
   var url=$("agentApiUrl").value.replace(/\\/$/,"");
   var tok=$("agentToken").value;
   if(!tok){setMsg("\u8bf7\u5148\u8f93\u5165\u672c\u5730\u63a7\u5236\u4ee4\u724c");return;}
+  if(!checkLocalControlUrl()&&!confirm("This Local Control URL is not loopback. Connect only on a trusted network. Continue?")){setMsg("Remote Local Control connection cancelled.");return;}
   try{
     var r=await fetch(url+"/health");
     var b=await r.json();
     if(b.ok){
+      var auth=await fetch(url+"/v1/doctor",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+tok},body:"{}"});
+      if(auth.status===401||auth.status===403){
+        $("agentToken").value="";setAgentMode(false);setMsg("Local Control credential is invalid; enter it again.");return;
+      }
+      if(!auth.ok)throw new Error("Local Control authentication check failed");
       setMsg("\u5df2\u8fde\u63a5 Agent: "+b.platform+" PID "+b.pid);
       setAgentMode(true);saveLocal();
     }else{
@@ -591,10 +719,22 @@ async function agentScan(){
   setMsg("\u626b\u63cf server-pack...");
   try{
     var g=$("groupId").value,h=$("hostId").value||"<host-id>",pack=$("serverPackId").value,dir=$("serverDir").value;
-    var sep=isBash()?"/":"\\";var sp=dir+sep+"server-pack.manifest.json";
+    var sep=isBash()?"/":String.fromCharCode(92);var sp=dir+sep+"server-pack.manifest.json";
     var b=await agentCall("/v1/scan",{serverDir:dir,artifactKind:"server-pack",artifactId:pack,groupId:g,creatorHostId:h,output:sp});
     $("agentCommands").value=JSON.stringify(b,null,2);
     switchTab("agent");setMsg(b.ok?"\u626b\u63cf\u5b8c\u6210: "+JSON.stringify(b.summary):"\u626b\u63cf\u5931\u8d25: "+(b.error||""));
+  }catch(e){setMsg(errMsg(e));}
+}
+
+async function agentValidateManifest(){
+  if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  var path=$("manifestPath").value;
+  if(!path){setMsg("Manifest path is required.");return;}
+  setMsg("Validating manifest...");
+  try{
+    var b=await agentCall("/v1/manifest/validate",{path:path});
+    $("agentCommands").value=redact(JSON.stringify(b,null,2));
+    switchTab("agent");setMsg(b.ok?"Manifest is valid.":"Manifest validation failed: "+(b.error||""));
   }catch(e){setMsg(errMsg(e));}
 }
 
@@ -603,8 +743,9 @@ async function agentSafeSync(){
   setMsg("safe-sync world...");
   try{
     var g=$("groupId").value,h=$("hostId").value||"<host-id>",world=$("worldSnapshotId").value,pack=$("serverPackId").value,dir=$("serverDir").value;
-    var sep=isBash()?"/":"\\";var wm=dir+sep+"world.manifest.json";
-    var rh=$("rconHost").value||"127.0.0.1",rp=parseInt($("rconPort").value)||25575,rpw=$("rconPassword").value||"acbh-test";
+    var sep=isBash()?"/":String.fromCharCode(92);var wm=dir+sep+"world.manifest.json";
+    var rh=$("rconHost").value||"127.0.0.1",rp=parseInt($("rconPort").value)||25575,rpw=$("rconPassword").value;
+    if(!rpw){setMsg("RCON password is required for safe-sync.");return;}
     var b=await agentCall("/v1/safe-sync",{serverDir:dir,rconHost:rh,rconPort:rp,rconPassword:rpw,artifactId:world,groupId:g,creatorHostId:h,serverPackVersion:pack,output:wm});
     $("agentCommands").value=JSON.stringify(b,null,2);
     switchTab("agent");setMsg(b.ok?"safe-sync \u5b8c\u6210: "+JSON.stringify(b.summary):"safe-sync \u5931\u8d25: "+(b.error||""));
@@ -615,7 +756,7 @@ async function agentPush(which){
   if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
   setMsg("push "+which+"...");
   try{
-    var dir=$("serverDir").value,sep=isBash()?"/":"\\";
+    var dir=$("serverDir").value,sep=isBash()?"/":String.fromCharCode(92);
     var mf=dir+sep+(which==="world"?"world":"server-pack")+".manifest.json";
     var b=await agentCall("/v1/push",{coordinatorUrl:baseUrl(),serverDir:dir,manifest:mf});
     $("agentCommands").value=JSON.stringify(b,null,2);
@@ -625,6 +766,7 @@ async function agentPush(which){
 
 async function agentPull(which){
   if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  if(!confirm("Pull and restore "+which+" into the configured output directory? Existing files may be replaced.")){setMsg("Pull cancelled.");return;}
   setMsg("pull "+which+"...");
   try{
     var bdir=$("serverBDir").value,pack=$("serverPackId").value,world=$("worldSnapshotId").value;
@@ -643,7 +785,7 @@ async function agentSrvStatus(){
     var b=await agentCall("/v1/server/status",{serverDir:dir});
     $("srvOut").textContent=JSON.stringify(b,null,2);
     if(b.running)setMsg("\u670d\u52a1\u5668\u8fd0\u884c\u4e2d PID "+b.state.pid);
-    else if(b.stale)setMsg("\u670d\u52a1\u5668\u72b6\u6001\u5f02\u5e38\uff08\u8fdb\u7a0b\u53ef\u80fd\u5df2\u7ec8\u6b62\uff09");
+    else if(b.stale)setMsg("\u670d\u52a1\u5668\u72b6\u6001\u5f02\u5e38: "+(b.reason||"\u8fdb\u7a0b\u6216\u72b6\u6001\u65e0\u6cd5\u9a8c\u8bc1"));
     else setMsg(b.message||"\u670d\u52a1\u5668\u672a\u8fd0\u884c");
   }catch(e){$("srvOut").textContent=errMsg(e);setMsg(errMsg(e));}
 }
@@ -673,6 +815,7 @@ async function agentSrvStart(){
 
 async function agentSrvStop(){
   if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
+  if(!confirm("Stop the managed Minecraft server?")){setMsg("Server stop cancelled.");return;}
   setMsg("\u505c\u6b62\u670d\u52a1\u5668...");
   try{
     var dir=$("srvDir").value||$("serverDir").value;
@@ -684,6 +827,81 @@ async function agentSrvStop(){
     setMsg(b.ok?(b.stopped?(b.message||"\u670d\u52a1\u5668\u5df2\u505c\u6b62"):(b.message||"\u670d\u52a1\u5668\u672a\u8fd0\u884c")):("\u505c\u6b62\u5931\u8d25: "+(b.error||"")));
   }catch(e){$("srvOut").textContent=errMsg(e);setMsg(errMsg(e));}
 }
+
+function hostAuthBody(extra){
+  return Object.assign({
+    groupId:$("groupId").value,
+    hostId:$("hostId").value,
+    hostToken:$("hostToken").value
+  },extra||{});
+}
+
+async function refreshElection(){
+  try{
+    setMsg("Loading election status...");
+    var gid=encodeURIComponent($("groupId").value);
+    var b=await api("/v1/groups/"+gid+"/election/status",{headers:hostHeaders()});
+    $("electionOut").textContent=JSON.stringify(b,null,2);
+    if(b.activeTakeoverAssignment&&b.activeTakeoverAssignment.assignmentId)$("assignmentId").value=b.activeTakeoverAssignment.assignmentId;
+    setMsg("Election status loaded.");
+  }catch(e){$("electionOut").textContent=redact(errMsg(e));setMsg(errMsg(e));}
+}
+
+async function runElection(){
+  if(!confirm("Run a fault-takeover election now? This may offer takeover to another host.")){setMsg("Election cancelled.");return;}
+  try{
+    setMsg("Running election...");
+    var gid=$("groupId").value;
+    var b=await api("/v1/groups/"+encodeURIComponent(gid)+"/election/run",{method:"POST",body:JSON.stringify(hostAuthBody({reason:$("electionReason").value}))});
+    $("electionOut").textContent=JSON.stringify(b,null,2);
+    if(b.assignment&&b.assignment.assignmentId)$("assignmentId").value=b.assignment.assignmentId;
+    setMsg("Election completed.");
+  }catch(e){$("electionOut").textContent=redact(errMsg(e));setMsg(errMsg(e));}
+}
+
+async function checkElectionTimeout(){
+  if(!confirm("Check heartbeat timeout and start takeover election if required?")){setMsg("Timeout check cancelled.");return;}
+  try{
+    setMsg("Checking election timeout...");
+    var gid=$("groupId").value;
+    var b=await api("/v1/groups/"+encodeURIComponent(gid)+"/election/check-timeout",{method:"POST",body:JSON.stringify(hostAuthBody())});
+    $("electionOut").textContent=JSON.stringify(b,null,2);
+    setMsg("Election timeout check completed.");
+  }catch(e){$("electionOut").textContent=redact(errMsg(e));setMsg(errMsg(e));}
+}
+
+async function pollTakeover(){
+  try{
+    setMsg("Polling takeover assignment...");
+    var b=await api("/v1/hosts/takeover/poll",{method:"POST",body:JSON.stringify(hostAuthBody())});
+    if(b.assignment){
+      $("assignmentId").value=b.assignment.assignmentId||"";
+      if(b.assignment.takeoverToken)$("takeoverToken").value=b.assignment.takeoverToken;
+    }
+    var visible=JSON.parse(JSON.stringify(b));
+    if(visible.assignment&&visible.assignment.takeoverToken)visible.assignment.takeoverToken="[stored in memory only]";
+    $("electionOut").textContent=JSON.stringify(visible,null,2);
+    setMsg(b.assignment?"Takeover assignment received.":"No takeover assignment.");
+  }catch(e){$("electionOut").textContent=redact(errMsg(e));setMsg(errMsg(e));}
+}
+
+async function takeoverAction(path,extra,verb){
+  if(!confirm(verb+" this fault-takeover assignment?")){setMsg(verb+" cancelled.");return;}
+  try{
+    setMsg(verb+" takeover...");
+    var body=hostAuthBody({
+      assignmentId:$("assignmentId").value,
+      takeoverToken:$("takeoverToken").value
+    });
+    var b=await api(path,{method:"POST",body:JSON.stringify(Object.assign(body,extra||{}))});
+    $("electionOut").textContent=JSON.stringify(b,null,2);
+    setMsg("Takeover "+verb.toLowerCase()+" completed.");
+  }catch(e){$("electionOut").textContent=redact(errMsg(e));setMsg(errMsg(e));}
+}
+
+function acceptTakeover(){return takeoverAction("/v1/hosts/takeover/accept",{},"Accept");}
+function completeTakeover(){return takeoverAction("/v1/hosts/takeover/complete",{},"Complete");}
+function failTakeover(){return takeoverAction("/v1/hosts/takeover/fail",{failureReason:$("takeoverFailureReason").value},"Fail");}
 
 function switchTab(name){
   var tabs=document.querySelectorAll(".tab");
@@ -700,7 +918,7 @@ document.getElementById("tabBar").addEventListener("click",function(e){
   var tab=e.target.closest(".tab");if(!tab)return;switchTab(tab.dataset.tab);
 });
 
-restoreLocal();refreshHealth();refreshStoragePanel();
+restoreLocal();checkLocalControlUrl();renderEvents();refreshHealth();refreshStoragePanel();
 </script>
 </body>
 </html>`;

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -243,6 +244,82 @@ func TestMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestManifestValidateEndpoint(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "test-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	manifestPath := filepath.Join("..", "manifest", "testdata", "valid", "world-snapshot.json")
+	body, err := json.Marshal(map[string]string{"path": manifestPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("POST", "http://"+srv.ListenAddr+"/v1/manifest/validate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result["ok"] != true || result["artifactId"] != "snap_valid_001" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestManifestValidateErrorDoesNotExposePath(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "test-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	secretPath := filepath.Join(t.TempDir(), "private-manifest.json")
+	if err := os.WriteFile(secretPath, []byte("{invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]string{"path": secretPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest("POST", "http://"+srv.ListenAddr+"/v1/manifest/validate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(responseBody), secretPath) {
+		t.Fatalf("response exposed manifest path: %s", responseBody)
+	}
+	if !strings.Contains(string(responseBody), "manifest_invalid") {
+		t.Fatalf("response = %s, want manifest_invalid", responseBody)
+	}
+}
+
 func TestMethodNotAllowed(t *testing.T) {
 	srv := NewServer("127.0.0.1:0", "test-token", nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -478,15 +555,15 @@ func TestServerStartUsesSharedProcessLock(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", resp.StatusCode)
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
 	}
 	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	if result["code"] != "server_start_failed" {
-		t.Fatalf("code = %q, want server_start_failed", result["code"])
+	if result["code"] != "server_state_blocked" {
+		t.Fatalf("code = %q, want server_state_blocked", result["code"])
 	}
 	if result["requestId"] == "" {
 		t.Fatal("expected requestId")
