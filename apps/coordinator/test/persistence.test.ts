@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { loadState, saveState } from "../src/persistence.js";
 import {
@@ -12,8 +14,8 @@ import {
   type LatestLocalArtifacts,
 } from "../src/store.js";
 
-function testDir() {
-  return path.join(path.dirname(new URL(import.meta.url).pathname), ".tmp-persistence");
+function localPathFromFileUrl(url: URL) {
+  return fileURLToPath(url);
 }
 
 function stateFilePath(dir: string) {
@@ -21,10 +23,7 @@ function stateFilePath(dir: string) {
 }
 
 async function createTempDir() {
-  const dir = testDir();
-  await rm(dir, { recursive: true, force: true });
-  await mkdir(dir, { recursive: true });
-  return dir;
+  return mkdtemp(path.join(os.tmpdir(), "acbh-persistence-"));
 }
 
 function testClock(iso: string) {
@@ -52,6 +51,19 @@ async function saveAndReload(dir: string, store: InMemoryCoordinatorStore): Prom
   assert.ok(snapshot !== null, "snapshot should not be null after save");
   return InMemoryCoordinatorStore.fromSnapshot(snapshot!);
 }
+
+test("converts file URLs to native local paths", () => {
+  const localPath = localPathFromFileUrl(new URL(import.meta.url));
+  assert.equal(path.isAbsolute(localPath), true);
+
+  if (process.platform === "win32") {
+    assert.match(localPath, /^[A-Za-z]:\\/);
+    assert.doesNotMatch(localPath, /^[/\\][A-Za-z]:/);
+
+    const statePath = stateFilePath(path.dirname(localPath));
+    assert.doesNotMatch(statePath, /^[A-Za-z]:\\[A-Za-z]:/);
+  }
+});
 
 test("starts empty when state file does not exist", async () => {
   const dir = await createTempDir();
