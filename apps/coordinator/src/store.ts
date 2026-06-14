@@ -944,23 +944,35 @@ export class InMemoryCoordinatorStore {
     hostToken: string;
     currentHostGeneration?: number;
   }): ArtifactMetadata {
+    this.authorizeArtifactPublish(input);
+    return this.recordArtifact(input.metadata);
+  }
+
+  authorizeArtifactPublish(input: {
+    metadata: Pick<ArtifactMetadata, "groupId" | "creatorHostId">;
+    hostId: string;
+    hostToken: string;
+    currentHostGeneration?: number;
+  }): void {
     const group = this.requireGroup(input.metadata.groupId);
     const host = this.requireHost(group, input.hostId);
     this.verifyHostToken(host, input.hostToken);
 
-    if (group.currentHostId !== null) {
-      if (input.hostId !== group.currentHostId) {
-        throw new StoreError(403, "Only the current host may publish artifacts");
-      }
-      if (input.currentHostGeneration === undefined) {
-        throw new StoreError(400, "Host generation header is required when a current host is set");
-      }
-      if (input.currentHostGeneration !== group.currentHostGeneration) {
-        throw new StoreError(409, "Host generation is stale; current host may have changed");
-      }
+    if (input.metadata.creatorHostId !== input.hostId) {
+      throw new StoreError(403, "Manifest creatorHostId must match the authenticated host");
     }
-
-    return this.recordArtifact(input.metadata);
+    if (group.currentHostId === null) {
+      return;
+    }
+    if (input.hostId !== group.currentHostId) {
+      throw new StoreError(403, "Only the current host may publish artifacts");
+    }
+    if (input.currentHostGeneration === undefined) {
+      throw new StoreError(400, "Host generation header is required when a current host is set");
+    }
+    if (input.currentHostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Host generation is stale; current host may have changed");
+    }
   }
 
   async gcArtifacts(input: {

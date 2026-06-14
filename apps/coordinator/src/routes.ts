@@ -338,12 +338,24 @@ export async function registerRoutes(
     }
 
     return handleStoreCall(reply, () => {
-      store.verifyHost(body);
+      const uploadedManifest = body.manifest as unknown as ArtifactManifest;
+      const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
+      const publishAuth = {
+        metadata: {
+          groupId: body.groupId,
+          creatorHostId: uploadedManifest.creatorHostId,
+        },
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        currentHostGeneration: hostGeneration ?? undefined,
+      };
+
+      store.authorizeArtifactPublish(publishAuth);
 
       if (
-        body.manifest.groupId !== body.groupId ||
-        body.manifest.artifactKind !== body.artifactKind ||
-        body.manifest.artifactId !== body.artifactId
+        uploadedManifest.groupId !== body.groupId ||
+        uploadedManifest.artifactKind !== body.artifactKind ||
+        uploadedManifest.artifactId !== body.artifactId
       ) {
         return reply.code(400).send({
           error: "Bad Request",
@@ -356,7 +368,21 @@ export async function registerRoutes(
           message: "serverPackVersion is required for world-snapshot artifacts",
         });
       }
-      const uploadedManifest = body.manifest as unknown as ArtifactManifest;
+      const metadata = {
+        groupId: body.groupId,
+        artifactKind: body.artifactKind,
+        artifactId: body.artifactId,
+        parentArtifactId: uploadedManifest.parentArtifactId ?? null,
+        serverPackVersion:
+          uploadedManifest.serverPackVersion ?? (body.artifactKind === "server-pack" ? body.artifactId : null),
+        creatorHostId: uploadedManifest.creatorHostId,
+        createdAt: uploadedManifest.createdAt,
+        status: "available" as const,
+        manifestSha256: sha256(Buffer.from(JSON.stringify(uploadedManifest), "utf8")),
+        manifestObjectPath: manifestStorageKey(body.groupId, body.artifactKind, body.artifactId),
+        fileCount: countIncludedFiles(uploadedManifest),
+        totalBytes: totalManifestBytes(uploadedManifest),
+      };
 
       return handleStorageCall(reply, async () => {
         for (const file of uploadedManifest.files ?? []) {
@@ -380,36 +406,16 @@ export async function registerRoutes(
           artifactKind: body.artifactKind,
           artifactId: body.artifactId,
           manifest: uploadedManifest,
+          beforeCommit: () => store.authorizeArtifactPublish(publishAuth),
         });
 
-        const manifestSha256 = sha256(Buffer.from(JSON.stringify(uploadedManifest), "utf8"));
-        const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
-        const metadata = store.recordArtifactFromHost({
-          metadata: {
-            groupId: body.groupId,
-            artifactKind: body.artifactKind,
-            artifactId: body.artifactId,
-            parentArtifactId: uploadedManifest.parentArtifactId ?? null,
-            serverPackVersion:
-              uploadedManifest.serverPackVersion ?? (body.artifactKind === "server-pack" ? body.artifactId : null),
-            creatorHostId: uploadedManifest.creatorHostId,
-            createdAt: uploadedManifest.createdAt,
-            status: "available",
-            manifestSha256,
-            manifestObjectPath: manifestStorageKey(body.groupId, body.artifactKind, body.artifactId),
-            fileCount: countIncludedFiles(uploadedManifest),
-            totalBytes: totalManifestBytes(uploadedManifest),
-          },
-          hostId: body.hostId,
-          hostToken: body.hostToken,
-          currentHostGeneration: hostGeneration ?? undefined,
-        });
+        const recorded = store.recordArtifact(metadata);
 
         return {
           ok: true,
-          artifactKind: metadata.artifactKind,
-          artifactId: metadata.artifactId,
-          status: metadata.status,
+          artifactKind: recorded.artifactKind,
+          artifactId: recorded.artifactId,
+          status: recorded.status,
         };
       });
     });
@@ -951,6 +957,12 @@ async function handleStorageCall<T>(
   try {
     return await call();
   } catch (error) {
+    if (error instanceof StoreError) {
+      return reply.code(error.statusCode).send({
+        error: statusText(error.statusCode),
+        message: error.message,
+      });
+    }
     if (error instanceof StorageError) {
       const statusCode =
         error instanceof StorageObjectTooLargeError
