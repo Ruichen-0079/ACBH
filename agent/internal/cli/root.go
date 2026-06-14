@@ -75,6 +75,7 @@ func newServerCmd() *cobra.Command {
 		newServerStartCmd(),
 		newServerStopCmd(),
 		newServerStatusCmd(),
+		newServerRepairStateCmd(),
 		newServerSuperviseCmd(),
 	)
 	return cmd
@@ -116,6 +117,19 @@ func newServerStatusCmd() *cobra.Command {
 	}
 }
 
+func newServerRepairStateCmd() *cobra.Command {
+	var serverDir string
+	cmd := &cobra.Command{
+		Use:   "repair-state",
+		Short: "Remove stale server state only after recorded processes are confirmed stopped",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServerRepairState(cmd, serverDir)
+		},
+	}
+	cmd.Flags().StringVar(&serverDir, "server-dir", "", "Expected Minecraft server directory")
+	return cmd
+}
+
 func newServerSuperviseCmd() *cobra.Command {
 	var opts serverSupervisorOptions
 	cmd := &cobra.Command{
@@ -130,6 +144,7 @@ func newServerSuperviseCmd() *cobra.Command {
 					RuntimeDir:  opts.runtimeDir,
 					StopTimeout: opts.stopTimeout,
 				},
+				LockNonce: opts.lockNonce,
 			})
 		},
 	}
@@ -138,10 +153,12 @@ func newServerSuperviseCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.logDir, "log-dir", "", "")
 	cmd.Flags().StringVar(&opts.runtimeDir, "runtime-dir", "", "")
 	cmd.Flags().DurationVar(&opts.stopTimeout, "stop-timeout", defaultServerStopTimeout, "")
+	cmd.Flags().StringVar(&opts.lockNonce, "lock-nonce", "", "")
 	_ = cmd.MarkFlagRequired("server-dir")
 	_ = cmd.MarkFlagRequired("command")
 	_ = cmd.MarkFlagRequired("log-dir")
 	_ = cmd.MarkFlagRequired("runtime-dir")
+	_ = cmd.MarkFlagRequired("lock-nonce")
 	return cmd
 }
 
@@ -536,6 +553,7 @@ type serverStartOptions struct {
 type serverSupervisorOptions struct {
 	serverStartOptions
 	runtimeDir string
+	lockNonce  string
 }
 
 func runServerStart(ctx context.Context, cmd *cobra.Command, opts serverStartOptions) error {
@@ -588,12 +606,40 @@ func runServerStatus(cmd *cobra.Command) error {
 		fmt.Fprintln(cmd.OutOrStdout(), "Server status: running")
 		printServerState(cmd, status.State)
 	case status.Stale:
-		fmt.Fprintln(cmd.OutOrStdout(), "Server status: stale")
-		fmt.Fprintf(cmd.OutOrStdout(), "Recorded PID: %d\n", status.State.PID)
-		fmt.Fprintln(cmd.OutOrStdout(), "The supervisor cannot be verified; no process was signaled.")
+		if status.Unknown {
+			fmt.Fprintln(cmd.OutOrStdout(), "Server status: unknown")
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout(), "Server status: stale")
+		}
+		if status.State.PID > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "Recorded PID: %d\n", status.State.PID)
+		} else if status.Lock.PID > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "Lock owner PID: %d\n", status.Lock.PID)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%s\n", status.Reason)
+		fmt.Fprintln(cmd.OutOrStdout(), "Start is blocked. Run `acbh-agent server repair-state` only after confirming the server is stopped.")
 	default:
 		fmt.Fprintln(cmd.OutOrStdout(), "Server status: stopped")
 	}
+	return nil
+}
+
+func runServerRepairState(cmd *cobra.Command, serverDir string) error {
+	runtimeDir, err := defaultServerRuntimeDir()
+	if err != nil {
+		return err
+	}
+	result, err := mcserver.RepairState(runtimeDir, serverDir)
+	if err != nil {
+		return err
+	}
+	if !result.Repaired {
+		fmt.Fprintln(cmd.OutOrStdout(), "No server state or process lock needs repair.")
+		return nil
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "Server state repaired.")
+	fmt.Fprintf(cmd.OutOrStdout(), "Removed state: %t\n", result.RemovedState)
+	fmt.Fprintf(cmd.OutOrStdout(), "Removed lock: %t\n", result.RemovedLock)
 	return nil
 }
 

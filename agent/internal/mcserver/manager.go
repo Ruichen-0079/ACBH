@@ -22,6 +22,11 @@ const (
 	controlTimeout      = 2 * time.Second
 )
 
+var processInspector = inspectProcess
+var newSupervisorCommand = func(executable string, args ...string) *exec.Cmd {
+	return exec.Command(executable, args...)
+}
+
 type StartOptions struct {
 	ServerDir   string
 	Command     string
@@ -33,13 +38,31 @@ type StartOptions struct {
 type SupervisorOptions struct {
 	StartOptions
 	ReadyWriter io.Writer
+	LockNonce   string
 }
 
 type Status struct {
 	Running bool
 	Stale   bool
+	Unknown bool
+	Reason  string
 	State   State
+	Lock    ProcessLock
 }
+
+type RepairResult struct {
+	Repaired     bool
+	RemovedState bool
+	RemovedLock  bool
+}
+
+type processState uint8
+
+const (
+	processUnknown processState = iota
+	processAlive
+	processDead
+)
 
 type controlRequest struct {
 	Token  string `json:"token"`
@@ -57,17 +80,42 @@ func Start(ctx context.Context, executable string, opts StartOptions) (State, er
 	if err != nil {
 		return State{}, err
 	}
-	status, err := GetStatus(opts.RuntimeDir)
+	hostname, err := os.Hostname()
+	if err != nil {
+		return State{}, fmt.Errorf("get hostname for server lock: %w", err)
+	}
+	nonce, err := randomToken()
 	if err != nil {
 		return State{}, err
 	}
-	if status.Running {
-		return State{}, fmt.Errorf("server is already running with PID %d", status.State.PID)
+	lockPath := LockPath(opts.RuntimeDir)
+	if err := CreateLock(lockPath, ProcessLock{
+		PID:       os.Getpid(),
+		Hostname:  hostname,
+		CreatedAt: time.Now().UTC(),
+		ServerDir: opts.ServerDir,
+		Nonce:     nonce,
+		Owner:     "starter",
+	}); err != nil {
+		return State{}, fmt.Errorf("%w; run `acbh-agent server repair-state` only after confirming the old server is stopped", err)
 	}
-	if status.Stale {
-		if err := DeleteState(StatePath(opts.RuntimeDir)); err != nil {
-			return State{}, err
+	releaseReservation := true
+	defer func() {
+		if releaseReservation {
+			deleteLockWithRetry(lockPath, nonce)
 		}
+	}()
+
+	existingState, stateErr := LoadState(StatePath(opts.RuntimeDir))
+	if stateErr == nil {
+		resp, controlErr := sendControl(existingState, "status")
+		if controlErr == nil && resp.OK && resp.Running {
+			return State{}, fmt.Errorf("server is already running with PID %d", existingState.PID)
+		}
+		return State{}, errors.New("server state is stale or cannot be verified; refusing to start until `acbh-agent server repair-state` succeeds")
+	}
+	if !errors.Is(stateErr, ErrStateNotFound) {
+		return State{}, fmt.Errorf("server state cannot be read; refusing to start until it is repaired: %w", stateErr)
 	}
 
 	args := []string{
@@ -77,8 +125,9 @@ func Start(ctx context.Context, executable string, opts StartOptions) (State, er
 		"--log-dir", opts.LogDir,
 		"--runtime-dir", opts.RuntimeDir,
 		"--stop-timeout", opts.StopTimeout.String(),
+		"--lock-nonce", nonce,
 	}
-	cmd := exec.Command(executable, args...)
+	cmd := newSupervisorCommand(executable, args...)
 	configureDetachedProcess(cmd)
 	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
@@ -91,6 +140,7 @@ func Start(ctx context.Context, executable string, opts StartOptions) (State, er
 	if err := cmd.Start(); err != nil {
 		return State{}, fmt.Errorf("start server supervisor: %w", err)
 	}
+	releaseReservation = false
 	_ = cmd.Process.Release()
 
 	deadline := time.Now().Add(defaultStartTimeout)
@@ -113,6 +163,21 @@ func RunSupervisor(ctx context.Context, opts SupervisorOptions) error {
 	if err != nil {
 		return err
 	}
+	lockPath := LockPath(normalized.RuntimeDir)
+	lock, err := LoadLock(lockPath)
+	if err != nil {
+		return fmt.Errorf("load server process lock: %w", err)
+	}
+	if opts.LockNonce == "" || lock.Nonce != opts.LockNonce || lock.ServerDir != normalized.ServerDir {
+		return errors.New("server process lock ownership could not be verified")
+	}
+	lock.PID = os.Getpid()
+	lock.Owner = "supervisor"
+	if err := SaveLock(lockPath, lock); err != nil {
+		return err
+	}
+	defer deleteLockWithRetry(lockPath, opts.LockNonce)
+
 	args, err := ParseCommand(normalized.Command)
 	if err != nil {
 		return err
@@ -174,7 +239,7 @@ func RunSupervisor(ctx context.Context, opts SupervisorOptions) error {
 		_ = serverCmd.Wait()
 		return err
 	}
-	defer DeleteState(statePath)
+	defer deleteStateWithRetry(statePath)
 	if opts.ReadyWriter != nil {
 		_, _ = fmt.Fprintln(opts.ReadyWriter, "ready")
 	}
@@ -228,16 +293,150 @@ func Stop(runtimeDir string) (State, bool, error) {
 func GetStatus(runtimeDir string) (Status, error) {
 	state, err := LoadState(StatePath(runtimeDir))
 	if errors.Is(err, ErrStateNotFound) {
-		return Status{}, nil
+		lock, lockErr := LoadLock(LockPath(runtimeDir))
+		if errors.Is(lockErr, ErrStateNotFound) {
+			return Status{}, nil
+		}
+		if lockErr != nil {
+			return Status{Stale: true, Unknown: true, Reason: lockErr.Error()}, nil
+		}
+		return Status{
+			Stale:   true,
+			Unknown: processInspector(lock.PID) == processUnknown,
+			Reason:  "server process lock exists without a verifiable running state",
+			Lock:    lock,
+		}, nil
 	}
 	if err != nil {
-		return Status{}, err
+		return Status{Stale: true, Unknown: true, Reason: err.Error()}, nil
 	}
 	resp, err := sendControl(state, "status")
 	if err != nil || !resp.OK || !resp.Running {
-		return Status{Stale: true, State: state}, nil
+		processCheck := processInspector(state.SupervisorPID)
+		return Status{
+			Stale:   true,
+			Unknown: processCheck != processDead,
+			Reason:  "server supervisor cannot be verified",
+			State:   state,
+		}, nil
 	}
 	return Status{Running: true, State: state}, nil
+}
+
+func RepairState(runtimeDir string, expectedServerDir ...string) (RepairResult, error) {
+	statePath := StatePath(runtimeDir)
+	lockPath := LockPath(runtimeDir)
+	state, stateErr := LoadState(statePath)
+	lock, lockErr := LoadLock(lockPath)
+	if errors.Is(stateErr, ErrStateNotFound) && errors.Is(lockErr, ErrStateNotFound) {
+		return RepairResult{}, nil
+	}
+	if stateErr != nil && !errors.Is(stateErr, ErrStateNotFound) {
+		return RepairResult{}, fmt.Errorf("cannot repair unreadable server state automatically: %w", stateErr)
+	}
+	if lockErr != nil && !errors.Is(lockErr, ErrStateNotFound) {
+		return RepairResult{}, fmt.Errorf("cannot repair unreadable server lock automatically: %w", lockErr)
+	}
+	if stateErr == nil && (state.PID <= 0 || state.SupervisorPID <= 0 || strings.TrimSpace(state.ServerDir) == "") {
+		return RepairResult{}, errors.New("cannot repair incomplete server state because recorded processes cannot be verified")
+	}
+	if len(expectedServerDir) > 0 && strings.TrimSpace(expectedServerDir[0]) != "" {
+		expected, err := filepath.Abs(expectedServerDir[0])
+		if err != nil {
+			return RepairResult{}, fmt.Errorf("resolve expected server directory: %w", err)
+		}
+		if stateErr == nil && !samePath(state.ServerDir, expected) {
+			return RepairResult{}, errors.New("refusing to repair state for a different server directory")
+		}
+		if lockErr == nil && !samePath(lock.ServerDir, expected) {
+			return RepairResult{}, errors.New("refusing to repair lock for a different server directory")
+		}
+	}
+
+	if stateErr == nil {
+		for _, pid := range []int{state.SupervisorPID, state.PID} {
+			switch processInspector(pid) {
+			case processAlive:
+				return RepairResult{}, fmt.Errorf("refusing to repair state because PID %d is still running", pid)
+			case processUnknown:
+				return RepairResult{}, fmt.Errorf("refusing to repair state because PID %d cannot be verified", pid)
+			}
+		}
+	}
+	if lockErr == nil {
+		hostname, err := os.Hostname()
+		if err != nil || !strings.EqualFold(lock.Hostname, hostname) {
+			return RepairResult{}, errors.New("refusing to repair lock because its owner host cannot be verified")
+		}
+		switch processInspector(lock.PID) {
+		case processAlive:
+			return RepairResult{}, fmt.Errorf("refusing to repair lock because PID %d is still running", lock.PID)
+		case processUnknown:
+			return RepairResult{}, fmt.Errorf("refusing to repair lock because PID %d cannot be verified", lock.PID)
+		}
+	}
+
+	result := RepairResult{Repaired: true}
+	if stateErr == nil {
+		if err := DeleteState(statePath); err != nil {
+			return RepairResult{}, err
+		}
+		result.RemovedState = true
+	}
+	if lockErr == nil {
+		if err := DeleteLock(lockPath); err != nil {
+			return RepairResult{}, err
+		}
+		result.RemovedLock = true
+	}
+	return result, nil
+}
+
+func samePath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	if filepath.Separator == '\\' {
+		return strings.EqualFold(filepath.Clean(leftAbs), filepath.Clean(rightAbs))
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs)
+}
+
+func deleteLockIfNonce(path, nonce string) error {
+	lock, err := LoadLock(path)
+	if errors.Is(err, ErrStateNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if lock.Nonce != nonce {
+		return errors.New("server process lock ownership changed")
+	}
+	return DeleteLock(path)
+}
+
+func deleteStateWithRetry(path string) {
+	retryRuntimeCleanup(func() error { return DeleteState(path) })
+}
+
+func deleteLockWithRetry(path, nonce string) {
+	retryRuntimeCleanup(func() error { return deleteLockIfNonce(path, nonce) })
+}
+
+func retryRuntimeCleanup(remove func() error) {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := remove(); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func normalizeStartOptions(opts StartOptions) (StartOptions, error) {

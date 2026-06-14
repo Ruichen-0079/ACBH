@@ -183,11 +183,12 @@ go run . server start \
 
 go run . server status
 go run . server stop
+go run . server repair-state --server-dir /path/to/server
 ```
 
-`server start` launches a detached local supervisor, records runtime state under `<user config dir>/acbh/runtime/server-state.json`, and appends stdout and stderr to separate log files. The default log directory is `<user config dir>/acbh/logs`.
+`server start` first acquires an exclusive process lock under `<user config dir>/acbh/runtime`, then launches a detached local supervisor, records runtime state in `server-state.json`, and appends stdout and stderr to separate log files. Concurrent starts fail instead of launching a second Java process. The default log directory is `<user config dir>/acbh/logs`.
 
-`server stop` asks the verified supervisor to write `stop` to the child process stdin, waits for the configured timeout, and then kills the child if it has not exited. A stale state file is reported without signaling its recorded PID. Logs are append-only and may grow until the user rotates or removes them.
+`server stop` asks the verified supervisor to write `stop` to the child process stdin, waits for the configured timeout, and then kills the child if it has not exited. Stale or unverifiable state and lock files block new starts by default. `server repair-state` removes them only when all recorded local processes can be confirmed stopped; it never kills a process. Logs are append-only and may grow until the user rotates or removes them.
 
 Launch commands are parsed into an executable and arguments without a shell. Shell operators such as pipes and redirection are not supported. Server process control is local-only; it does not elect a host, perform automatic takeover, send heartbeats, or run artifact synchronization.
 

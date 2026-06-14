@@ -3,8 +3,11 @@ package mcserver
 import (
 	"bufio"
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -78,7 +81,7 @@ func TestSupervisorGracefulStopCreatesLogsAndClearsState(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- RunSupervisor(context.Background(), SupervisorOptions{
+		done <- runTestSupervisor(context.Background(), SupervisorOptions{
 			StartOptions: StartOptions{
 				ServerDir:   serverDir,
 				Command:     command,
@@ -122,7 +125,7 @@ func TestSupervisorForcedKillFallback(t *testing.T) {
 	command := helperCommand(t, "ignore")
 	done := make(chan error, 1)
 	go func() {
-		done <- RunSupervisor(context.Background(), SupervisorOptions{
+		done <- runTestSupervisor(context.Background(), SupervisorOptions{
 			StartOptions: StartOptions{
 				ServerDir:   serverDir,
 				Command:     command,
@@ -152,7 +155,7 @@ func TestStopWaitsForConfiguredGracefulTimeout(t *testing.T) {
 	command := helperCommand(t, "slow")
 	done := make(chan error, 1)
 	go func() {
-		done <- RunSupervisor(context.Background(), SupervisorOptions{
+		done <- runTestSupervisor(context.Background(), SupervisorOptions{
 			StartOptions: StartOptions{
 				ServerDir:   serverDir,
 				Command:     command,
@@ -201,6 +204,228 @@ func TestStatusMissingAndStaleState(t *testing.T) {
 	}
 }
 
+func TestProcessLockAllowsOnlyOneConcurrentOwner(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	lockPath := LockPath(runtimeDir)
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	serverDirs := []string{t.TempDir(), t.TempDir()}
+	for i := 0; i < 2; i++ {
+		go func(index int) {
+			<-start
+			results <- CreateLock(lockPath, ProcessLock{
+				PID:       os.Getpid(),
+				Hostname:  hostname,
+				CreatedAt: time.Now().UTC(),
+				ServerDir: serverDirs[index],
+				Nonce:     fmt.Sprintf("nonce-%d", index),
+				Owner:     "starter",
+			})
+		}(i)
+	}
+	close(start)
+	var successes int
+	for i := 0; i < 2; i++ {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful lock acquisitions = %d, want 1", successes)
+	}
+	if _, err := LoadLock(lockPath); err != nil {
+		t.Fatalf("LoadLock() error = %v", err)
+	}
+}
+
+func TestStartFailsClosedForExistingStateAndLock(t *testing.T) {
+	serverDir := t.TempDir()
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	opts := StartOptions{
+		ServerDir:   serverDir,
+		Command:     helperCommand(t, "graceful"),
+		LogDir:      filepath.Join(t.TempDir(), "logs"),
+		RuntimeDir:  runtimeDir,
+		StopTimeout: time.Second,
+	}
+	if err := SaveState(StatePath(runtimeDir), State{
+		PID:           999998,
+		SupervisorPID: 999999,
+		ServerDir:     serverDir,
+		ControlAddr:   "127.0.0.1:1",
+		ControlToken:  "stale",
+		StopTimeout:   "1s",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Start(context.Background(), os.Args[0], opts); err == nil || !strings.Contains(err.Error(), "repair-state") {
+		t.Fatalf("Start(stale state) error = %v", err)
+	}
+	if _, err := LoadState(StatePath(runtimeDir)); err != nil {
+		t.Fatalf("stale state was removed: %v", err)
+	}
+
+	if err := DeleteState(StatePath(runtimeDir)); err != nil {
+		t.Fatal(err)
+	}
+	hostname, _ := os.Hostname()
+	if err := CreateLock(LockPath(runtimeDir), ProcessLock{
+		PID: os.Getpid(), Hostname: hostname, CreatedAt: time.Now().UTC(),
+		ServerDir: serverDir, Nonce: "existing-lock", Owner: "supervisor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Start(context.Background(), os.Args[0], opts); err == nil || !strings.Contains(err.Error(), "process lock already exists") {
+		t.Fatalf("Start(existing lock) error = %v", err)
+	}
+}
+
+func TestConcurrentStartAllowsOneInstanceAndStopAllowsRestart(t *testing.T) {
+	installTestSupervisorLauncher(t)
+	serverDir := t.TempDir()
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	opts := StartOptions{
+		ServerDir:   serverDir,
+		Command:     helperCommand(t, "graceful"),
+		LogDir:      filepath.Join(t.TempDir(), "logs"),
+		RuntimeDir:  runtimeDir,
+		StopTimeout: time.Second,
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		state State
+		err   error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			state, err := Start(context.Background(), os.Args[0], opts)
+			results <- result{state: state, err: err}
+		}()
+	}
+	close(start)
+
+	var succeeded State
+	var successes, failures int
+	for i := 0; i < 2; i++ {
+		got := <-results
+		if got.err == nil {
+			successes++
+			succeeded = got.state
+		} else {
+			failures++
+			if !strings.Contains(got.err.Error(), "process lock already exists") {
+				t.Fatalf("losing Start() error = %v", got.err)
+			}
+		}
+	}
+	if successes != 1 || failures != 1 {
+		t.Fatalf("concurrent Start() successes=%d failures=%d", successes, failures)
+	}
+	stored, err := LoadState(StatePath(runtimeDir))
+	if err != nil {
+		t.Fatalf("LoadState() error = %v", err)
+	}
+	if stored.PID != succeeded.PID {
+		t.Fatalf("stored PID=%d, successful PID=%d", stored.PID, succeeded.PID)
+	}
+
+	if _, stopped, err := Stop(runtimeDir); err != nil || !stopped {
+		t.Fatalf("Stop() stopped=%t error=%v", stopped, err)
+	}
+	waitForRuntimeRemoval(t, runtimeDir)
+
+	restarted, err := Start(context.Background(), os.Args[0], opts)
+	if err != nil {
+		t.Fatalf("Start(after stop) error = %v", err)
+	}
+	if restarted.PID <= 0 {
+		t.Fatalf("restarted PID = %d", restarted.PID)
+	}
+	if _, stopped, err := Stop(runtimeDir); err != nil || !stopped {
+		t.Fatalf("Stop(restarted) stopped=%t error=%v", stopped, err)
+	}
+	waitForRuntimeRemoval(t, runtimeDir)
+}
+
+func TestRepairStateOnlyRemovesConfirmedDeadProcesses(t *testing.T) {
+	oldInspector := processInspector
+	t.Cleanup(func() { processInspector = oldInspector })
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	serverDir := t.TempDir()
+	hostname, _ := os.Hostname()
+	writeStateAndLock := func() {
+		t.Helper()
+		if err := SaveState(StatePath(runtimeDir), State{
+			PID: 101, SupervisorPID: 102, ServerDir: serverDir,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := CreateLock(LockPath(runtimeDir), ProcessLock{
+			PID: 102, Hostname: hostname, CreatedAt: time.Now().UTC(),
+			ServerDir: serverDir, Nonce: "repair", Owner: "supervisor",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeStateAndLock()
+	processInspector = func(int) processState { return processAlive }
+	if _, err := RepairState(runtimeDir); err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("RepairState(alive) error = %v", err)
+	}
+	if _, err := LoadState(StatePath(runtimeDir)); err != nil {
+		t.Fatalf("live state was removed: %v", err)
+	}
+
+	processInspector = func(int) processState { return processUnknown }
+	if _, err := RepairState(runtimeDir); err == nil || !strings.Contains(err.Error(), "cannot be verified") {
+		t.Fatalf("RepairState(unknown) error = %v", err)
+	}
+	if _, err := LoadState(StatePath(runtimeDir)); err != nil {
+		t.Fatalf("unknown state was removed: %v", err)
+	}
+
+	processInspector = func(int) processState { return processDead }
+	result, err := RepairState(runtimeDir)
+	if err != nil {
+		t.Fatalf("RepairState(dead) error = %v", err)
+	}
+	if !result.Repaired || !result.RemovedState || !result.RemovedLock {
+		t.Fatalf("RepairState(dead) = %#v", result)
+	}
+	if _, err := LoadState(StatePath(runtimeDir)); !errors.Is(err, ErrStateNotFound) {
+		t.Fatalf("state still exists: %v", err)
+	}
+}
+
+func TestStatusReportsUnknownForUnverifiableLock(t *testing.T) {
+	oldInspector := processInspector
+	t.Cleanup(func() { processInspector = oldInspector })
+	processInspector = func(int) processState { return processUnknown }
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	hostname, _ := os.Hostname()
+	if err := CreateLock(LockPath(runtimeDir), ProcessLock{
+		PID: 777, Hostname: hostname, CreatedAt: time.Now().UTC(),
+		ServerDir: t.TempDir(), Nonce: "unknown", Owner: "supervisor",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := GetStatus(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Stale || !status.Unknown || status.Running || status.Lock.PID != 777 {
+		t.Fatalf("GetStatus(lock-only) = %#v", status)
+	}
+}
+
 func TestMCServerHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_MCSERVER_HELPER") != "1" {
 		return
@@ -230,6 +455,48 @@ func TestMCServerHelperProcess(t *testing.T) {
 		}
 	}
 	os.Exit(2)
+}
+
+func TestStartSupervisorProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_START_SUPERVISOR") != "1" {
+		return
+	}
+	separator := -1
+	for i, arg := range os.Args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 {
+		os.Exit(2)
+	}
+	args := os.Args[separator+1:]
+	if len(args) < 2 || args[0] != "server" || args[1] != "supervise" {
+		os.Exit(2)
+	}
+	flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
+	serverDir := flags.String("server-dir", "", "")
+	command := flags.String("command", "", "")
+	logDir := flags.String("log-dir", "", "")
+	runtimeDir := flags.String("runtime-dir", "", "")
+	stopTimeout := flags.Duration("stop-timeout", time.Second, "")
+	lockNonce := flags.String("lock-nonce", "", "")
+	if err := flags.Parse(args[2:]); err != nil {
+		os.Exit(2)
+	}
+	err := RunSupervisor(context.Background(), SupervisorOptions{
+		StartOptions: StartOptions{
+			ServerDir: *serverDir, Command: *command, LogDir: *logDir,
+			RuntimeDir: *runtimeDir, StopTimeout: *stopTimeout,
+		},
+		LockNonce: *lockNonce,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	os.Exit(0)
 }
 
 func helperCommand(t *testing.T, mode string) string {
@@ -264,6 +531,22 @@ func waitForStateRemoval(t *testing.T, runtimeDir string) {
 	t.Fatal("state file was not removed")
 }
 
+func waitForRuntimeRemoval(t *testing.T, runtimeDir string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastStateErr, lastLockErr error
+	for time.Now().Before(deadline) {
+		_, stateErr := LoadState(StatePath(runtimeDir))
+		_, lockErr := LoadLock(LockPath(runtimeDir))
+		lastStateErr, lastLockErr = stateErr, lockErr
+		if errors.Is(stateErr, ErrStateNotFound) && errors.Is(lockErr, ErrStateNotFound) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("state or process lock was not removed: state=%v lock=%v", lastStateErr, lastLockErr)
+}
+
 func readTestFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -271,4 +554,40 @@ func readTestFile(t *testing.T, path string) string {
 		t.Fatalf("ReadFile(%q) error = %v", path, err)
 	}
 	return string(data)
+}
+
+func runTestSupervisor(ctx context.Context, opts SupervisorOptions) error {
+	normalized, err := normalizeStartOptions(opts.StartOptions)
+	if err != nil {
+		return err
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return err
+	}
+	nonce := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	if err := CreateLock(LockPath(normalized.RuntimeDir), ProcessLock{
+		PID:       os.Getpid(),
+		Hostname:  hostname,
+		CreatedAt: time.Now().UTC(),
+		ServerDir: normalized.ServerDir,
+		Nonce:     nonce,
+		Owner:     "starter",
+	}); err != nil {
+		return err
+	}
+	opts.LockNonce = nonce
+	return RunSupervisor(ctx, opts)
+}
+
+func installTestSupervisorLauncher(t *testing.T) {
+	t.Helper()
+	old := newSupervisorCommand
+	t.Cleanup(func() { newSupervisorCommand = old })
+	newSupervisorCommand = func(_ string, args ...string) *exec.Cmd {
+		helperArgs := append([]string{"-test.run=TestStartSupervisorProcess", "--"}, args...)
+		cmd := exec.Command(os.Args[0], helperArgs...)
+		cmd.Env = append(os.Environ(), "GO_WANT_START_SUPERVISOR=1")
+		return cmd
+	}
 }

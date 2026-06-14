@@ -144,7 +144,7 @@ func TestRootIncludesArtifactAndServerCommands(t *testing.T) {
 			t.Fatalf("Find(%q) = %#v", name, found)
 		}
 	}
-	for _, name := range []string{"start", "stop", "status"} {
+	for _, name := range []string{"start", "stop", "status", "repair-state"} {
 		found, _, err := cmd.Find([]string{"server", name})
 		if err != nil {
 			t.Fatalf("Find(server %q) error = %v", name, err)
