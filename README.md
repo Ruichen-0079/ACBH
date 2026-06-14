@@ -50,6 +50,49 @@ A client-side daemon/CLI installed on candidate host devices. It downloads serve
 
 A content-addressed file store for server packs, snapshot manifests, and file blobs. V1 starts with local filesystem storage; S3-compatible storage can be added later.
 
+## Quick start
+
+```bash
+pnpm install
+pnpm dev:coordinator
+```
+
+In another terminal:
+
+```bash
+cd agent
+go run . --help
+go run . doctor
+```
+
+## Run tests
+
+```bash
+bash scripts/verify-all.sh       # Linux / Fedora / macOS
+powershell scripts/verify-all.ps1 # Windows
+```
+
+Or individually:
+
+```bash
+# Go
+cd agent && go vet ./... && go test ./... -count=1
+
+# Coordinator
+pnpm build:coordinator && pnpm --filter @acbh/coordinator test
+```
+
+## Run demo smoke
+
+```bash
+bash scripts/demo-smoke.sh
+```
+
+The demo runs build + health + group + host + heartbeat + scan + push + latest + pull
++ restore verify all locally. No real Minecraft or public network needed.
+
+See [docs/demo.md](docs/demo.md) for detailed walkthrough and troubleshooting.
+
 ## First local targets
 
 ```bash
@@ -387,17 +430,20 @@ It proves Host A timeout detection, Host B selection, one-time assignment accept
 
 ## Documentation
 
+- `docs/demo.md` — Local demo walkthrough and troubleshooting
+- `docs/security.md` — Security model
+- `docs/release-checklist.md` — Pre-release verification checklist
 - `docs/architecture.md`
 - `docs/dependency-plan.md`
 - `docs/mvp-scope.md`
 - `docs/sync-design.md`
 - `docs/election-design.md`
-- `docs/security.md`
 - `docs/codex-guide.md`
 
 ## V1 release
 
 - `docs/v1-release-checklist.md` — Smoke checklist for V1 release preparation
+- `docs/release-checklist.md` — Release readiness checklist
 - `docs/v1-release-notes.md` — V1 capabilities, security, limitations, next milestones
 - `docs/release-packaging.md` — How to build distributable Agent binaries
 - `docs/tunnel-protocol.md` — Relay and player proxy protocol details

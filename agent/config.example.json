@@ -1,0 +1,17 @@
+{
+  "coordinatorUrl": "http://127.0.0.1:6121",
+  "groupId": "grp_example",
+  "memberId": "mem_example",
+  "hostId": "host_example",
+  "hostToken": "change-me",
+  "displayName": "My Host",
+  "deviceName": "my-device",
+  "platform": "linux",
+  "agentVersion": "0.1.0",
+  "server": {
+    "dir": "/home/user/minecraft-server",
+    "command": "java -Xmx4G -Xms2G -jar fabric-server-launch.jar nogui",
+    "logDir": "logs",
+    "stopTimeout": "30s"
+  }
+}
