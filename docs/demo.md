@@ -1,201 +1,286 @@
 # ACBH Demo
 
-This guide covers how to run ACBH locally for development and demonstration purposes. No real Minecraft server, public network, or cloud service is required.
+This guide runs ACBH locally without a real Minecraft server, public network,
+domain, tunnel, or cloud service.
 
 ## Prerequisites
 
-| Tool | Min Version | Notes |
-|------|-------------|-------|
-| Go | 1.22+ | Agent compiler |
-| Node.js | 20+ | Coordinator runtime |
-| pnpm | 9+ | Package manager |
-| curl | any | HTTP client for demo |
+| Tool | Minimum | Purpose |
+|------|---------|---------|
+| Go | 1.22 | Agent build and tests |
+| Node.js | 20 | Coordinator runtime |
+| pnpm | 9 | Workspace package manager |
+| curl | any | CLI smoke HTTP checks |
 
 ### Fedora
 
 ```bash
 sudo dnf install golang nodejs curl
-npm install -g pnpm
-pnpm install
+corepack enable
+corepack pnpm install
 ```
 
 ### Windows
 
+Install Go and Node.js, open a new PowerShell window, then run:
+
 ```powershell
-# Install Go, Node.js, and pnpm from their official sites
-# Then:
-pnpm install
+corepack enable
+corepack pnpm install
 ```
 
-Build the agent:
+## Verify everything
+
+Fedora, macOS, or Git Bash:
 
 ```bash
-cd agent && go build -o acbh-agent . && cd ..
+bash scripts/verify-all.sh
 ```
 
-## Quick start
+Windows PowerShell:
 
-### 1. Start the Coordinator
-
-```bash
-# Default port 6121
-pnpm dev:coordinator
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify-all.ps1
 ```
 
-Or in production mode:
+The Coordinator suite should report at least 123 passing tests.
 
-```bash
-pnpm build:coordinator && pnpm --filter @acbh/coordinator start
-```
-
-### 2. Run the full Demo smoke
-
-The demo smoke script runs a complete closed loop without real Minecraft:
+## CLI demo smoke
 
 ```bash
 bash scripts/demo-smoke.sh
 ```
 
-This does: build → Coordinator start → health → create group → register host → heartbeat → scan manifest → push → check latest → pull → verify restored file → group state check → cleanup.
+The script builds Coordinator and Agent, starts Coordinator on a temporary
+loopback port, creates a group and host, sends a heartbeat, scans and validates
+a fake manifest, pushes and pulls an artifact, verifies the restored file,
+checks authenticated group state, and cleans up.
 
-## Agent configuration
+It uses a temporary `XDG_CONFIG_HOME` and Windows `APPDATA`. Curl request bodies
+and authentication headers are written to mode-restricted temporary files, not
+literal process arguments. The cleanup trap stops Coordinator and removes all
+temporary config, storage, logs, and restored files.
 
-Create a config file at `<user config dir>/acbh/config.yaml`:
+## Graphical Dashboard demo
 
-```json
-{
-  "coordinatorUrl": "http://127.0.0.1:6121",
-  "groupId": "grp_example",
-  "memberId": "mem_example",
-  "hostId": "host_example",
-  "hostToken": "change-me",
-  "displayName": "My Host",
-  "deviceName": "my-device",
-  "platform": "linux",
-  "agentVersion": "0.1.0",
-  "server": {
-    "dir": "/home/user/minecraft-server",
-    "command": "java -Xmx4G -Xms2G -jar fabric-server-launch.jar nogui",
-    "logDir": "logs",
-    "stopTimeout": "30s"
-  }
-}
+The existing Dashboard is served by Coordinator at
+`http://127.0.0.1:6121/dashboard`. Normal control actions are clickable. The
+command line is only needed to start local services and bootstrap Agent config.
+
+### 1. Start Coordinator
+
+Fedora:
+
+```bash
+corepack pnpm dev:coordinator
 ```
 
-A template is available at `agent/config.example.json`.
+Windows PowerShell:
 
-Save the file with restrictive permissions:
+```powershell
+corepack pnpm dev:coordinator
+```
+
+Open `http://127.0.0.1:6121/dashboard`. Confirm that Coordinator is online and
+Storage is ready.
+
+### 2. Create a group and exercise host registration
+
+1. Open **Coordinator**.
+2. Click **Create group**.
+3. Confirm that `groupId` and owner `memberId` are populated.
+4. The access key is masked and held in page memory only.
+5. Set device name and platform, then click **Register host**.
+6. Click **Send heartbeat** and **Load group state**.
+
+The state view shows current host, generation, hosts, score hints, and heartbeat
+timestamps without returning access keys or host tokens.
+
+### 3. Bootstrap the managed Agent host
+
+Local Control push and pull use the Agent config. Run login once with the access
+key in an environment variable. The key is not placed in argv.
+
+Fedora:
+
+```bash
+read -rsp "ACBH access key: " ACBH_ACCESS_KEY
+export ACBH_ACCESS_KEY
+echo
+cd agent
+go run . login \
+  --coordinator http://127.0.0.1:6121 \
+  --group-id <groupId> \
+  --name "Demo Host" \
+  --device-name demo-fedora \
+  --platform linux
+unset ACBH_ACCESS_KEY
+```
+
+Windows PowerShell:
+
+```powershell
+$secret = Read-Host "ACBH access key" -AsSecureString
+$env:ACBH_ACCESS_KEY = [System.Net.NetworkCredential]::new("", $secret).Password
+Set-Location agent
+go run . login --coordinator http://127.0.0.1:6121 --group-id <groupId> --name "Demo Host" --device-name demo-windows --platform windows
+Remove-Item Env:ACBH_ACCESS_KEY
+```
+
+Login writes the managed host ID and host token to
+`<user config dir>/acbh/config.yaml` with restrictive permissions. Enter those
+values in the Dashboard when using host-authenticated controls. They remain in
+page memory and are cleared by refresh or **Clear credentials**.
+
+### 4. Start and connect Local Control
+
+From `agent/`:
+
+```bash
+go run . control serve
+```
+
+Read the full token from `<user config dir>/acbh/control-token`, enter it in the
+Dashboard, and click **Connect local Agent**. The default URL is
+`http://127.0.0.1:6122`.
+
+Local Control is loopback-only by default. A non-loopback URL displays a
+prominent warning and requires an extra confirmation. Do not expose it to the
+public Internet.
+
+### 5. Create a fake server directory
+
+Fedora:
+
+```bash
+mkdir -p /tmp/acbh-gui-demo/world/region
+printf 'world-data\n' > /tmp/acbh-gui-demo/world/region/r.0.0.mca
+printf 'motd=ACBH demo\n' > /tmp/acbh-gui-demo/server.properties
+```
+
+Windows PowerShell:
+
+```powershell
+$demo = Join-Path $env:TEMP "acbh-gui-demo"
+New-Item -ItemType Directory -Force (Join-Path $demo "world\region") | Out-Null
+Set-Content (Join-Path $demo "world\region\r.0.0.mca") "world-data"
+Set-Content (Join-Path $demo "server.properties") "motd=ACBH demo"
+```
+
+Set **Server A** to that directory and **Server B** to a separate restore
+directory.
+
+### 6. Use the graphical controls
+
+In **Agent**:
+
+1. Click **View status**. No managed server should be running.
+2. Click **Scan server-pack**.
+3. Set the generated manifest path and click **Validate manifest**.
+4. Click **push server-pack**.
+5. Open **Artifacts** and click **Latest artifact**.
+6. Click **pull server-pack** and confirm the restore.
+
+`Start server` and `safe-sync world` require a real Java server and RCON
+endpoint. The fake-directory demo intentionally uses only status, manifest, and
+artifact operations.
+
+In **Election / Takeover**:
+
+1. Click **Refresh election status**.
+2. Use **Run election** or **Check timeout** only for fault-takeover testing.
+3. Poll, accept, complete, or fail an assignment with the confirmation dialogs.
+
+These actions are fault takeover, not an ordinary restart. The **Events** tab
+shows recent page-local status summaries after redacting current credential
+values.
+
+## Security defaults
+
+- Local Control binds to `127.0.0.1:6122`.
+- Remote binding requires `--allow-remote-control` and prints a warning.
+- Access keys, host tokens, Local Control tokens, takeover tokens, player
+  tokens, and RCON passwords are never stored in `localStorage`,
+  `sessionStorage`, IndexedDB, URL query strings, fragments, or console logs.
+- Secret inputs are masked and only reveal temporarily after an explicit click.
+- A page refresh clears credentials.
+- Stop, restore, and takeover actions require confirmation.
+- Server start uses structured `jvmArgs` and `serverArgs`.
+- Legacy `server.command` and `--command` remain compatibility paths.
+
+## Agent config
+
+The template is [`agent/config.example.json`](../agent/config.example.json).
+Use placeholders only in documentation and commit history. On Fedora, protect a
+real config with:
 
 ```bash
 chmod 600 ~/.config/acbh/config.yaml
+chmod 600 ~/.config/acbh/control-token
 ```
 
-On Windows, the config directory is `%AppData%/acbh/config.yaml`.
-
-## Server start (structured argv)
-
-The recommended way to start a server is through the Local Control API, which uses structured argv:
-
-```bash
-# Start the Agent local control server
-acbh-agent control serve
-```
-
-Then call with curl:
-
-```bash
-curl -X POST http://127.0.0.1:6122/v1/server/start \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <token>' \
-  -d '{
-    "serverDir": "/home/user/minecraft-server",
-    "javaPath": "java",
-    "jarPath": "fabric-server-launch.jar",
-    "jvmArgs": ["-Xmx4G", "-Xms2G"],
-    "serverArgs": ["nogui"]
-  }'
-```
-
-The legacy `--command` string format is still supported for backward compatibility:
-
-```bash
-acbh-agent server start --server-dir /path/to/server --command "java -Xmx4G -jar server.jar nogui"
-```
-
-## Local Control safety defaults
-
-- The local control API binds to `127.0.0.1:6122` by default.
-- Binding to a non-loopback address requires explicit `--allow-remote-control`.
-- All endpoints except `/health` require a bearer token.
-- The token is generated on first run and stored at `<user config dir>/acbh/control-token` with `0600` permissions.
-- The full token is never printed; only a masked version (`first4...last4`) is shown.
-
-## Dashboard credentials
-
-- The Dashboard at `/dashboard` does NOT store secrets in `localStorage`.
-- `accessKey`, `hostToken`, `agentToken`, and `rconPassword` exist in page memory only.
-- Use the `forgetSecrets` button to clear credentials.
-- Secret input fields use `type="password"` and `autocomplete="off"`.
+On Windows, the files are under `%AppData%\acbh`.
 
 ## Common issues
 
 ### Port occupied
 
-```
-Error: listen EADDRINUSE :::6121
-```
+Coordinator:
 
-Change the port: `PORT=6123 pnpm dev:coordinator` or `PORT=6123 pnpm build:coordinator && PORT=6123 pnpm --filter @acbh/coordinator start`.
-
-### Token invalid
-
-```
-{"ok":false,"error":"invalid token"}
+```text
+Error: listen EADDRINUSE
 ```
 
-Check the token file: `cat ~/.config/acbh/control-token`. Copy the full token value.
+Choose another port:
 
-### Local Control remote bind rejected
-
+```bash
+PORT=6123 corepack pnpm dev:coordinator
 ```
+
+Local Control reports its own listen failure. Stop the process using port 6122
+or pass another loopback address such as `--listen 127.0.0.1:6131`, then update
+the Dashboard URL.
+
+### Local Control token rejected
+
+Read the complete token from the token file. A 401 or 403 response clears the
+Dashboard token field and requires it to be entered again.
+
+### Remote Local Control rejected
+
+```text
 control: refusing non-loopback listen address
 ```
 
-Pass `--allow-remote-control` only if you understand the risk. The default is loopback-only for safety.
+This is the safe default. Use `--allow-remote-control` only on a trusted network
+after reviewing [security.md](security.md).
 
 ### Manifest validation failed
 
-```
-manifest file class is required
-```
+Use `acbh-agent scan` or the Dashboard scan button to generate a manifest.
+Validation enforces sorted files, safe paths, hashes, classes, artifact-kind
+compatibility, and summary counts.
 
-Manifests must include a `class` field for each file entry. Use the Go scanner (`acbh-agent scan`) to generate valid manifests. Manifests with `fileClass` (without `class`) are automatically normalized.
+### Windows path or command issue
 
-### Windows path issues
+Prefer the Dashboard structured server start fields. The legacy `--command`
+string requires quoting paths with spaces and cannot recover incorrectly split
+arguments.
 
-When using `--command` on Windows, paths containing spaces must be quoted:
+### Coordinator does not become healthy
 
-```powershell
-acbh-agent server start --server-dir C:\minecraft\server --command '"C:\Program Files\Java\bin\java.exe" -jar server.jar nogui'
-```
+`scripts/demo-smoke.sh` retries three temporary loopback ports. On failure it
+prints the last Coordinator log lines and exits non-zero. Check local firewall
+or endpoint-security rules if all attempts fail.
 
-The structured argv approach (via Local Control API) avoids this issue entirely.
-
-### Manifest schema fixtures
-
-To verify manifest validation across Go and TS:
+## Individual checks
 
 ```bash
-# Go side
-cd agent && go test ./internal/manifest/ -run TestFixtures -v
+cd agent
+go test ./... -count=1
+go vet ./...
 
-# TS side
-pnpm --filter @acbh/coordinator exec node --test --import tsx test/fixture.test.ts
-```
-
-## Running tests
-
-```bash
-bash scripts/verify-all.sh       # Linux/macOS
-powershell scripts/verify-all.ps1 # Windows
+cd ..
+corepack pnpm --filter @acbh/coordinator build
+corepack pnpm --filter @acbh/coordinator test
 ```

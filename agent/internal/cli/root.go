@@ -212,12 +212,11 @@ func newLoginCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&opts.coordinatorURL, "coordinator", "http://127.0.0.1:6121", "Coordinator base URL")
 	cmd.Flags().StringVar(&opts.groupID, "group-id", "", "Coordinator group ID")
-	cmd.Flags().StringVar(&opts.accessKey, "access-key", "", "One-time group access key")
+	cmd.Flags().StringVar(&opts.accessKey, "access-key", "", "One-time group access key (or set ACBH_ACCESS_KEY)")
 	cmd.Flags().StringVar(&opts.displayName, "name", "", "Member display name")
 	cmd.Flags().StringVar(&opts.deviceName, "device-name", "", "Local device name")
 	cmd.Flags().StringVar(&opts.platform, "platform", runtime.GOOS, "Host platform label")
 	_ = cmd.MarkFlagRequired("group-id")
-	_ = cmd.MarkFlagRequired("access-key")
 	_ = cmd.MarkFlagRequired("name")
 
 	return cmd
@@ -965,6 +964,11 @@ func resolveScanIdentity(groupID string, creatorHostID string) (string, string, 
 
 func runLogin(ctx context.Context, cmd *cobra.Command, opts loginOptions) error {
 	opts.coordinatorURL = strings.TrimRight(strings.TrimSpace(opts.coordinatorURL), "/")
+	accessKey, err := resolveLoginAccessKey(opts.accessKey)
+	if err != nil {
+		return err
+	}
+	opts.accessKey = accessKey
 	if opts.deviceName == "" {
 		hostname, err := os.Hostname()
 		if err != nil || hostname == "" {
@@ -1024,6 +1028,17 @@ func runLogin(ctx context.Context, cmd *cobra.Command, opts loginOptions) error 
 	fmt.Fprintf(cmd.OutOrStdout(), "Host ID: %s\n", registered.HostID)
 	fmt.Fprintf(cmd.OutOrStdout(), "Status: host token stored locally\n")
 	return nil
+}
+
+func resolveLoginAccessKey(flagValue string) (string, error) {
+	accessKey := strings.TrimSpace(flagValue)
+	if accessKey == "" {
+		accessKey = strings.TrimSpace(os.Getenv("ACBH_ACCESS_KEY"))
+	}
+	if accessKey == "" {
+		return "", errors.New("access key is required; pass --access-key or set ACBH_ACCESS_KEY")
+	}
+	return accessKey, nil
 }
 
 func runHeartbeat(ctx context.Context, cmd *cobra.Command, opts heartbeatOptions) error {

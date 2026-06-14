@@ -93,6 +93,34 @@ The demo runs build + health + group + host + heartbeat + scan + push + latest +
 
 See [docs/demo.md](docs/demo.md) for detailed walkthrough and troubleshooting.
 
+## Run the graphical demo
+
+Start the Coordinator, then open `http://127.0.0.1:6121/dashboard`:
+
+```bash
+pnpm dev:coordinator
+```
+
+The existing Dashboard can create a group, register a host, send heartbeats,
+inspect group/election state, connect to the loopback-only Local Control API,
+control a managed server, validate and transfer artifacts, and handle takeover
+actions. Credentials stay in page memory and are cleared on refresh. Follow the
+[graphical demo walkthrough](docs/demo.md#graphical-dashboard-demo) for the
+bootstrap steps and fake server directory.
+
+## Security defaults
+
+- Local Control binds to `127.0.0.1:6122`; remote binding requires explicit
+  opt-in and displays a warning.
+- Dashboard secrets are memory-only, masked by default, and cleared on refresh.
+- Recommended login and safe-sync commands use `ACBH_ACCESS_KEY` and
+  `ACBH_RCON_PASSWORD` instead of placing credentials in argv.
+- Manifest fencing, atomic commit, fail-closed GC, restore path hardening, and
+  server process locking remain enabled.
+
+Before delivery, follow the
+[release readiness checklist](docs/release-checklist.md).
+
 ## First local targets
 
 ```bash
@@ -114,44 +142,22 @@ Start the Coordinator:
 pnpm dev:coordinator
 ```
 
-Create a group. Save the returned `groupId`, `ownerMemberId`, and one-time `accessKey`:
+Create a group. Save the returned `groupId`, `ownerMemberId`, and one-time `accessKey`.
+Use a request file so JSON is not embedded in the curl process arguments:
 
 ```bash
+printf '%s\n' '{"name":"Survival Server","ownerName":"Owner"}' > group-request.json
 curl -s http://localhost:6121/v1/groups \
   -H "content-type: application/json" \
-  -d '{"name":"Survival Server","ownerName":"Owner"}'
+  --data-binary @group-request.json
+rm -f group-request.json
 ```
 
-Join the group with the one-time access key value:
-
-```bash
-curl -s http://localhost:6121/v1/groups/<groupId>/join \
-  -H "content-type: application/json" \
-  -d '{"accessKey":"<accessKey>","displayName":"PlayerA"}'
-```
-
-Register a host candidate device. Save the returned one-time `hostToken`:
-
-```bash
-curl -s http://localhost:6121/v1/hosts/register \
-  -H "content-type: application/json" \
-  -d '{"groupId":"<groupId>","accessKey":"<accessKey>","memberId":"<memberId>","deviceName":"PlayerA-PC","platform":"windows","agentVersion":"0.1.0"}'
-```
-
-Send a heartbeat:
-
-```bash
-curl -s http://localhost:6121/v1/hosts/heartbeat \
-  -H "content-type: application/json" \
-  -d '{"groupId":"<groupId>","hostId":"<hostId>","hostToken":"<hostToken>","status":"standby","latestLocalSnapshotId":null}'
-```
-
-Inspect debug state. This does not return access keys or host tokens:
-
-```bash
-curl -s http://localhost:6121/v1/groups/<groupId>/state \
-  -H "x-acbh-access-key: <accessKey>"
-```
+For join, host registration, heartbeat, and authenticated state requests, use
+the Dashboard or the protected header/body-file pattern in
+[`scripts/demo-smoke.sh`](scripts/demo-smoke.sh). Do not inline `accessKey`,
+`hostToken`, or bearer tokens in curl arguments. Group state responses never
+return access keys or host tokens.
 
 ## Agent CLI example
 
@@ -167,16 +173,22 @@ go run . doctor
 After creating a group with the Coordinator API, log in with the returned one-time access key:
 
 ```bash
+read -rsp "ACBH access key: " ACBH_ACCESS_KEY
+export ACBH_ACCESS_KEY
+echo
 go run . login \
   --coordinator http://localhost:6121 \
   --group-id <groupId> \
-  --access-key <accessKey> \
   --name PlayerA \
   --device-name PlayerA-PC \
   --platform windows
+unset ACBH_ACCESS_KEY
 ```
 
-The Agent stores config at `<user config dir>/acbh/config.yaml`. It does not print the host token after storing it.
+PowerShell users can set `ACBH_ACCESS_KEY` from `Read-Host -AsSecureString`; see
+the Windows section in [docs/demo.md](docs/demo.md). The Agent stores config at
+`<user config dir>/acbh/config.yaml`. It does not print the host token after
+storing it.
 
 Send one heartbeat:
 
@@ -204,13 +216,9 @@ network. The embedded Dashboard keeps access keys, host tokens, RCON passwords,
 and the local control token in page memory only, so they must be entered again
 after a refresh.
 
-Then inspect Coordinator state:
-
-```bash
-curl -s http://localhost:6121/v1/groups/<groupId>/state \
-  -H "x-acbh-host-id: <hostId>" \
-  -H "x-acbh-host-token: <hostToken>"
-```
+Then inspect Coordinator state from the Dashboard. Direct API clients should
+send host headers from a mode-0600 temporary header file, never as literal
+command arguments.
 
 ## Agent local server process manager
 
@@ -312,17 +320,22 @@ rcon.password=change-me
 Then run `safe-sync`. It authenticates to RCON, sends `save-all flush`, waits for a successful response, and only then scans the server directory:
 
 ```bash
+read -rsp "RCON password: " ACBH_RCON_PASSWORD
+export ACBH_RCON_PASSWORD
+echo
 go run . safe-sync \
   --server-dir C:/minecraft/server \
   --artifact-id snap_000001 \
   --server-pack-version pack_000001 \
   --output ./snap_000001.manifest.json \
   --rcon-host 127.0.0.1 \
-  --rcon-port 25575 \
-  --rcon-password change-me
+  --rcon-port 25575
+unset ACBH_RCON_PASSWORD
 ```
 
-Instead of placing the password in command history, set `ACBH_RCON_PASSWORD` and omit `--rcon-password`. The flag takes precedence when both are present. The password is not saved in Agent config or printed.
+The legacy `--rcon-password` flag remains compatible, but the environment
+variable avoids exposing the password through shell history and process
+arguments. The password is not saved in Agent config or printed.
 
 `safe-sync` only generates a `world-snapshot` manifest. Upload remains a separate step:
 

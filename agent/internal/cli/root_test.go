@@ -155,6 +155,33 @@ func TestRootIncludesArtifactAndServerCommands(t *testing.T) {
 	}
 }
 
+func TestResolveLoginAccessKey(t *testing.T) {
+	t.Setenv("ACBH_ACCESS_KEY", "env-secret")
+
+	got, err := resolveLoginAccessKey("")
+	if err != nil {
+		t.Fatalf("resolveLoginAccessKey() error = %v", err)
+	}
+	if got != "env-secret" {
+		t.Fatalf("resolveLoginAccessKey() = %q, want env-secret", got)
+	}
+
+	got, err = resolveLoginAccessKey("flag-secret")
+	if err != nil {
+		t.Fatalf("resolveLoginAccessKey(flag) error = %v", err)
+	}
+	if got != "flag-secret" {
+		t.Fatalf("resolveLoginAccessKey(flag) = %q, want flag-secret", got)
+	}
+}
+
+func TestResolveLoginAccessKeyRequiresCredential(t *testing.T) {
+	t.Setenv("ACBH_ACCESS_KEY", "")
+	if _, err := resolveLoginAccessKey(""); err == nil || !strings.Contains(err.Error(), "ACBH_ACCESS_KEY") {
+		t.Fatalf("resolveLoginAccessKey() error = %v, want credential guidance", err)
+	}
+}
+
 func TestResolveServerStartOptionsUsesConfigAndFlags(t *testing.T) {
 	configRoot := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configRoot)
