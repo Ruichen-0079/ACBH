@@ -147,6 +147,20 @@ Run the heartbeat loop:
 go run . daemon --interval 10s --status standby
 ```
 
+Start the Dashboard-facing local control API:
+
+```bash
+go run . control serve
+```
+
+The API binds to `127.0.0.1:6122` by default. Its generated bearer token is
+stored at `<user config dir>/acbh/control-token` with restrictive permissions;
+the full token is not printed. Binding a non-loopback address requires the
+explicit `--allow-remote-control` flag and should only be done on a trusted
+network. The embedded Dashboard keeps access keys, host tokens, RCON passwords,
+and the local control token in page memory only, so they must be entered again
+after a refresh.
+
 Then inspect Coordinator state:
 
 ```bash

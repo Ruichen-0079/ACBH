@@ -3,13 +3,16 @@ package localcontrol
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,10 +30,11 @@ import (
 )
 
 type Server struct {
-	ListenAddr string
-	Token      string
-	Config     *agentconfig.Config
-	logger     *log.Logger
+	ListenAddr  string
+	Token       string
+	Config      *agentconfig.Config
+	AllowRemote bool
+	logger      *log.Logger
 }
 
 func GenerateToken() string {
@@ -49,6 +53,20 @@ func NewServer(listenAddr, token string, cfg *agentconfig.Config) *Server {
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	if strings.TrimSpace(s.Token) == "" {
+		return errors.New("control: bearer token is required")
+	}
+	remote, err := validateListenAddress(s.ListenAddr)
+	if err != nil {
+		return err
+	}
+	if remote && !s.AllowRemote {
+		return errors.New("control: refusing non-loopback listen address; pass --allow-remote-control to acknowledge remote exposure")
+	}
+	if remote {
+		s.logger.Printf("WARNING: local control API is exposed on non-loopback address %s", s.ListenAddr)
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", s.handleHealth)
@@ -95,12 +113,34 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
-		if token != s.Token {
+		if !secureTokenEqual(token, s.Token) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "invalid token"})
 			return
 		}
 		next(w, r)
 	}
+}
+
+func secureTokenEqual(provided, expected string) bool {
+	if len(provided) != len(expected) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func validateListenAddress(listenAddr string) (bool, error) {
+	host, _, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return false, fmt.Errorf("control: invalid listen address: %w", err)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return false, nil
+	}
+	ip := net.ParseIP(host)
+	if ip != nil && ip.IsLoopback() {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -184,12 +224,12 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ServerDir      string `json:"serverDir"`
-		ArtifactKind   string `json:"artifactKind"`
-		ArtifactID     string `json:"artifactId"`
-		GroupID        string `json:"groupId"`
-		CreatorHostID  string `json:"creatorHostId"`
-		Output         string `json:"output"`
+		ServerDir     string `json:"serverDir"`
+		ArtifactKind  string `json:"artifactKind"`
+		ArtifactID    string `json:"artifactId"`
+		GroupID       string `json:"groupId"`
+		CreatorHostID string `json:"creatorHostId"`
+		Output        string `json:"output"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
@@ -217,15 +257,15 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, report, err := scanner.Scan(scanner.Options{
-		ServerDir:    req.ServerDir,
-		ArtifactKind: kind,
-		ArtifactID:   req.ArtifactID,
-		GroupID:      gid,
+		ServerDir:     req.ServerDir,
+		ArtifactKind:  kind,
+		ArtifactID:    req.ArtifactID,
+		GroupID:       gid,
 		CreatorHostID: chid,
-		OutputPath:   req.Output,
+		OutputPath:    req.Output,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		s.writeOperationError(w, "scan_failed", err)
 		return
 	}
 
@@ -280,7 +320,7 @@ func (s *Server) handleSafeSync(w http.ResponseWriter, r *http.Request) {
 		Timeout:  10 * time.Second,
 	}, "save-all flush")
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "RCON failed: " + err.Error()})
+		s.writeOperationError(w, "rcon_failed", err)
 		return
 	}
 
@@ -305,7 +345,7 @@ func (s *Server) handleSafeSync(w http.ResponseWriter, r *http.Request) {
 		OutputPath:        req.Output,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "scan failed: " + err.Error()})
+		s.writeOperationError(w, "scan_failed", err)
 		return
 	}
 
@@ -346,7 +386,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	client, err := coordinator.NewClient(cfg.CoordinatorURL)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid coordinator URL: " + err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid coordinator URL", "code": "invalid_coordinator_url"})
 		return
 	}
 
@@ -357,7 +397,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		Client:       client,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		s.writeOperationError(w, "push_failed", err)
 		return
 	}
 
@@ -394,7 +434,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 	client, err := coordinator.NewClient(cfg.CoordinatorURL)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid coordinator URL: " + err.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid coordinator URL", "code": "invalid_coordinator_url"})
 		return
 	}
 
@@ -406,7 +446,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		Client:       client,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		s.writeOperationError(w, "pull_failed", err)
 		return
 	}
 
@@ -431,13 +471,13 @@ func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {
 
 	runtimeDir, err := s.serverRuntimeDir()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		s.writeOperationError(w, "server_status_failed", err)
 		return
 	}
 
 	status, err := mcserver.GetStatus(runtimeDir)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		s.writeOperationError(w, "server_status_failed", err)
 		return
 	}
 
@@ -516,18 +556,18 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 	logDir := filepath.Join(req.ServerDir, "logs")
 	runtimeDir, err := s.serverRuntimeDir()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		s.writeOperationError(w, "server_start_failed", err)
 		return
 	}
 
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "create runtime dir: " + err.Error()})
+		s.writeOperationError(w, "server_start_failed", err)
 		return
 	}
 
 	executable, err := os.Executable()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "find Agent executable: " + err.Error()})
+		s.writeOperationError(w, "server_start_failed", err)
 		return
 	}
 
@@ -539,7 +579,7 @@ func (s *Server) handleServerStart(w http.ResponseWriter, r *http.Request) {
 		StopTimeout: 30 * time.Second,
 	})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "failed to start server: " + err.Error()})
+		s.writeOperationError(w, "server_start_failed", err)
 		return
 	}
 
@@ -577,13 +617,13 @@ func (s *Server) handleServerStop(w http.ResponseWriter, r *http.Request) {
 
 	runtimeDir, err := s.serverRuntimeDir()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		s.writeOperationError(w, "server_stop_failed", err)
 		return
 	}
 
 	state, stopped, err := mcserver.Stop(runtimeDir)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "failed to stop server: " + err.Error()})
+		s.writeOperationError(w, "server_stop_failed", err)
 		return
 	}
 	if !stopped {
@@ -628,7 +668,18 @@ func (s *Server) resolveConfig(coordinatorURL string) agentconfig.Config {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if !isAllowedDashboardOrigin(origin) {
+				if r.Method == http.MethodOptions {
+					writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "origin is not allowed"})
+					return
+				}
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Max-Age", "86400")
@@ -640,6 +691,30 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) writeOperationError(w http.ResponseWriter, code string, err error) {
+	requestID := GenerateToken()[:12]
+	s.logger.Printf("request_id=%s code=%s error=%v", requestID, code, err)
+	writeJSON(w, http.StatusInternalServerError, map[string]any{
+		"ok":        false,
+		"error":     "operation failed",
+		"code":      code,
+		"requestId": requestID,
+	})
+}
+
+func isAllowedDashboardOrigin(origin string) bool {
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

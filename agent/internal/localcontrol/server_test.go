@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -93,6 +94,14 @@ func TestProtectedEndpointRequiresToken(t *testing.T) {
 	}
 }
 
+func TestServerRefusesEmptyToken(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "", nil)
+	err := srv.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "token is required") {
+		t.Fatalf("error = %v, want required token failure", err)
+	}
+}
+
 func TestProtectedEndpointWithValidToken(t *testing.T) {
 	srv := NewServer("127.0.0.1:0", "my-secret", nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -146,6 +155,65 @@ func TestCORSHeaders(t *testing.T) {
 	}
 	if resp.Header.Get("Access-Control-Allow-Methods") == "" {
 		t.Error("expected Access-Control-Allow-Methods header")
+	}
+}
+
+func TestCORSRejectsNonLocalOrigin(t *testing.T) {
+	srv := NewServer("127.0.0.1:0", "test-token", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go srv.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	req, _ := http.NewRequest("OPTIONS", "http://"+srv.ListenAddr+"/v1/doctor", nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if origin := resp.Header.Get("Access-Control-Allow-Origin"); origin != "" {
+		t.Fatalf("unexpected CORS origin %q", origin)
+	}
+}
+
+func TestRemoteListenRequiresExplicitOptIn(t *testing.T) {
+	remote, err := validateListenAddress("0.0.0.0:6122")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !remote {
+		t.Fatal("0.0.0.0 must be treated as remote")
+	}
+
+	srv := NewServer("0.0.0.0:0", "test-token", nil)
+	err = srv.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "--allow-remote-control") {
+		t.Fatalf("error = %v, want explicit remote opt-in failure", err)
+	}
+}
+
+func TestRemoteListenAllowedWithExplicitOptIn(t *testing.T) {
+	srv := NewServer("0.0.0.0:0", "test-token", nil)
+	srv.AllowRemote = true
+	var logs bytes.Buffer
+	srv.logger = log.New(&logs, "", 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if !strings.Contains(logs.String(), "WARNING") {
+		t.Fatalf("logs = %q, want remote exposure warning", logs.String())
 	}
 }
 
@@ -417,9 +485,15 @@ func TestServerStartUsesSharedProcessLock(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
-	message, _ := result["error"].(string)
-	if !strings.Contains(message, "process lock already exists") {
-		t.Fatalf("error = %q, want process lock failure", message)
+	if result["code"] != "server_start_failed" {
+		t.Fatalf("code = %q, want server_start_failed", result["code"])
+	}
+	if result["requestId"] == "" {
+		t.Fatal("expected requestId")
+	}
+	encoded, _ := json.Marshal(result)
+	if strings.Contains(string(encoded), serverDir) {
+		t.Fatalf("error response exposed absolute server path: %s", encoded)
 	}
 }
 
