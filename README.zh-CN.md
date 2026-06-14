@@ -189,6 +189,8 @@ cd agent && go vet ./...
 - [Release notes](docs/release-notes-v0.1-demo.md)（英文）— 已完成能力、安全默认值、已知限制、平台验证
 - CLI demo：`bash scripts/demo-smoke.sh`
 - GUI demo：`pnpm dev:coordinator` → `http://127.0.0.1:6121/dashboard`
+- [单公网服务器双栈部署指南](docs/zh-CN/deploy-single-vps-dual-stack.md)
+  — 包含 Dashboard 图形控制面板接管演练
 - [发布打包](docs/release-packaging.md)（英文）— 如何构建 `dist/release/v0.1-demo`
   产物供 Linux 和 Windows 使用
 - [Release checklist](docs/release-checklist.md)（英文）— 9 部分发布前验证清单

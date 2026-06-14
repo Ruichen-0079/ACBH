@@ -1,0 +1,15 @@
+[Unit]
+Description=Velocity B standby public entry
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=minecraft
+WorkingDirectory=/opt/mc-stack/velocity-b
+ExecStart=/usr/bin/java -Xms256M -Xmx512M -jar velocity.jar
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
