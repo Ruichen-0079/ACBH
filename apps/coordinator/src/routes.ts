@@ -7,7 +7,7 @@ import type { CoordinatorStorage } from "./storage/index.js";
 import { StorageError, StorageObjectTooLargeError } from "./storage/index.js";
 import type { ArtifactManifest } from "./storage/index.js";
 import type { InMemoryCoordinatorStore, GcBackend } from "./store.js";
-import { StoreError } from "./store.js";
+import { GcBlockedError, StoreError } from "./store.js";
 import type { TunnelSession, PlayerSession } from "./network.js";
 import type { RelayManager } from "./relay.js";
 
@@ -461,16 +461,12 @@ export async function registerRoutes(
         return storage.listObjectSha256s({ groupId: p.groupId });
       },
       readManifestFiles: async (p) => {
-        try {
-          const manifest = await storage.readManifest({
-            groupId: p.groupId,
-            artifactKind: p.artifactKind,
-            artifactId: p.artifactId,
-          });
-          return (manifest.files ?? []).map((f) => ({ sha256: f.sha256, deleted: !!f.deleted }));
-        } catch {
-          return [];
-        }
+        const manifest = await storage.readManifest({
+          groupId: p.groupId,
+          artifactKind: p.artifactKind,
+          artifactId: p.artifactId,
+        });
+        return (manifest.files ?? []).map((f) => ({ sha256: f.sha256, deleted: !!f.deleted }));
       },
     };
 
@@ -487,6 +483,15 @@ export async function registerRoutes(
       });
       return result;
     } catch (error) {
+      if (error instanceof GcBlockedError) {
+        reply.code(error.statusCode).send({
+          error: statusText(error.statusCode),
+          message: error.message,
+          blocked: true,
+          blockers: error.blockers,
+        });
+        return reply;
+      }
       if (error instanceof StoreError) {
         reply.code(error.statusCode).send({ error: statusText(error.statusCode), message: error.message });
         return reply;

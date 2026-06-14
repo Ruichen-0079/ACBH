@@ -80,6 +80,9 @@ func runGc(cmd *cobra.Command, opts gcOptions) error {
 		HostToken: cfg.HostToken,
 	}, generation)
 	if err != nil {
+		if strings.Contains(err.Error(), "GC blocked") || strings.Contains(err.Error(), "retained manifest") {
+			return fmt.Errorf("garbage collection blocked because a retained manifest could not be read: %w", err)
+		}
 		if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "Forbidden") {
 			return fmt.Errorf("only the current host may run garbage collection: %w", err)
 		}
@@ -96,6 +99,15 @@ func runGc(cmd *cobra.Command, opts gcOptions) error {
 		return err
 	}
 	if result.DryRun {
+		if result.Blocked {
+			fmt.Fprintf(
+				cmd.OutOrStdout(),
+				"Dry run blocked: %d retained manifest(s) could not be read; object deletion is not safe. %d artifact(s) matched deletion rules.\n",
+				len(result.Blockers),
+				len(result.DeletedArtifacts),
+			)
+			return nil
+		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Dry run: %d artifact(s) would be deleted.\n", len(result.DeletedArtifacts))
 	} else {
 		fmt.Fprintf(cmd.OutOrStdout(), "Deleted %d artifact(s) and %d object(s).\n", len(result.DeletedArtifacts), result.DeletedObjectCount)
