@@ -453,6 +453,10 @@ func TestVerifyRestoredFilesRejectsMissingAndHashMismatch(t *testing.T) {
 	if _, err := VerifyRestoredFiles(root, m); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("VerifyRestoredFiles() error = %v, want missing file", err)
 	}
+	writeFile(t, root, "server.properties", "short")
+	if _, err := VerifyRestoredFiles(root, m); err == nil || !strings.Contains(err.Error(), "size mismatch") {
+		t.Fatalf("VerifyRestoredFiles() error = %v, want size mismatch", err)
+	}
 	writeFile(t, root, "server.properties", "wrong data!!")
 	if _, err := VerifyRestoredFiles(root, m); err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("VerifyRestoredFiles() error = %v, want hash mismatch", err)

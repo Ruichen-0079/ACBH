@@ -1,12 +1,15 @@
 package artifactsync
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
 )
+
+var ErrRestoreTargetNotEmpty = errors.New("restore directory is not empty")
 
 type VerifyReport struct {
 	VerifiedFiles int
@@ -26,7 +29,7 @@ func EnsureRestoreTarget(outputDir string, allowNonEmpty bool) error {
 		return fmt.Errorf("read restore directory: %w", err)
 	}
 	if len(entries) > 0 && !allowNonEmpty {
-		return fmt.Errorf("restore directory is not empty; pass --allow-non-empty to permit replacing files inside it")
+		return fmt.Errorf("%w; pass --allow-non-empty to permit replacing files inside it", ErrRestoreTargetNotEmpty)
 	}
 	return nil
 }

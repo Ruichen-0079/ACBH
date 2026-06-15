@@ -486,6 +486,7 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 		ArtifactKind   string `json:"artifactKind"`
 		ArtifactID     string `json:"artifactId"`
 		OutputDir      string `json:"outputDir"`
+		AllowNonEmpty  bool   `json:"allowNonEmpty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
@@ -497,6 +498,20 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ArtifactID == "" {
 		req.ArtifactID = "latest"
+	}
+	if req.ArtifactKind == string(manifest.ServerRuntime) {
+		if err := artifactsync.EnsureRestoreTarget(req.OutputDir, req.AllowNonEmpty); err != nil {
+			if errors.Is(err, artifactsync.ErrRestoreTargetNotEmpty) {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"ok":    false,
+					"error": "restore target is not empty",
+					"code":  "restore_target_not_empty",
+				})
+				return
+			}
+			s.writeOperationError(w, "restore_target_unsafe", err)
+			return
+		}
 	}
 
 	cfg := s.resolveConfig(req.CoordinatorURL)

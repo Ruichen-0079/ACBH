@@ -30,7 +30,7 @@ var adminStateFiles = map[string]struct{}{
 	"usercache.json":      {},
 }
 
-var windowsDrivePattern = regexp.MustCompile(`^[A-Za-z]:[/\\]`)
+var windowsDrivePattern = regexp.MustCompile(`^[A-Za-z]:`)
 
 func NormalizePath(raw string) (string, error) {
 	if raw == "" {

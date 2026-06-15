@@ -399,16 +399,24 @@ function restoreLocal(){
 }
 
 function forgetSecrets(){
-  for(var i=0;i<secretKeys.length;i++){
-    localStorage.removeItem("acbh."+secretKeys[i]);
-    var el=$(secretKeys[i]);if(el)el.value="";
-  }
+  clearSecretValues();
   agentConnected=false;setAgentMode(false);
   setMsg("\u5df2\u6e05\u9664\u5f53\u524d\u9875\u9762\u51ed\u636e\u548c\u65e7\u7248\u672c\u5730\u5b58\u50a8\u3002");
 }
 
+function clearSecretValues(){
+  for(var i=0;i<secretKeys.length;i++){
+    localStorage.removeItem("acbh."+secretKeys[i]);
+    var el=$(secretKeys[i]);if(el)el.value="";
+  }
+}
+
 function authError(status){
-  if(status===401||status===403)setMsg("\u51ed\u636e\u65e0\u6548\u6216\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165\u3002");
+  if(status===401||status===403){
+    clearSecretValues();
+    agentConnected=false;setAgentMode(false);
+    setMsg("\u51ed\u636e\u65e0\u6548\u6216\u5df2\u8fc7\u671f\uff0c\u5df2\u6e05\u9664\u9875\u9762\u5185\u5b58\u4e2d\u7684\u51ed\u636e\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165\u3002");
+  }
 }
 
 async function api(path,options){
@@ -777,12 +785,16 @@ async function agentPush(which){
 async function agentPull(which){
   if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
   if(!confirm("Pull and restore "+which+" into the configured output directory? Existing files may be replaced.")){setMsg("Pull cancelled.");return;}
+  var allowNonEmpty=false;
+  if(which==="server-runtime"){
+    allowNonEmpty=confirm("server-runtime restore requires an empty directory by default. Explicitly allow replacing files in a non-empty directory?");
+  }
   setMsg("pull "+which+"...");
   try{
     var bdir=$("serverBDir").value,pack=$("serverPackId").value,world=$("worldSnapshotId").value;
     var aid=which==="server-runtime"?"latest":which==="world"?world:pack;
     var artifactKind=which==="server-runtime"?"server-runtime":which==="world"?"world-snapshot":"server-pack";
-    var b=await agentCall("/v1/pull",{coordinatorUrl:baseUrl(),artifactKind:artifactKind,artifactId:aid,outputDir:bdir});
+    var b=await agentCall("/v1/pull",{coordinatorUrl:baseUrl(),artifactKind:artifactKind,artifactId:aid,outputDir:bdir,allowNonEmpty:allowNonEmpty});
     $("agentCommands").value=JSON.stringify(b,null,2);
     switchTab("agent");setMsg(b.ok?"pull "+which+" \u5b8c\u6210":"pull \u5931\u8d25: "+(b.error||""));
   }catch(e){setMsg(errMsg(e));}

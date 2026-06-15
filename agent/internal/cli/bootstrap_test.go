@@ -60,6 +60,23 @@ func TestBootstrapCreateAndJoinServerRuntime(t *testing.T) {
 	if fake.runtimeManifest == nil {
 		t.Fatal("server-runtime manifest was not uploaded")
 	}
+	if fake.manifestUploadedBeforeCurrent {
+		t.Fatal("server-runtime manifest was published before the first host became current")
+	}
+	if fake.runtimeManifest.Generation == nil || *fake.runtimeManifest.Generation != 1 {
+		t.Fatalf("server-runtime generation = %#v, want 1", fake.runtimeManifest.Generation)
+	}
+	configAPath, err := agentconfig.DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedA, err := agentconfig.Load(configAPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedA.LastPushedID != fake.runtimeManifest.ArtifactID {
+		t.Fatalf("Host A last pushed artifact = %q", savedA.LastPushedID)
+	}
 	for _, file := range fake.runtimeManifest.Files {
 		if file.Path == "logs/ignored.log" {
 			t.Fatal("excluded log file entered server-runtime manifest")
@@ -90,6 +107,17 @@ func TestBootstrapCreateAndJoinServerRuntime(t *testing.T) {
 	}
 	if fake.currentHostID != "host-a" {
 		t.Fatalf("join-group changed current host to %q", fake.currentHostID)
+	}
+	configBPath, err := agentconfig.DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedB, err := agentconfig.Load(configBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if savedB.LastPushedID != fake.runtimeManifest.ArtifactID {
+		t.Fatalf("Host B last restored artifact = %q", savedB.LastPushedID)
 	}
 	for rel, want := range map[string]string{
 		"server.properties":   "motd=ACBH",
@@ -123,6 +151,92 @@ func TestBootstrapJoinFailsWithoutLatestServerRuntime(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "latest server-runtime artifact is unavailable") {
 		t.Fatalf("join error = %v output=%s", err, output)
 	}
+	configPath, pathErr := agentconfig.DefaultPath()
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if agentconfig.Exists(configPath) {
+		t.Fatalf("failed join wrote final profile %s", configPath)
+	}
+	recoveries, globErr := filepath.Glob(filepath.Join(filepath.Dir(configPath), "bootstrap-recovery", "*", agentconfig.FileName))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(recoveries) != 1 {
+		t.Fatalf("recovery profiles = %#v, want one", recoveries)
+	}
+}
+
+func TestBootstrapCreatePreflightDoesNotWriteProfileOrCallCoordinator(t *testing.T) {
+	fake := newBootstrapCoordinator(t)
+	defer fake.Close()
+	configRoot := t.TempDir()
+	setTestConfigRoot(t, configRoot)
+	notDirectory := filepath.Join(t.TempDir(), "server.jar")
+	writeCLITestFile(t, filepath.Dir(notDirectory), filepath.Base(notDirectory), "not a directory")
+
+	output, err := executeCommand(
+		"bootstrap", "create-group",
+		"--coordinator", fake.URL,
+		"--group", "example-group",
+		"--server-dir", notDirectory,
+	)
+	if err == nil || !strings.Contains(err.Error(), "preflight server runtime") {
+		t.Fatalf("create error = %v output=%s", err, output)
+	}
+	if fake.hostCount != 0 {
+		t.Fatalf("coordinator registered %d hosts before local preflight passed", fake.hostCount)
+	}
+	configPath, pathErr := agentconfig.DefaultPath()
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if agentconfig.Exists(configPath) {
+		t.Fatalf("failed preflight wrote final profile %s", configPath)
+	}
+	if matches, globErr := filepath.Glob(filepath.Join(filepath.Dir(configPath), "bootstrap-recovery", "*")); globErr != nil || len(matches) != 0 {
+		t.Fatalf("preflight recovery files = %#v, err=%v", matches, globErr)
+	}
+}
+
+func TestBootstrapManifestFailureKeepsLatestUnpublishedAndPreservesRecovery(t *testing.T) {
+	fake := newBootstrapCoordinator(t)
+	fake.failManifestUpload = true
+	defer fake.Close()
+	configRoot := t.TempDir()
+	setTestConfigRoot(t, configRoot)
+	serverDir := t.TempDir()
+	writeCLITestFile(t, serverDir, "server.properties", "motd=ACBH")
+
+	output, err := executeCommand(
+		"bootstrap", "create-group",
+		"--coordinator", fake.URL,
+		"--group", "example-group",
+		"--server-dir", serverDir,
+	)
+	if err == nil || !strings.Contains(err.Error(), "current host was established") {
+		t.Fatalf("create error = %v output=%s", err, output)
+	}
+	if fake.currentHostID != "host-a" {
+		t.Fatalf("current host = %q, want host-a", fake.currentHostID)
+	}
+	if fake.runtimeManifest != nil {
+		t.Fatal("failed manifest upload was recorded as latest")
+	}
+	configPath, pathErr := agentconfig.DefaultPath()
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if !agentconfig.Exists(configPath) {
+		t.Fatalf("current host profile was not preserved at %s", configPath)
+	}
+	recoveries, globErr := filepath.Glob(filepath.Join(filepath.Dir(configPath), "bootstrap-recovery", "*", agentconfig.FileName))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(recoveries) != 1 {
+		t.Fatalf("recovery profiles = %#v, want one", recoveries)
+	}
 }
 
 func setTestConfigRoot(t *testing.T, root string) {
@@ -133,15 +247,17 @@ func setTestConfigRoot(t *testing.T, root string) {
 
 type bootstrapCoordinator struct {
 	*httptest.Server
-	t               *testing.T
-	mu              sync.Mutex
-	groupID         string
-	accessKey       string
-	hostCount       int
-	currentHostID   string
-	generation      int
-	runtimeManifest *manifest.Manifest
-	objects         map[string][]byte
+	t                             *testing.T
+	mu                            sync.Mutex
+	groupID                       string
+	accessKey                     string
+	hostCount                     int
+	currentHostID                 string
+	generation                    int
+	runtimeManifest               *manifest.Manifest
+	objects                       map[string][]byte
+	manifestUploadedBeforeCurrent bool
+	failManifestUpload            bool
 }
 
 func newBootstrapCoordinator(t *testing.T) *bootstrapCoordinator {
@@ -196,10 +312,17 @@ func (f *bootstrapCoordinator) handle(w http.ResponseWriter, r *http.Request) {
 			"ok": true, "sha256": sum, "exists": existed, "size": len(content),
 		})
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/artifacts/manifests":
+		if f.failManifestUpload {
+			writeBootstrapJSON(w, http.StatusInternalServerError, map[string]any{"message": "injected manifest failure"})
+			return
+		}
 		var body struct {
 			Manifest manifest.Manifest `json:"manifest"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		if f.currentHostID == "" {
+			f.manifestUploadedBeforeCurrent = true
+		}
 		f.runtimeManifest = &body.Manifest
 		writeBootstrapJSON(w, http.StatusOK, map[string]any{
 			"ok": true, "artifactKind": "server-runtime",

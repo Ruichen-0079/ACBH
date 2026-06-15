@@ -85,6 +85,9 @@ func runBootstrapCreateGroup(ctx context.Context, cmd *cobra.Command, opts boots
 	if err != nil {
 		return err
 	}
+	if err := preflightBootstrapServerRuntime(opts); err != nil {
+		return err
+	}
 	client, err := coordinator.NewClient(strings.TrimRight(strings.TrimSpace(opts.coordinatorURL), "/"))
 	if err != nil {
 		return err
@@ -110,12 +113,9 @@ func runBootstrapCreateGroup(ctx context.Context, cmd *cobra.Command, opts boots
 	}
 
 	cfg := bootstrapConfig(opts, created.GroupID, created.OwnerMemberID, registered)
-	if err := agentconfig.Save(configPath, cfg); err != nil {
-		return err
-	}
-	accessKeyPath := filepath.Join(configDir, "group-access-key")
-	if err := writePrivateFile(accessKeyPath, []byte(created.AccessKey+"\n")); err != nil {
-		return fmt.Errorf("save group access key: %w", err)
+	recoveryDir, err := saveBootstrapRecovery(configDir, cfg, created.AccessKey)
+	if err != nil {
+		return fmt.Errorf("save bootstrap recovery credentials: %w", err)
 	}
 
 	auth := coordinator.ArtifactAuth{
@@ -123,11 +123,11 @@ func runBootstrapCreateGroup(ctx context.Context, cmd *cobra.Command, opts boots
 	}
 	status, err := client.GetElectionStatus(ctx, auth)
 	if err != nil {
-		return fmt.Errorf("read initial group generation: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "read initial group generation", err)
 	}
 	artifactID := newServerRuntimeArtifactID()
-	manifestPath := filepath.Join(configDir, artifactID+".manifest.json")
-	generation := status.CurrentHostGeneration
+	manifestPath := filepath.Join(recoveryDir, artifactID+".manifest.json")
+	generation := status.CurrentHostGeneration + 1
 	runtimeManifest, report, err := scanner.Scan(scanner.Options{
 		ServerDir:     opts.serverDir,
 		ArtifactKind:  manifest.ServerRuntime,
@@ -139,35 +139,59 @@ func runBootstrapCreateGroup(ctx context.Context, cmd *cobra.Command, opts boots
 		ExcludeRules:  cfg.ExcludeRules,
 	})
 	if err != nil {
-		return fmt.Errorf("scan server runtime: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "scan server runtime", err)
 	}
 	if err := manifest.SaveFile(manifestPath, runtimeManifest); err != nil {
-		return fmt.Errorf("save server-runtime manifest: %w", err)
-	}
-	if _, err := artifactsync.Push(ctx, artifactsync.PushOptions{
-		ManifestPath: manifestPath,
-		ServerDir:    opts.serverDir,
-		Config:       cfg,
-		Client:       client,
-	}); err != nil {
-		return fmt.Errorf("push server-runtime artifact: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "save server-runtime manifest", err)
 	}
 	if _, err := client.SendHeartbeat(ctx, coordinator.HeartbeatRequest{
 		GroupID: created.GroupID, HostID: registered.HostID, HostToken: registered.HostToken,
-		Status:               "standby",
-		LatestLocalArtifacts: map[string]string{string(manifest.ServerRuntime): artifactID},
+		Status: "standby",
 	}); err != nil {
-		return fmt.Errorf("record first host artifact state: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "record first host readiness", err)
 	}
 	currentGeneration, err := completeInitialTakeover(ctx, client, auth)
 	if err != nil {
-		return err
+		return bootstrapRecoveryError(recoveryDir, "establish first current host", err)
+	}
+	if currentGeneration != generation {
+		generation = currentGeneration
+		runtimeManifest.Generation = &generation
+		if err := manifest.SaveFile(manifestPath, runtimeManifest); err != nil {
+			return bootstrapCurrentHostError(configPath, recoveryDir, "update server-runtime generation", err)
+		}
+	}
+
+	accessKeyPath := filepath.Join(configDir, "group-access-key")
+	if err := agentconfig.Save(configPath, cfg); err != nil {
+		return bootstrapCurrentHostError(configPath, recoveryDir, "save current host profile", err)
+	}
+	if err := writePrivateFile(accessKeyPath, []byte(created.AccessKey+"\n")); err != nil {
+		return bootstrapCurrentHostError(configPath, recoveryDir, "save group access key", err)
+	}
+	if _, err := artifactsync.Push(ctx, artifactsync.PushOptions{
+		ManifestPath:   manifestPath,
+		ServerDir:      opts.serverDir,
+		Config:         cfg,
+		Client:         client,
+		HostGeneration: &currentGeneration,
+	}); err != nil {
+		return bootstrapCurrentHostError(configPath, recoveryDir, "publish server-runtime artifact", err)
 	}
 
 	cfg.LastPushedID = artifactID
 	if err := agentconfig.Save(configPath, cfg); err != nil {
-		return err
+		return bootstrapCurrentHostError(configPath, recoveryDir, "record published server-runtime artifact", err)
 	}
+	if _, err := client.SendHeartbeat(ctx, coordinator.HeartbeatRequest{
+		GroupID: created.GroupID, HostID: registered.HostID, HostToken: registered.HostToken,
+		Status:               "hosting",
+		LatestLocalArtifacts: map[string]string{string(manifest.ServerRuntime): artifactID},
+	}); err != nil {
+		return bootstrapCurrentHostError(configPath, recoveryDir, "record current host artifact state", err)
+	}
+	removeBootstrapRecovery(cmd, recoveryDir)
+
 	fmt.Fprintln(cmd.OutOrStdout(), "Server-runtime bootstrap complete.")
 	fmt.Fprintf(cmd.OutOrStdout(), "Group ID: %s\n", created.GroupID)
 	fmt.Fprintf(cmd.OutOrStdout(), "Host ID: %s\n", registered.HostID)
@@ -183,7 +207,7 @@ func runBootstrapCreateGroup(ctx context.Context, cmd *cobra.Command, opts boots
 
 func runBootstrapJoinGroup(ctx context.Context, cmd *cobra.Command, opts bootstrapOptions) error {
 	opts = normalizeBootstrapOptions(opts)
-	configPath, _, err := prepareBootstrap(opts)
+	configPath, configDir, err := prepareBootstrap(opts)
 	if err != nil {
 		return err
 	}
@@ -212,15 +236,16 @@ func runBootstrapJoinGroup(ctx context.Context, cmd *cobra.Command, opts bootstr
 		return fmt.Errorf("register host: %w", err)
 	}
 	cfg := bootstrapConfig(opts, opts.group, joined.MemberID, registered)
+	recoveryDir, err := saveBootstrapRecovery(configDir, cfg, "")
+	if err != nil {
+		return fmt.Errorf("save bootstrap recovery credentials: %w", err)
+	}
 	auth := coordinator.ArtifactAuth{
 		GroupID: opts.group, HostID: registered.HostID, HostToken: registered.HostToken,
 	}
 	latest, err := client.GetLatestArtifact(ctx, auth, manifest.ServerRuntime)
 	if err != nil {
-		return fmt.Errorf("latest server-runtime artifact is unavailable: %w", err)
-	}
-	if err := agentconfig.Save(configPath, cfg); err != nil {
-		return err
+		return bootstrapRecoveryError(recoveryDir, "latest server-runtime artifact is unavailable", err)
 	}
 	if _, err := artifactsync.Pull(ctx, artifactsync.PullOptions{
 		ArtifactKind: manifest.ServerRuntime,
@@ -229,30 +254,39 @@ func runBootstrapJoinGroup(ctx context.Context, cmd *cobra.Command, opts bootstr
 		Config:       cfg,
 		Client:       client,
 	}); err != nil {
-		return fmt.Errorf("restore server-runtime artifact: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "restore server-runtime artifact", err)
 	}
 	downloaded, err := client.DownloadManifest(ctx, auth, manifest.ServerRuntime, latest.ArtifactID)
 	if err != nil {
-		return fmt.Errorf("download manifest for verification: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "download manifest for verification", err)
 	}
 	verified, err := artifactsync.VerifyRestoredFiles(opts.serverDir, downloaded.Manifest)
 	if err != nil {
-		return fmt.Errorf("verify restored server runtime: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "verify restored server runtime", err)
 	}
 	if _, err := client.SendHeartbeat(ctx, coordinator.HeartbeatRequest{
 		GroupID: opts.group, HostID: registered.HostID, HostToken: registered.HostToken,
 		Status:               "standby",
 		LatestLocalArtifacts: map[string]string{string(manifest.ServerRuntime): latest.ArtifactID},
 	}); err != nil {
-		return fmt.Errorf("record standby host artifact state: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "record standby host artifact state", err)
 	}
 	status, err := client.GetElectionStatus(ctx, auth)
 	if err != nil {
-		return fmt.Errorf("confirm standby host state: %w", err)
+		return bootstrapRecoveryError(recoveryDir, "confirm standby host state", err)
 	}
 	if status.CurrentHostID != nil && *status.CurrentHostID == registered.HostID {
-		return errors.New("join-group unexpectedly changed the current host")
+		return bootstrapRecoveryError(recoveryDir, "confirm standby host state", errors.New("join-group unexpectedly changed the current host"))
 	}
+
+	cfg.LastPushedID = latest.ArtifactID
+	if err := agentconfig.Save(filepath.Join(recoveryDir, agentconfig.FileName), cfg); err != nil {
+		return bootstrapRecoveryError(recoveryDir, "update bootstrap recovery profile", err)
+	}
+	if err := agentconfig.Save(configPath, cfg); err != nil {
+		return bootstrapRecoveryError(recoveryDir, "save standby host profile", err)
+	}
+	removeBootstrapRecovery(cmd, recoveryDir)
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Server-runtime join and restore complete.")
 	fmt.Fprintf(cmd.OutOrStdout(), "Host ID: %s\n", registered.HostID)
@@ -291,6 +325,68 @@ func prepareBootstrap(opts bootstrapOptions) (string, string, error) {
 		return "", "", fmt.Errorf("local host profile already exists at %s; use --force only to replace it explicitly", configPath)
 	}
 	return configPath, filepath.Dir(configPath), nil
+}
+
+func preflightBootstrapServerRuntime(opts bootstrapOptions) error {
+	generation := 0
+	_, _, err := scanner.Scan(scanner.Options{
+		ServerDir:     opts.serverDir,
+		ArtifactKind:  manifest.ServerRuntime,
+		ArtifactID:    "runtime-bootstrap-preflight",
+		GroupID:       "group-bootstrap-preflight",
+		CreatorHostID: "host-bootstrap-preflight",
+		Generation:    &generation,
+		ExcludeRules:  scanner.DefaultServerRuntimeExcludeRules(),
+	})
+	if err != nil {
+		return fmt.Errorf("preflight server runtime: %w", err)
+	}
+	return nil
+}
+
+func saveBootstrapRecovery(configDir string, cfg agentconfig.Config, accessKey string) (string, error) {
+	recoveryDir := filepath.Join(
+		configDir,
+		"bootstrap-recovery",
+		time.Now().UTC().Format("20060102T150405.000000000Z"),
+	)
+	if err := agentconfig.Save(filepath.Join(recoveryDir, agentconfig.FileName), cfg); err != nil {
+		return "", err
+	}
+	if accessKey != "" {
+		if err := writePrivateFile(filepath.Join(recoveryDir, "group-access-key"), []byte(accessKey+"\n")); err != nil {
+			_ = os.RemoveAll(recoveryDir)
+			return "", err
+		}
+	}
+	return recoveryDir, nil
+}
+
+func bootstrapRecoveryError(recoveryDir, stage string, err error) error {
+	return fmt.Errorf(
+		"%s; bootstrap credentials were preserved at %s: %w",
+		stage,
+		recoveryDir,
+		err,
+	)
+}
+
+func bootstrapCurrentHostError(configPath, recoveryDir, stage string, err error) error {
+	return fmt.Errorf(
+		"current host was established but bootstrap could not %s; use the profile at %s and recovery data at %s to retry the artifact operation: %w",
+		stage,
+		configPath,
+		recoveryDir,
+		err,
+	)
+}
+
+func removeBootstrapRecovery(cmd *cobra.Command, recoveryDir string) {
+	if err := os.RemoveAll(recoveryDir); err != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: bootstrap succeeded but recovery data could not be removed from %s: %v\n", recoveryDir, err)
+		return
+	}
+	_ = os.Remove(filepath.Dir(recoveryDir))
 }
 
 func normalizeBootstrapOptions(opts bootstrapOptions) bootstrapOptions {

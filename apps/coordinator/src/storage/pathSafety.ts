@@ -162,7 +162,7 @@ export function validateManifestPath(value: string): string {
     value.length === 0 ||
     value.includes("\0") ||
     value.includes("\\") ||
-    /^[A-Za-z]:\//u.test(value) ||
+    /^[A-Za-z]:/u.test(value) ||
     value.startsWith("//") ||
     path.posix.isAbsolute(value)
   ) {

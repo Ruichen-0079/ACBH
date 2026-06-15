@@ -421,7 +421,7 @@ go run . heartbeat \
   --connection-network tailscale
 ```
 
-The Coordinator uses a deterministic score and only considers fresh `online` or `standby` hosts. `ACBH_HOST_HEARTBEAT_TIMEOUT_MS` controls freshness and defaults to `30000`. An available latest world snapshot must already be reported locally when one exists, and `javaAvailable: false` makes a host ineligible.
+The Coordinator uses a deterministic score and only considers fresh `online` or `standby` hosts. `ACBH_HOST_HEARTBEAT_TIMEOUT_MS` controls freshness and defaults to `30000`. When a latest `server-runtime` exists, a candidate must report that complete runtime locally; otherwise the legacy latest world-snapshot requirement applies. `javaAvailable: false` makes a host ineligible.
 
 Election and assignment commands:
 

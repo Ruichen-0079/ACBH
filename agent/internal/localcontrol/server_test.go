@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -241,6 +242,47 @@ func TestMalformedJSON(t *testing.T) {
 
 	if resp.StatusCode != 400 {
 		t.Errorf("expected 400 for malformed JSON, got %d", resp.StatusCode)
+	}
+}
+
+func TestServerRuntimePullRequiresExplicitNonEmptyPermission(t *testing.T) {
+	outputDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outputDir, "existing.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServer("127.0.0.1:0", "test-token", &agentconfig.Config{
+		CoordinatorURL: "http://127.0.0.1:1",
+		GroupID:        "group-test",
+		HostID:         "host-test",
+		HostToken:      "host-token",
+	})
+
+	request := func(allow bool) *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]any{
+			"artifactKind":  "server-runtime",
+			"artifactId":    "latest",
+			"outputDir":     outputDir,
+			"allowNonEmpty": allow,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		srv.handlePull(recorder, httptest.NewRequest(http.MethodPost, "/v1/pull", bytes.NewReader(body)))
+		return recorder
+	}
+
+	blocked := request(false)
+	if blocked.Code != http.StatusConflict {
+		t.Fatalf("default pull status = %d body=%s", blocked.Code, blocked.Body.String())
+	}
+	if !strings.Contains(blocked.Body.String(), "restore_target_not_empty") {
+		t.Fatalf("default pull body = %s", blocked.Body.String())
+	}
+
+	allowed := request(true)
+	if allowed.Code == http.StatusConflict {
+		t.Fatalf("explicitly allowed pull was still blocked: %s", allowed.Body.String())
 	}
 }
 

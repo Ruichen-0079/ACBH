@@ -653,6 +653,7 @@ export class InMemoryCoordinatorStore {
     const evaluatedAtIso = evaluatedAt.toISOString();
     const latestWorld = this.findLatestArtifact(group, "world-snapshot");
     const latestServerPack = this.findLatestArtifact(group, "server-pack");
+    const latestServerRuntime = this.findLatestArtifact(group, "server-runtime");
     const latestAdminState = this.findLatestArtifact(group, "admin-state");
 
     const candidates = Array.from(group.hosts.values()).map((host): ElectionCandidate => {
@@ -662,6 +663,9 @@ export class InMemoryCoordinatorStore {
         latestWorld === undefined ||
         host.latestLocalArtifacts["world-snapshot"] === latestWorld.artifactId ||
         host.latestLocalSnapshotId === latestWorld.artifactId;
+      const hasLatestServerRuntime =
+        latestServerRuntime === undefined ||
+        host.latestLocalArtifacts["server-runtime"] === latestServerRuntime.artifactId;
 
       if (host.status !== "online" && host.status !== "standby") {
         reasons.push(`status-${host.status}`);
@@ -669,7 +673,9 @@ export class InMemoryCoordinatorStore {
       if (!heartbeatFresh) {
         reasons.push("stale-heartbeat");
       }
-      if (!hasLatestWorld) {
+      if (latestServerRuntime !== undefined && !hasLatestServerRuntime) {
+        reasons.push("missing-latest-server-runtime");
+      } else if (latestServerRuntime === undefined && !hasLatestWorld) {
         reasons.push("missing-latest-world-snapshot");
       }
       if (host.hostScoreHints.javaAvailable === false) {
@@ -678,7 +684,11 @@ export class InMemoryCoordinatorStore {
 
       let score = 0;
       if (heartbeatFresh) score += 30;
-      if (latestWorld !== undefined && hasLatestWorld) score += 25;
+      if (latestServerRuntime !== undefined && hasLatestServerRuntime) {
+        score += 25;
+      } else if (latestWorld !== undefined && hasLatestWorld) {
+        score += 25;
+      }
       if (
         latestServerPack !== undefined &&
         host.latestLocalArtifacts["server-pack"] === latestServerPack.artifactId

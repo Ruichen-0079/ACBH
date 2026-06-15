@@ -45,18 +45,23 @@ acbh-agent bootstrap create-group \
 
 该命令依次完成：
 
-1. 创建 group 并注册 Host A。
-2. 将 host token 保存到权限受限的本地 Agent config。
-3. 将一次性 group access key 保存到本地 `group-access-key` 文件，只输出路径。
-4. 扫描完整 `serverDir`，生成带 generation、group ID、host ID、文件大小、
+1. 在调用 Coordinator 前预检并扫描本地 `serverDir`，本地输入无效时不创建 group。
+2. 创建 group 并注册 Host A；凭据先保存到权限受限的 recovery 目录。
+3. 扫描完整 `serverDir`，生成带 generation、group ID、host ID、文件大小、
    mtime 和 SHA-256 的 `server-runtime` manifest。
-5. 上传对象并原子提交 manifest；只有成功后 latest 才会更新。
-6. 发送 heartbeat，并通过现有 `no-current-host` election/takeover 流程将
+4. 发送 heartbeat，并通过现有 `no-current-host` election/takeover 流程将
    Host A 确认为 current host。
+5. 将 host token 保存到正式 Agent config，并将一次性 group access key 保存到本地
+   `group-access-key` 文件；输出只包含文件路径。
+6. 使用新的 current host generation 上传对象并原子提交 manifest；只有提交成功后
+   latest 才会更新。
+7. 发送包含 latest `server-runtime` 的 hosting heartbeat，并清理 recovery 目录。
 
 已有本地 profile 时命令默认拒绝覆盖。只有明确确认要替换本机身份时才使用
-`--force`。上传失败不会更新 latest，但可能已经留下可复用或由 GC 清理的
-content-addressed 对象。
+`--force`，旧 profile 在新 bootstrap 通过本地预检前不会被替换。远端注册后的失败会
+返回 recovery 目录路径，不在错误中打印凭据。current host 建立后若上传失败，latest
+不会更新；正式 profile 和 recovery manifest 可用于重新执行 artifact push。对象上传
+中断时可能留下可复用或由 GC 清理的 content-addressed 对象。
 
 ## 其他 Host：join-group
 
@@ -98,6 +103,8 @@ Host B 加入后只是 standby/candidate，不会自动成为 current host。故
 - 每个恢复文件的大小与 SHA-256 都与 manifest 一致；
 - 缺失文件或 hash mismatch 必须失败；
 - 默认排除或本地排除规则未纳入 manifest 的文件不要求一致；
+- 空目录不进入 manifest，也不会在 Host B 自动重建；需要空目录的模组应在启动时创建，
+  或由运维者在 restore 后显式创建；
 - restore 后目录具备作为 Fabric `serverDir` 启动的文件基础。
 
 它不代表 JVM 内存、在线玩家会话、尚未落盘数据或两个运行中世界的实时一致性。
@@ -125,6 +132,9 @@ Host B 加入后只是 standby/candidate，不会自动成为 current host。故
 
 Dashboard 不提供文件选择器；路径来自 Agent 配置或页面输入。secret 仍只保存在
 页面内存，不进入 localStorage、sessionStorage、URL 或 console。
+Dashboard restore 会先确认危险操作，再单独询问是否允许非空目录。未明确允许时，
+Local Control 对非空 `server-runtime` 目标返回 `restore_target_not_empty`，不会开始下载
+或覆盖。
 
 ## 常见失败
 

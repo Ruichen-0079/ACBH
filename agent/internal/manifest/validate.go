@@ -31,6 +31,8 @@ func Validate(m Manifest) error {
 		return errors.New("generation must not be negative")
 	case m.ArtifactKind == WorldSnapshot && stringPtrEmpty(m.ServerPackVersion):
 		return errors.New("serverPackVersion is required for world-snapshot manifests")
+	case m.summaryMissing:
+		return errors.New("summary is required")
 	case m.Summary.IgnoredFiles < 0 || m.Summary.UnknownFiles < 0:
 		return errors.New("summary ignoredFiles and unknownFiles must not be negative")
 	}

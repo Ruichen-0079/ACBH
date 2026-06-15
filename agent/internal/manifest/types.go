@@ -1,6 +1,8 @@
 package manifest
 
 import (
+	"bytes"
+	"encoding/json"
 	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/fileclass"
@@ -29,6 +31,26 @@ type Manifest struct {
 	ServerPackVersion *string      `json:"serverPackVersion,omitempty"`
 	Files             []FileEntry  `json:"files"`
 	Summary           Summary      `json:"summary"`
+	summaryMissing    bool
+}
+
+func (m *Manifest) UnmarshalJSON(data []byte) error {
+	type manifestAlias Manifest
+
+	var decoded manifestAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+
+	*m = Manifest(decoded)
+	rawSummary, ok := fields["summary"]
+	m.summaryMissing = !ok || bytes.Equal(bytes.TrimSpace(rawSummary), []byte("null"))
+	return nil
 }
 
 type FileEntry struct {

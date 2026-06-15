@@ -1,6 +1,8 @@
 package manifest
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -90,7 +92,7 @@ func TestValidateServerRuntimeRejectsUnsafePathsAndWrongClass(t *testing.T) {
 		Summary: Summary{IncludedFiles: 1, TotalBytes: 1},
 	}
 
-	for _, unsafe := range []string{"../evil", "/absolute", `C:\server\file`, `\\server\share\file`, "bad\x00file"} {
+	for _, unsafe := range []string{"../evil", "/absolute", `C:\server\file`, "C:relative", `\\server\share\file`, "bad\x00file"} {
 		m := base
 		m.Files = append([]FileEntry(nil), base.Files...)
 		m.Files[0].Path = unsafe
@@ -104,6 +106,26 @@ func TestValidateServerRuntimeRejectsUnsafePathsAndWrongClass(t *testing.T) {
 	m.Files[0].Class = fileclass.ServerPack
 	if err := Validate(m); err == nil || !strings.Contains(err.Error(), "not allowed") {
 		t.Fatalf("Validate() error = %v, want class rejection", err)
+	}
+}
+
+func TestUnmarshalRequiresSummary(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "invalid", "missing-summary.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalAndValidate(data); err == nil || !strings.Contains(err.Error(), "summary is required") {
+		t.Fatalf("UnmarshalAndValidate() error = %v, want required summary", err)
+	}
+}
+
+func TestUnmarshalRejectsDriveRelativePath(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "invalid", "drive-relative.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UnmarshalAndValidate(data); err == nil || !strings.Contains(err.Error(), "must be relative") {
+		t.Fatalf("UnmarshalAndValidate() error = %v, want drive path rejection", err)
 	}
 }
 
