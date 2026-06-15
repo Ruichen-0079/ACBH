@@ -49,6 +49,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(
 		newDoctorCmd(),
 		newLoginCmd(),
+		newBootstrapCmd(),
 		newHeartbeatCmd(),
 		newDaemonCmd(),
 		newScanCmd(),
@@ -235,6 +236,7 @@ func newHeartbeatCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.status, "status", "standby", "Host status to report")
 	cmd.Flags().StringVar(&opts.latestWorldSnapshot, "latest-world-snapshot", "", "Latest local world snapshot artifact ID")
 	cmd.Flags().StringVar(&opts.latestServerPack, "latest-server-pack", "", "Latest local server pack artifact ID")
+	cmd.Flags().StringVar(&opts.latestServerRuntime, "latest-server-runtime", "", "Latest local server runtime artifact ID")
 	cmd.Flags().StringVar(&opts.latestAdminState, "latest-admin-state", "", "Latest local admin state artifact ID")
 	cmd.Flags().StringVar(&opts.javaAvailable, "java-available", "", "Override Java availability: true or false")
 	cmd.Flags().StringVar(&opts.connectionHost, "connection-host", "", "Host address players can connect to")
@@ -286,7 +288,7 @@ func newScanCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Minecraft server directory to scan")
-	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, or admin-state")
+	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, server-runtime, or admin-state")
 	cmd.Flags().StringVar(&opts.artifactID, "artifact-id", "", "Artifact ID for the generated manifest")
 	cmd.Flags().StringVar(&opts.serverPackVersion, "server-pack-version", "", "Server pack version for world snapshots")
 	cmd.Flags().StringVar(&opts.parentArtifactID, "parent-artifact-id", "", "Parent artifact ID")
@@ -294,6 +296,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.creatorHostID, "creator-host-id", "", "Creator host ID")
 	cmd.Flags().StringVar(&opts.previousManifest, "previous-manifest", "", "Previous manifest used to emit deleted entries")
 	cmd.Flags().StringVar(&opts.output, "output", "", "Path to write manifest JSON")
+	cmd.Flags().IntVar(&opts.generation, "generation", -1, "Current host generation (required for server-runtime)")
 	cmd.Flags().BoolVar(&opts.jsonOutput, "json", false, "Print JSON output")
 	_ = cmd.MarkFlagRequired("server-dir")
 	_ = cmd.MarkFlagRequired("artifact-kind")
@@ -366,7 +369,7 @@ func newPullCmd() *cobra.Command {
 			return runPull(cmd.Context(), cmd, opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, or admin-state")
+	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, server-runtime, or admin-state")
 	cmd.Flags().StringVar(&opts.artifactID, "artifact-id", "latest", "Artifact ID to pull, or latest")
 	cmd.Flags().StringVar(&opts.outputDir, "output-dir", "", "Directory to restore files into")
 	cmd.Flags().BoolVar(&opts.applyDeletes, "apply-deletes", false, "Apply deleted manifest entries to local files")
@@ -463,6 +466,9 @@ func newManifestInspectCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID: %s\n", inspection.ArtifactID)
 			fmt.Fprintf(cmd.OutOrStdout(), "Group ID: %s\n", inspection.GroupID)
 			fmt.Fprintf(cmd.OutOrStdout(), "Creator host ID: %s\n", inspection.CreatorHostID)
+			if inspection.Generation != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Generation: %d\n", *inspection.Generation)
+			}
 			if inspection.ServerPackVersion != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Server pack version: %s\n", *inspection.ServerPackVersion)
 			}
@@ -496,6 +502,7 @@ type heartbeatOptions struct {
 	status              string
 	latestWorldSnapshot string
 	latestServerPack    string
+	latestServerRuntime string
 	latestAdminState    string
 	javaAvailable       string
 	connectionHost      string
@@ -514,6 +521,7 @@ type scanOptions struct {
 	previousManifest  string
 	output            string
 	jsonOutput        bool
+	generation        int
 }
 
 type safeSyncOptions struct {
@@ -793,6 +801,8 @@ func runPull(ctx context.Context, cmd *cobra.Command, opts pullOptions) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Pending deletes: %d\n", summary.PendingDeletes)
 	fmt.Fprintf(cmd.OutOrStdout(), "Applied deletes: %d\n", summary.AppliedDeletes)
 	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes restored: %d\n", summary.TotalBytes)
+	fmt.Fprintf(cmd.OutOrStdout(), "Verified files: %d\n", summary.VerifiedFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Verify result: %s\n", summary.VerifyResult)
 	return nil
 }
 
@@ -803,12 +813,17 @@ func runScan(cmd *cobra.Command, opts scanOptions) error {
 	}
 
 	artifactKind := manifest.ArtifactKind(opts.artifactKind)
+	var generation *int
+	if opts.generation >= 0 {
+		generation = &opts.generation
+	}
 	manifestData, report, err := scanner.Scan(scanner.Options{
 		ServerDir:            opts.serverDir,
 		ArtifactKind:         artifactKind,
 		ArtifactID:           opts.artifactID,
 		GroupID:              groupID,
 		CreatorHostID:        creatorHostID,
+		Generation:           generation,
 		ServerPackVersion:    opts.serverPackVersion,
 		ParentArtifactID:     opts.parentArtifactID,
 		PreviousManifestPath: opts.previousManifest,
@@ -1249,6 +1264,14 @@ func buildHeartbeatRequest(cfg agentconfig.Config, opts heartbeatOptions) (coord
 	}
 	if opts.latestAdminState != "" {
 		latestArtifacts[string(manifest.AdminState)] = opts.latestAdminState
+	}
+	if opts.latestServerRuntime != "" {
+		latestArtifacts[string(manifest.ServerRuntime)] = opts.latestServerRuntime
+	}
+	if cfg.ArtifactClass == string(manifest.ServerRuntime) && cfg.LastPushedID != "" {
+		if _, exists := latestArtifacts[string(manifest.ServerRuntime)]; !exists {
+			latestArtifacts[string(manifest.ServerRuntime)] = cfg.LastPushedID
+		}
 	}
 
 	var connection *coordinator.HostConnection

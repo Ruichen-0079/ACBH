@@ -45,6 +45,8 @@ test("all invalid shared fixtures fail TS validation", async () => {
     { filename: "path-escape.json", msg: "path" },
     { filename: "bad-hash.json", msg: "sha256" },
     { filename: "bad-tombstone.json", msg: "deleted" },
+    { filename: "missing-summary.json", msg: "summary" },
+    { filename: "drive-relative.json", msg: "path" },
   ];
 
   for (const { filename, msg } of invalidCases) {

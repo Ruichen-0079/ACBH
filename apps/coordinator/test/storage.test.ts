@@ -184,6 +184,43 @@ test("saves and reads server pack manifests", async () => {
   }
 });
 
+test("saves and reads server runtime manifests with generation", async () => {
+  const { storage, root } = await testStorage();
+  try {
+    const manifest = sampleManifest("server-runtime", "runtime_001", "pack_001", {
+      generation: 3,
+      serverPackVersion: null,
+    });
+
+    await storage.saveManifest({
+      groupId: manifest.groupId,
+      artifactKind: manifest.artifactKind,
+      artifactId: manifest.artifactId,
+      manifest,
+    });
+
+    assert.deepEqual(
+      await storage.readManifest({
+        groupId: manifest.groupId,
+        artifactKind: manifest.artifactKind,
+        artifactId: manifest.artifactId,
+      }),
+      manifest,
+    );
+    await assert.rejects(
+      storage.saveManifest({
+        groupId: manifest.groupId,
+        artifactKind: manifest.artifactKind,
+        artifactId: "runtime_missing_generation",
+        manifest: { ...manifest, artifactId: "runtime_missing_generation", generation: undefined },
+      }),
+      /generation is required/,
+    );
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
 test("saves and reads admin state manifests", async () => {
   const { storage, root } = await testStorage();
   try {
@@ -261,6 +298,30 @@ test("rejects unsafe artifact kinds, identifiers, and manifest paths", async () 
       }),
       StorageValidationError,
     );
+
+    for (const unsafePath of ["C:/outside/server.properties", "//server/share/file", "bad\0file"]) {
+      const unsafeManifest = sampleManifest("server-runtime", "runtime_unsafe", "pack_001", {
+        generation: 0,
+        serverPackVersion: null,
+        files: [{
+          path: unsafePath,
+          size: 1,
+          sha256: hash(Buffer.from("x")),
+          modifiedAt: "2026-06-05T00:00:00.000Z",
+          deleted: false,
+          class: "server-runtime",
+        }],
+      });
+      await assert.rejects(
+        storage.saveManifest({
+          groupId: unsafeManifest.groupId,
+          artifactKind: unsafeManifest.artifactKind,
+          artifactId: unsafeManifest.artifactId,
+          manifest: unsafeManifest,
+        }),
+        StorageValidationError,
+      );
+    }
   } finally {
     await rm(root, { force: true, recursive: true });
   }

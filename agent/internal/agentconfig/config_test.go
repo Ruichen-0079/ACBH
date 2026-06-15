@@ -3,6 +3,7 @@ package agentconfig
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -19,6 +20,14 @@ func TestSaveLoadConfig(t *testing.T) {
 		DeviceName:     "PlayerA-PC",
 		Platform:       "windows",
 		AgentVersion:   AgentVersion,
+		ArtifactClass:  "server-runtime",
+		LastPushedID:   "runtime_001",
+		ExcludeRules:   []string{"logs/", "*.tmp"},
+		RCON: RCONConfig{
+			Host:        "127.0.0.1",
+			Port:        25575,
+			PasswordEnv: "ACBH_RCON_PASSWORD",
+		},
 		Server: ServerConfig{
 			Dir:         "C:/minecraft/server",
 			Command:     "java -Xmx4G -jar server.jar nogui",
@@ -38,7 +47,7 @@ func TestSaveLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Load() = %#v, want %#v", got, want)
 	}
 

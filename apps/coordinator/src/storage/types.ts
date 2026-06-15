@@ -26,6 +26,7 @@ export type ArtifactManifest = {
   groupId: string;
   createdAt: string;
   creatorHostId: string;
+  generation?: number;
   parentArtifactId: string | null;
   serverPackVersion: string | null;
   files: SnapshotManifestFile[];

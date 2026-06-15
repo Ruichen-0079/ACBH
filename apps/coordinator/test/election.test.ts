@@ -116,6 +116,29 @@ test("java availability and latest world snapshot control eligibility", () => {
   assert.ok((byHost.get(host.hostId)?.score ?? 0) > (byHost.get(noJava.hostId)?.score ?? 0));
 });
 
+test("latest server runtime replaces split world snapshot as the election artifact fence", () => {
+  const store = createInMemoryCoordinatorStore();
+  const ready = createHost(store);
+  const stale = addHost(store, ready, "stale-runtime");
+
+  recordAvailableArtifact(store, ready.groupId, ready.hostId, "world-snapshot", "snap_old");
+  recordAvailableArtifact(store, ready.groupId, ready.hostId, "server-runtime", "runtime_latest");
+  heartbeat(store, ready, {
+    status: "standby",
+    javaAvailable: true,
+    latestLocalArtifacts: { "server-runtime": "runtime_latest" },
+  });
+  heartbeat(store, stale, {
+    status: "standby",
+    javaAvailable: true,
+    latestLocalArtifacts: { "world-snapshot": "snap_old" },
+  });
+
+  const byHost = new Map(store.evaluateCandidates(ready.groupId).map((candidate) => [candidate.hostId, candidate]));
+  assert.equal(byHost.get(ready.hostId)?.eligible, true);
+  assert.deepEqual(byHost.get(stale.hostId)?.reasons, ["missing-latest-server-runtime"]);
+});
+
 test("candidate ordering is deterministic and failures reduce score", () => {
   const clock = testClock("2026-06-06T00:00:00.000Z");
   const store = createInMemoryCoordinatorStore({ now: clock.now });
@@ -740,7 +763,7 @@ function recordAvailableArtifact(
   store: ReturnType<typeof createInMemoryCoordinatorStore>,
   groupId: string,
   creatorHostId: string,
-  artifactKind: "server-pack" | "world-snapshot" | "admin-state",
+  artifactKind: "server-pack" | "world-snapshot" | "server-runtime" | "admin-state",
   artifactId: string,
 ): void {
   store.recordArtifact({

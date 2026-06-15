@@ -25,6 +25,10 @@ type Config struct {
 	Platform       string       `json:"platform"`
 	AgentVersion   string       `json:"agentVersion"`
 	Server         ServerConfig `json:"server,omitempty"`
+	ArtifactClass  string       `json:"artifactClass,omitempty"`
+	LastPushedID   string       `json:"lastPushedArtifactId,omitempty"`
+	ExcludeRules   []string     `json:"localExcludeRules,omitempty"`
+	RCON           RCONConfig   `json:"rcon,omitempty"`
 }
 
 type ServerConfig struct {
@@ -32,6 +36,12 @@ type ServerConfig struct {
 	Command     string `json:"command,omitempty"`
 	LogDir      string `json:"logDir,omitempty"`
 	StopTimeout string `json:"stopTimeout,omitempty"`
+}
+
+type RCONConfig struct {
+	Host        string `json:"host,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	PasswordEnv string `json:"passwordEnv,omitempty"`
 }
 
 func DefaultPath() (string, error) {

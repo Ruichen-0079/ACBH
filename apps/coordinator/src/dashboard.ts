@@ -156,13 +156,16 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <h3>\u672c\u5730\u64cd\u4f5c</h3>
 <div class="actions">
 <button onclick="agentDoctor()">\u8fd0\u884c doctor</button>
-<button class="sec" onclick="agentScan()">\u626b\u63cf server-pack</button>
+<button class="sec" onclick="agentScan('server-pack')">\u626b\u63cf server-pack</button>
+<button class="sec" onclick="agentScan('server-runtime')">\u626b\u63cf server-runtime</button>
 <button class="sec" onclick="agentValidateManifest()">Validate manifest</button>
 <button class="sec" onclick="agentSafeSync()">safe-sync world</button>
 <button class="sec" onclick="agentPush('server-pack')">push server-pack</button>
 <button class="sec" onclick="agentPush('world')">push world</button>
+<button class="sec" onclick="agentPush('server-runtime')">push server-runtime</button>
 <button class="sec" onclick="agentPull('server-pack')">pull server-pack</button>
 <button class="sec" onclick="agentPull('world')">pull world</button>
+<button class="sec" onclick="agentPull('server-runtime')">pull latest server-runtime + verify</button>
 </div>
 <p style="color:var(--muted);font-size:12px;margin-top:10px">server-pack \u5305\u542b\u670d\u52a1\u7aef\u542f\u52a8\u6240\u9700\u6587\u4ef6\uff1aeula.txt &middot; server.properties &middot; mods &middot; config &middot; libraries &middot; .fabric/server &middot; \u9876\u5c42\u542f\u52a8 jar</p>
 </div>
@@ -198,6 +201,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <h3>\u5236\u54c1 ID</h3>
 <div class="row"><div><label>server-pack ID</label><input id="serverPackId" value="win-server-pack-001"/></div><div><label>world-snapshot ID</label><input id="worldSnapshotId" value="win-world-safe-001"/></div></div>
+<div class="row"><div><label>server-runtime ID</label><input id="serverRuntimeId" value="runtime-001"/></div></div>
 
 <div class="actions">
 <button onclick="genLogin()">\u767b\u5f55\u547d\u4ee4</button>
@@ -228,7 +232,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <!-- \u5236\u54c1 -->
 <div class="panel" id="panel-artifacts">
 <h2>\u5236\u54c1\u7ba1\u7406</h2>
-<div class="row"><div><label>\u5236\u54c1\u7c7b\u578b</label><select id="artifactKind"><option>server-pack</option><option>world-snapshot</option><option>admin-state</option></select></div><div><label>\u5236\u54c1 ID</label><input id="artifactId"/></div></div>
+<div class="row"><div><label>\u5236\u54c1\u7c7b\u578b</label><select id="artifactKind"><option>server-runtime</option><option>server-pack</option><option>world-snapshot</option><option>admin-state</option></select></div><div><label>\u5236\u54c1 ID</label><input id="artifactId"/></div></div>
 <div class="actions">
 <button onclick="loadArtifacts()">\u5236\u54c1\u5217\u8868</button>
 <button class="sec" onclick="loadLatest()">\u6700\u65b0\u5236\u54c1</button>
@@ -324,7 +328,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 
 <script>
 var $=function(id){return document.getElementById(id);};
-var persistedKeys=["coordinatorUrl","groupId","memberId","hostId","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","workspaceDir","rconHost","rconPort","ocWorkspace","agentApiUrl","srvDir","srvJava","srvJar","srvJvmArgs","srvArgs","manifestPath","agentVersion"];
+var persistedKeys=["coordinatorUrl","groupId","memberId","hostId","displayName","deviceName","platform","shellType","agentExe","serverDir","serverBDir","serverPackId","worldSnapshotId","serverRuntimeId","workspaceDir","rconHost","rconPort","ocWorkspace","agentApiUrl","srvDir","srvJava","srvJar","srvJvmArgs","srvArgs","manifestPath","agentVersion"];
 var secretKeys=["accessKey","hostToken","agentToken","rconPassword","srvRconPassword","takeoverToken","playerToken","localControlToken","secret"];
 var recentEvents=[];
 
@@ -395,16 +399,24 @@ function restoreLocal(){
 }
 
 function forgetSecrets(){
-  for(var i=0;i<secretKeys.length;i++){
-    localStorage.removeItem("acbh."+secretKeys[i]);
-    var el=$(secretKeys[i]);if(el)el.value="";
-  }
+  clearSecretValues();
   agentConnected=false;setAgentMode(false);
   setMsg("\u5df2\u6e05\u9664\u5f53\u524d\u9875\u9762\u51ed\u636e\u548c\u65e7\u7248\u672c\u5730\u5b58\u50a8\u3002");
 }
 
+function clearSecretValues(){
+  for(var i=0;i<secretKeys.length;i++){
+    localStorage.removeItem("acbh."+secretKeys[i]);
+    var el=$(secretKeys[i]);if(el)el.value="";
+  }
+}
+
 function authError(status){
-  if(status===401||status===403)setMsg("\u51ed\u636e\u65e0\u6548\u6216\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165\u3002");
+  if(status===401||status===403){
+    clearSecretValues();
+    agentConnected=false;setAgentMode(false);
+    setMsg("\u51ed\u636e\u65e0\u6548\u6216\u5df2\u8fc7\u671f\uff0c\u5df2\u6e05\u9664\u9875\u9762\u5185\u5b58\u4e2d\u7684\u51ed\u636e\uff0c\u8bf7\u91cd\u65b0\u8f93\u5165\u3002");
+  }
 }
 
 async function api(path,options){
@@ -524,7 +536,7 @@ async function loadLatest(){
   try{
     var k=encodeURIComponent($("artifactKind").value);
     var b=await api("/v1/groups/"+encodeURIComponent($("groupId").value)+"/artifacts/latest?artifactKind="+k,{headers:hostHeaders()});
-    $("artifactOut").textContent=JSON.stringify(b,null,2);setMsg("\u6700\u65b0\u5236\u54c1\u5df2\u52a0\u8f7d");
+    $("artifactOut").textContent=JSON.stringify(Object.assign({latest:true},b),null,2);setMsg("\u6700\u65b0\u5236\u54c1\u5df2\u52a0\u8f7d");
   }catch(e){$("artifactOut").textContent=errMsg(e);setMsg(errMsg(e));}
 }
 
@@ -714,13 +726,19 @@ async function agentDoctor(){
   }catch(e){setMsg(errMsg(e));}
 }
 
-async function agentScan(){
+async function agentScan(kind){
   if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
-  setMsg("\u626b\u63cf server-pack...");
+  kind=kind||"server-pack";setMsg("\u626b\u63cf "+kind+"...");
   try{
-    var g=$("groupId").value,h=$("hostId").value||"<host-id>",pack=$("serverPackId").value,dir=$("serverDir").value;
-    var sep=isBash()?"/":String.fromCharCode(92);var sp=dir+sep+"server-pack.manifest.json";
-    var b=await agentCall("/v1/scan",{serverDir:dir,artifactKind:"server-pack",artifactId:pack,groupId:g,creatorHostId:h,output:sp});
+    var g=$("groupId").value,h=$("hostId").value||"<host-id>",dir=$("serverDir").value;
+    var sep=isBash()?"/":String.fromCharCode(92),id=kind==="server-runtime"?$("serverRuntimeId").value:$("serverPackId").value;
+    var sp=dir+sep+(kind==="server-runtime"?"server-runtime":"server-pack")+".manifest.json",generation;
+    if(kind==="server-runtime"){
+      var state=await api("/v1/groups/"+encodeURIComponent(g)+"/election/status",{headers:hostHeaders()});
+      generation=state.currentHostGeneration;
+    }
+    var b=await agentCall("/v1/scan",{serverDir:dir,artifactKind:kind,artifactId:id,groupId:g,creatorHostId:h,generation:generation,output:sp});
+    if(b.ok)$("manifestPath").value=sp;
     $("agentCommands").value=JSON.stringify(b,null,2);
     switchTab("agent");setMsg(b.ok?"\u626b\u63cf\u5b8c\u6210: "+JSON.stringify(b.summary):"\u626b\u63cf\u5931\u8d25: "+(b.error||""));
   }catch(e){setMsg(errMsg(e));}
@@ -757,7 +775,7 @@ async function agentPush(which){
   setMsg("push "+which+"...");
   try{
     var dir=$("serverDir").value,sep=isBash()?"/":String.fromCharCode(92);
-    var mf=dir+sep+(which==="world"?"world":"server-pack")+".manifest.json";
+    var mf=dir+sep+(which==="world"?"world":which==="server-runtime"?"server-runtime":"server-pack")+".manifest.json";
     var b=await agentCall("/v1/push",{coordinatorUrl:baseUrl(),serverDir:dir,manifest:mf});
     $("agentCommands").value=JSON.stringify(b,null,2);
     switchTab("agent");setMsg(b.ok?"push "+which+" \u5b8c\u6210":"push \u5931\u8d25: "+(b.error||""));
@@ -767,11 +785,16 @@ async function agentPush(which){
 async function agentPull(which){
   if(!agentConnected){setMsg("\u8bf7\u5148\u8fde\u63a5\u672c\u673a Agent");return;}
   if(!confirm("Pull and restore "+which+" into the configured output directory? Existing files may be replaced.")){setMsg("Pull cancelled.");return;}
+  var allowNonEmpty=false;
+  if(which==="server-runtime"){
+    allowNonEmpty=confirm("server-runtime restore requires an empty directory by default. Explicitly allow replacing files in a non-empty directory?");
+  }
   setMsg("pull "+which+"...");
   try{
     var bdir=$("serverBDir").value,pack=$("serverPackId").value,world=$("worldSnapshotId").value;
-    var aid=which==="world"?world:pack;
-    var b=await agentCall("/v1/pull",{coordinatorUrl:baseUrl(),artifactKind:which==="world"?"world-snapshot":"server-pack",artifactId:aid,outputDir:bdir});
+    var aid=which==="server-runtime"?"latest":which==="world"?world:pack;
+    var artifactKind=which==="server-runtime"?"server-runtime":which==="world"?"world-snapshot":"server-pack";
+    var b=await agentCall("/v1/pull",{coordinatorUrl:baseUrl(),artifactKind:artifactKind,artifactId:aid,outputDir:bdir,allowNonEmpty:allowNonEmpty});
     $("agentCommands").value=JSON.stringify(b,null,2);
     switchTab("agent");setMsg(b.ok?"pull "+which+" \u5b8c\u6210":"pull \u5931\u8d25: "+(b.error||""));
   }catch(e){setMsg(errMsg(e));}
