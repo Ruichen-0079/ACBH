@@ -125,6 +125,11 @@ curl.
 
 ## Next steps after v0.1-demo
 
+- v0.2 next: follow the
+  [real single-VPS dual-stack deployment runbook](zh-CN/v0.2-real-vps-runbook.md)
+  to validate the released artifact, Dashboard workflow, and manual or
+  semi-automatic takeover on a real low-cost public server. Repository path:
+  `docs/zh-CN/v0.2-real-vps-runbook.md`.
 - S3-compatible storage backend
 - Auto-GC scheduling
 - Stable coordinator persistence with migration

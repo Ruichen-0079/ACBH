@@ -463,6 +463,8 @@ Current release branch: `release/v0.1-demo-prep`
 - GUI demo: `pnpm dev:coordinator` → `http://127.0.0.1:6121/dashboard`
 - [Single VPS dual-stack deployment guide](docs/zh-CN/deploy-single-vps-dual-stack.md)
   — two Velocity/Fabric entries with a Dashboard-assisted takeover walkthrough
+- [v0.2 real VPS runbook](docs/zh-CN/v0.2-real-vps-runbook.md)
+  — deploy and verify the dual-stack flow on a real low-cost public VPS
 - [Release packaging](docs/release-packaging.md) — how to build `dist/release/v0.1-demo`
   artifacts for Linux and Windows
 - [Release checklist](docs/release-checklist.md) — 9-section pre-release verification
