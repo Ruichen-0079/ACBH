@@ -428,6 +428,56 @@ func TestPullVerifiesSHA256(t *testing.T) {
 	}
 }
 
+func TestVerifyRestoredFilesRejectsMissingAndHashMismatch(t *testing.T) {
+	content := []byte("runtime data")
+	modifiedAt := time.Now().UTC()
+	generation := 1
+	m := manifest.Manifest{
+		ManifestVersion: manifest.ManifestVersion,
+		ArtifactKind:    manifest.ServerRuntime,
+		ArtifactID:      "runtime_1",
+		GroupID:         "group_abc",
+		CreatedAt:       modifiedAt,
+		CreatorHostID:   "host_abc",
+		Generation:      &generation,
+		Files: []manifest.FileEntry{{
+			Path:       "server.properties",
+			Class:      fileclass.ServerRuntime,
+			Size:       int64(len(content)),
+			SHA256:     sha256Hex(content),
+			ModifiedAt: &modifiedAt,
+		}},
+		Summary: manifest.Summary{IncludedFiles: 1, TotalBytes: int64(len(content))},
+	}
+	root := t.TempDir()
+	if _, err := VerifyRestoredFiles(root, m); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("VerifyRestoredFiles() error = %v, want missing file", err)
+	}
+	writeFile(t, root, "server.properties", "wrong data!!")
+	if _, err := VerifyRestoredFiles(root, m); err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("VerifyRestoredFiles() error = %v, want hash mismatch", err)
+	}
+	writeFile(t, root, "server.properties", string(content))
+	report, err := VerifyRestoredFiles(root, m)
+	if err != nil {
+		t.Fatalf("VerifyRestoredFiles() error = %v", err)
+	}
+	if report.VerifiedFiles != 1 || report.TotalBytes != int64(len(content)) {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestEnsureRestoreTargetRequiresExplicitNonEmptyPermission(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "existing.txt", "keep")
+	if err := EnsureRestoreTarget(root, false); err == nil || !strings.Contains(err.Error(), "--allow-non-empty") {
+		t.Fatalf("EnsureRestoreTarget() error = %v", err)
+	}
+	if err := EnsureRestoreTarget(root, true); err != nil {
+		t.Fatalf("EnsureRestoreTarget(allow) error = %v", err)
+	}
+}
+
 func TestPullDeletesOnlyWithApplyDeletes(t *testing.T) {
 	outputDir := t.TempDir()
 	writeFile(t, outputDir, "world/region/r.1.0.mca", "old")

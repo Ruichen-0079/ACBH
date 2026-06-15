@@ -182,6 +182,15 @@ cd agent && go vet ./...
 - [安全说明](./docs/security.zh-CN.md)
 - [Codex 开发指南](./docs/codex-guide.zh-CN.md)
 
+## v0.2 server-runtime bootstrap
+
+第一个 Host 可以使用 `acbh-agent bootstrap create-group` 创建 group，并把完整可运行
+`serverDir` 作为 `server-runtime` 推送。其他 Host 使用受保护的
+`ACBH_ACCESS_KEY` 执行 `acbh-agent bootstrap join-group`，拉取 latest、恢复并逐文件
+校验 SHA-256。新加入 Host 保持 standby，不会自动成为 current host。
+
+详见 [server-runtime 主机引导](docs/zh-CN/server-runtime-bootstrap.md)。
+
 ## v0.1-demo
 
 当前发布分支：`release/v0.1-demo-prep`
@@ -196,7 +205,7 @@ cd agent && go vet ./...
 - [发布打包](docs/release-packaging.md)（英文）— 如何构建 `dist/release/v0.1-demo`
   产物供 Linux 和 Windows 使用
 - [Release checklist](docs/release-checklist.md)（英文）— 9 部分发布前验证清单
-- Go tests：14 包全部通过，Coordinator tests：123/123
+- Go tests：14 包全部通过，Coordinator tests：126/126
 - 已在 Fedora 41 和 Windows 11 (PowerShell) 上验证
 
 **不适用于生产环境。** 默认仅本地回环，内存存储，无 TLS。

@@ -25,6 +25,10 @@ func Validate(m Manifest) error {
 		return errors.New("createdAt is required")
 	case strings.TrimSpace(m.CreatorHostID) == "":
 		return errors.New("creatorHostId is required")
+	case m.ArtifactKind == ServerRuntime && m.Generation == nil:
+		return errors.New("generation is required for server-runtime manifests")
+	case m.Generation != nil && *m.Generation < 0:
+		return errors.New("generation must not be negative")
 	case m.ArtifactKind == WorldSnapshot && stringPtrEmpty(m.ServerPackVersion):
 		return errors.New("serverPackVersion is required for world-snapshot manifests")
 	case m.Summary.IgnoredFiles < 0 || m.Summary.UnknownFiles < 0:

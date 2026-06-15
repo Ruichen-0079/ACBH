@@ -4,10 +4,11 @@ import { StorageValidationError, type ArtifactManifest } from "./types.js";
 
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const sha256Pattern = /^[a-f0-9]{64}$/;
-const artifactKinds = new Set<ArtifactKind>(["server-pack", "world-snapshot", "admin-state"]);
+const artifactKinds = new Set<ArtifactKind>(["server-pack", "world-snapshot", "server-runtime", "admin-state"]);
 const fileClasses = new Set<FileClass>([
   "world-runtime",
   "server-pack",
+  "server-runtime",
   "admin-state",
   "plugin-runtime-data",
   "ignored",
@@ -17,6 +18,7 @@ const fileClasses = new Set<FileClass>([
 const classAllowedForArtifact: Record<ArtifactKind, Set<FileClass>> = {
   "world-snapshot": new Set<FileClass>(["world-runtime", "plugin-runtime-data"]),
   "server-pack": new Set<FileClass>(["server-pack"]),
+  "server-runtime": new Set<FileClass>(["server-runtime"]),
   "admin-state": new Set<FileClass>(["admin-state"]),
 };
 
@@ -51,6 +53,8 @@ export function artifactKindDirectory(kind: ArtifactKind): string {
       return "server-packs";
     case "world-snapshot":
       return "world-snapshots";
+    case "server-runtime":
+      return "server-runtimes";
     case "admin-state":
       return "admin-states";
   }
@@ -72,6 +76,15 @@ export function validateManifest(manifest: ArtifactManifest): ArtifactManifest {
   }
   if (Number.isNaN(Date.parse(manifest.createdAt))) {
     throw new StorageValidationError("manifest createdAt must be a valid timestamp");
+  }
+  if (
+    manifest.generation !== undefined &&
+    (!Number.isSafeInteger(manifest.generation) || manifest.generation < 0)
+  ) {
+    throw new StorageValidationError("manifest generation must be a non-negative safe integer");
+  }
+  if (manifest.artifactKind === "server-runtime" && manifest.generation === undefined) {
+    throw new StorageValidationError("manifest generation is required for server-runtime artifacts");
   }
   if (!Array.isArray(manifest.files)) {
     throw new StorageValidationError("manifest files must be an array");
@@ -145,7 +158,14 @@ export function validateManifest(manifest: ArtifactManifest): ArtifactManifest {
 }
 
 export function validateManifestPath(value: string): string {
-  if (value.length === 0 || value.includes("\\") || path.posix.isAbsolute(value)) {
+  if (
+    value.length === 0 ||
+    value.includes("\0") ||
+    value.includes("\\") ||
+    /^[A-Za-z]:\//u.test(value) ||
+    value.startsWith("//") ||
+    path.posix.isAbsolute(value)
+  ) {
     throw new StorageValidationError("manifest file path must be a relative POSIX path");
   }
 

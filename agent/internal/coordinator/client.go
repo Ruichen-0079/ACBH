@@ -22,6 +22,17 @@ type Client struct {
 	httpClient *http.Client
 }
 
+type CreateGroupRequest struct {
+	Name      string `json:"name"`
+	OwnerName string `json:"ownerName"`
+}
+
+type CreateGroupResponse struct {
+	GroupID       string `json:"groupId"`
+	OwnerMemberID string `json:"ownerMemberId"`
+	AccessKey     string `json:"accessKey"`
+}
+
 type JoinGroupRequest struct {
 	AccessKey   string `json:"accessKey"`
 	DisplayName string `json:"displayName"`
@@ -121,6 +132,7 @@ type ArtifactMetadata struct {
 	ParentArtifactID   *string               `json:"parentArtifactId"`
 	ServerPackVersion  *string               `json:"serverPackVersion"`
 	CreatorHostID      string                `json:"creatorHostId"`
+	Generation         *int                  `json:"generation"`
 	CreatedAt          string                `json:"createdAt"`
 	UpdatedAt          string                `json:"updatedAt"`
 	Status             string                `json:"status"`
@@ -128,6 +140,12 @@ type ArtifactMetadata struct {
 	ManifestObjectPath string                `json:"manifestObjectPath"`
 	FileCount          int                   `json:"fileCount"`
 	TotalBytes         int64                 `json:"totalBytes"`
+}
+
+type GroupStateResponse struct {
+	GroupID               string  `json:"groupId"`
+	CurrentHostID         *string `json:"currentHostId"`
+	CurrentHostGeneration int     `json:"currentHostGeneration"`
 }
 
 type DownloadManifestResponse struct {
@@ -247,6 +265,12 @@ func NewClient(baseURL string) (*Client, error) {
 	}, nil
 }
 
+func (c *Client) CreateGroup(ctx context.Context, req CreateGroupRequest) (CreateGroupResponse, error) {
+	var out CreateGroupResponse
+	err := c.post(ctx, "/v1/groups", req, &out)
+	return out, err
+}
+
 func (c *Client) JoinGroup(ctx context.Context, groupID string, req JoinGroupRequest) (JoinGroupResponse, error) {
 	var out JoinGroupResponse
 	err := c.post(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/join", req, &out)
@@ -268,6 +292,19 @@ func (c *Client) SendHeartbeat(ctx context.Context, req HeartbeatRequest) (Heart
 func (c *Client) GetElectionStatus(ctx context.Context, auth ArtifactAuth) (ElectionStatusResponse, error) {
 	var out ElectionStatusResponse
 	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/election/status", auth, &out)
+	return out, err
+}
+
+func (c *Client) RunElection(ctx context.Context, req ElectionAuthRequest, reason string) (ElectionRunResponse, error) {
+	var out ElectionRunResponse
+	payload := struct {
+		ElectionAuthRequest
+		Reason string `json:"reason"`
+	}{
+		ElectionAuthRequest: req,
+		Reason:              reason,
+	}
+	err := c.post(ctx, "/v1/groups/"+url.PathEscape(req.GroupID)+"/election/run", payload, &out)
 	return out, err
 }
 

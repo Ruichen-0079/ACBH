@@ -39,6 +39,74 @@ func TestValidateRejectsBadPathAndHash(t *testing.T) {
 	}
 }
 
+func TestValidateServerRuntimeManifest(t *testing.T) {
+	generation := 4
+	modifiedAt := fixedTime()
+	m := Manifest{
+		ManifestVersion: ManifestVersion,
+		ArtifactKind:    ServerRuntime,
+		ArtifactID:      "runtime_000001",
+		GroupID:         "group_abc",
+		CreatedAt:       fixedTime(),
+		CreatorHostID:   "host_abc",
+		Generation:      &generation,
+		Files: []FileEntry{{
+			Path:       "server.properties",
+			Class:      fileclass.ServerRuntime,
+			Size:       8,
+			SHA256:     strings.Repeat("a", 64),
+			ModifiedAt: &modifiedAt,
+		}},
+		Summary: Summary{IncludedFiles: 1, TotalBytes: 8},
+	}
+	if err := Validate(m); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+
+	m.Generation = nil
+	if err := Validate(m); err == nil || !strings.Contains(err.Error(), "generation") {
+		t.Fatalf("Validate() error = %v, want generation rejection", err)
+	}
+}
+
+func TestValidateServerRuntimeRejectsUnsafePathsAndWrongClass(t *testing.T) {
+	generation := 0
+	modifiedAt := fixedTime()
+	base := Manifest{
+		ManifestVersion: ManifestVersion,
+		ArtifactKind:    ServerRuntime,
+		ArtifactID:      "runtime_000001",
+		GroupID:         "group_abc",
+		CreatedAt:       fixedTime(),
+		CreatorHostID:   "host_abc",
+		Generation:      &generation,
+		Files: []FileEntry{{
+			Path:       "server.properties",
+			Class:      fileclass.ServerRuntime,
+			Size:       1,
+			SHA256:     strings.Repeat("a", 64),
+			ModifiedAt: &modifiedAt,
+		}},
+		Summary: Summary{IncludedFiles: 1, TotalBytes: 1},
+	}
+
+	for _, unsafe := range []string{"../evil", "/absolute", `C:\server\file`, `\\server\share\file`, "bad\x00file"} {
+		m := base
+		m.Files = append([]FileEntry(nil), base.Files...)
+		m.Files[0].Path = unsafe
+		if err := Validate(m); err == nil {
+			t.Fatalf("Validate() accepted unsafe path %q", unsafe)
+		}
+	}
+
+	m := base
+	m.Files = append([]FileEntry(nil), base.Files...)
+	m.Files[0].Class = fileclass.ServerPack
+	if err := Validate(m); err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("Validate() error = %v, want class rejection", err)
+	}
+}
+
 func TestValidateDeletedEntryUsesEmptyHash(t *testing.T) {
 	m := validWorldManifest()
 	m.Files = append(m.Files, FileEntry{

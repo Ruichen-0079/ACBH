@@ -49,6 +49,7 @@ const heartbeatSchema = z.object({
     .object({
       "world-snapshot": z.string().min(1).optional(),
       "server-pack": z.string().min(1).optional(),
+      "server-runtime": z.string().min(1).optional(),
       "admin-state": z.string().min(1).optional(),
     })
     .optional(),
@@ -101,7 +102,7 @@ const takeoverFailSchema = takeoverActionSchema.extend({
   failureReason: z.string().trim().min(1).max(200),
 });
 
-const artifactKinds = ["server-pack", "world-snapshot", "admin-state"] as const;
+const artifactKinds = ["server-pack", "world-snapshot", "server-runtime", "admin-state"] as const;
 
 const uploadObjectSchema = z.object({
   groupId: z.string().min(1),
@@ -368,6 +369,16 @@ export async function registerRoutes(
           message: "serverPackVersion is required for world-snapshot artifacts",
         });
       }
+      if (
+        body.artifactKind === "server-runtime" &&
+        hostGeneration !== null &&
+        uploadedManifest.generation !== hostGeneration
+      ) {
+        return reply.code(409).send({
+          error: "Conflict",
+          message: "Manifest generation must match the authenticated host generation",
+        });
+      }
       const metadata = {
         groupId: body.groupId,
         artifactKind: body.artifactKind,
@@ -376,6 +387,7 @@ export async function registerRoutes(
         serverPackVersion:
           uploadedManifest.serverPackVersion ?? (body.artifactKind === "server-pack" ? body.artifactId : null),
         creatorHostId: uploadedManifest.creatorHostId,
+        generation: uploadedManifest.generation ?? null,
         createdAt: uploadedManifest.createdAt,
         status: "available" as const,
         manifestSha256: sha256(Buffer.from(JSON.stringify(uploadedManifest), "utf8")),

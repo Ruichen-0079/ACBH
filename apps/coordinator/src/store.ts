@@ -37,6 +37,7 @@ export type ArtifactMetadata = {
   parentArtifactId: string | null;
   serverPackVersion: string | null;
   creatorHostId: string;
+  generation?: number | null;
   createdAt: string;
   updatedAt: string;
   status: ArtifactStatus;
@@ -298,7 +299,7 @@ const defaultAssignmentTtlMs = 60_000;
 const defaultRetentionPerKind = 5;
 const defaultGcMinAgeMs = 3_600_000;
 const defaultTunnelSessionTtlMs = 300_000;
-const ALL_ARTIFACT_KINDS: ArtifactKind[] = ["world-snapshot", "server-pack", "admin-state"];
+const ALL_ARTIFACT_KINDS: ArtifactKind[] = ["world-snapshot", "server-pack", "server-runtime", "admin-state"];
 const fourGiB = 4 * 1024 * 1024 * 1024;
 const tenGiB = 10 * 1024 * 1024 * 1024;
 
@@ -357,6 +358,7 @@ export class InMemoryCoordinatorStore {
       const artifacts: Record<ArtifactKind, Record<string, ArtifactMetadata>> = {
         "server-pack": {},
         "world-snapshot": {},
+        "server-runtime": {},
         "admin-state": {},
       };
       for (const [kind, kindMap] of group.artifacts) {

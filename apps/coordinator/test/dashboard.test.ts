@@ -33,6 +33,8 @@ test("dashboard route serves the Chinese control center with Agent local control
     assert.match(response.body, /运行 doctor/u);
     assert.match(response.body, /扫描 server-pack/u);
     assert.match(response.body, /safe-sync/u);
+    assert.match(response.body, /server-runtime/u);
+    assert.match(response.body, /pull latest server-runtime \+ verify/u);
     assert.match(response.body, /push/u);
     assert.match(response.body, /pull/u);
     assert.match(response.body, /\u670d\u52a1\u5668\u63a7\u5236/u);

@@ -13,6 +13,7 @@ type ArtifactKind string
 const (
 	WorldSnapshot ArtifactKind = "world-snapshot"
 	ServerPack    ArtifactKind = "server-pack"
+	ServerRuntime ArtifactKind = "server-runtime"
 	AdminState    ArtifactKind = "admin-state"
 )
 
@@ -23,6 +24,7 @@ type Manifest struct {
 	GroupID           string       `json:"groupId"`
 	CreatedAt         time.Time    `json:"createdAt"`
 	CreatorHostID     string       `json:"creatorHostId"`
+	Generation        *int         `json:"generation,omitempty"`
 	ParentArtifactID  *string      `json:"parentArtifactId"`
 	ServerPackVersion *string      `json:"serverPackVersion,omitempty"`
 	Files             []FileEntry  `json:"files"`
@@ -48,7 +50,7 @@ type Summary struct {
 
 func IsValidArtifactKind(kind ArtifactKind) bool {
 	switch kind {
-	case WorldSnapshot, ServerPack, AdminState:
+	case WorldSnapshot, ServerPack, ServerRuntime, AdminState:
 		return true
 	default:
 		return false
@@ -61,6 +63,8 @@ func ClassAllowedForArtifact(kind ArtifactKind, class fileclass.FileClass) bool 
 		return class == fileclass.WorldRuntime || class == fileclass.PluginRuntimeData
 	case ServerPack:
 		return class == fileclass.ServerPack
+	case ServerRuntime:
+		return class == fileclass.ServerRuntime
 	case AdminState:
 		return class == fileclass.AdminState
 	default:

@@ -108,6 +108,24 @@ actions. Credentials stay in page memory and are cleared on refresh. Follow the
 [graphical demo walkthrough](docs/demo.md#graphical-dashboard-demo) for the
 bootstrap steps and fake server directory.
 
+## Server-runtime bootstrap
+
+The v0.2 MVP can bootstrap a complete runnable server directory:
+
+```bash
+acbh-agent bootstrap create-group \
+  --coordinator http://127.0.0.1:6121 \
+  --group "example-group" \
+  --server-dir /path/to/fabric-a \
+  --artifact-class server-runtime
+```
+
+Other hosts securely provide `ACBH_ACCESS_KEY`, then run
+`bootstrap join-group` to restore and SHA-256 verify the latest
+`server-runtime`. Joining does not make the new host current; takeover remains
+explicit. See the
+[Chinese server-runtime bootstrap guide](docs/zh-CN/server-runtime-bootstrap.md).
+
 ## Security defaults
 
 - Local Control binds to `127.0.0.1:6122`; remote binding requires explicit
@@ -464,6 +482,7 @@ Current release branch: `release/v0.1-demo-prep`
 - [Single VPS dual-stack deployment guide](docs/zh-CN/deploy-single-vps-dual-stack.md)
   — two Velocity/Fabric entries with a Dashboard-assisted takeover walkthrough
 - [v0.2 real VPS runbook](docs/zh-CN/v0.2-real-vps-runbook.md)
+- [server-runtime host bootstrap](docs/zh-CN/server-runtime-bootstrap.md)
   — deploy and verify the dual-stack flow on a real low-cost public VPS
 - [Release packaging](docs/release-packaging.md) — how to build `dist/release/v0.1-demo`
   artifacts for Linux and Windows

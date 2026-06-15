@@ -231,6 +231,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		GroupID       string `json:"groupId"`
 		CreatorHostID string `json:"creatorHostId"`
 		Output        string `json:"output"`
+		Generation    *int   `json:"generation"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid JSON body"})
@@ -257,17 +258,29 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		kind = manifest.ServerPack
 	}
 
-	_, report, err := scanner.Scan(scanner.Options{
+	var excludeRules []string
+	if s.Config != nil {
+		excludeRules = s.Config.ExcludeRules
+	}
+	generated, report, err := scanner.Scan(scanner.Options{
 		ServerDir:     req.ServerDir,
 		ArtifactKind:  kind,
 		ArtifactID:    req.ArtifactID,
 		GroupID:       gid,
 		CreatorHostID: chid,
+		Generation:    req.Generation,
 		OutputPath:    req.Output,
+		ExcludeRules:  excludeRules,
 	})
 	if err != nil {
 		s.writeOperationError(w, "scan_failed", err)
 		return
+	}
+	if req.Output != "" {
+		if err := manifest.SaveFile(req.Output, generated); err != nil {
+			s.writeOperationError(w, "scan_failed", err)
+			return
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -429,12 +442,28 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid coordinator URL", "code": "invalid_coordinator_url"})
 		return
 	}
+	auth := coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}
+	status, err := client.GetElectionStatus(r.Context(), auth)
+	if err != nil {
+		s.writeOperationError(w, "push_failed", err)
+		return
+	}
+	var generation *int
+	if status.CurrentHostID != nil {
+		if *status.CurrentHostID != cfg.HostID {
+			s.writeOperationError(w, "push_failed", errors.New("this host is not the current host"))
+			return
+		}
+		value := status.CurrentHostGeneration
+		generation = &value
+	}
 
 	summary, err := artifactsync.Push(r.Context(), artifactsync.PushOptions{
-		ManifestPath: req.Manifest,
-		ServerDir:    req.ServerDir,
-		Config:       cfg,
-		Client:       client,
+		ManifestPath:   req.Manifest,
+		ServerDir:      req.ServerDir,
+		Config:         cfg,
+		Client:         client,
+		HostGeneration: generation,
 	})
 	if err != nil {
 		s.writeOperationError(w, "push_failed", err)

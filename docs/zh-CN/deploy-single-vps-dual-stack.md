@@ -583,3 +583,15 @@ v0.1-demo 双端口手动/半自动接管范围。
 - [ ] `SHA256SUMS` 校验通过。
 - [ ] `dist` 产物未提交。
 - [ ] 示例文件无真实 secret。
+
+## 17. v0.2 MVP 的完整目录 bootstrap
+
+v0.2 MVP 推荐用
+[`server-runtime` bootstrap](server-runtime-bootstrap.md)
+在 Host A 与 Host B 之间同步完整可运行的 `serverDir`。第一个 Host 使用
+`bootstrap create-group` 创建 group、首次 push 并确认 current host；其他 Host
+使用 `bootstrap join-group` 拉取 latest、restore 并逐文件校验。
+
+v0.1-demo 的 `scan`、`safe-sync`、`push`、`pull` 手动 artifact 流程仍保持兼容，
+适合分类型快照和排障。`server-runtime` 只是把首次完整目录复制缩短为两个明确命令，
+不会自动切换 Velocity，也不会让新加入 Host 自动成为 current host。
