@@ -1,8 +1,6 @@
 package manifest
 
 import (
-	"bytes"
-	"encoding/json"
 	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/fileclass"
@@ -15,7 +13,6 @@ type ArtifactKind string
 const (
 	WorldSnapshot ArtifactKind = "world-snapshot"
 	ServerPack    ArtifactKind = "server-pack"
-	ServerRuntime ArtifactKind = "server-runtime"
 	AdminState    ArtifactKind = "admin-state"
 )
 
@@ -26,31 +23,10 @@ type Manifest struct {
 	GroupID           string       `json:"groupId"`
 	CreatedAt         time.Time    `json:"createdAt"`
 	CreatorHostID     string       `json:"creatorHostId"`
-	Generation        *int         `json:"generation,omitempty"`
 	ParentArtifactID  *string      `json:"parentArtifactId"`
 	ServerPackVersion *string      `json:"serverPackVersion,omitempty"`
 	Files             []FileEntry  `json:"files"`
 	Summary           Summary      `json:"summary"`
-	summaryMissing    bool
-}
-
-func (m *Manifest) UnmarshalJSON(data []byte) error {
-	type manifestAlias Manifest
-
-	var decoded manifestAlias
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-
-	*m = Manifest(decoded)
-	rawSummary, ok := fields["summary"]
-	m.summaryMissing = !ok || bytes.Equal(bytes.TrimSpace(rawSummary), []byte("null"))
-	return nil
 }
 
 type FileEntry struct {
@@ -72,7 +48,7 @@ type Summary struct {
 
 func IsValidArtifactKind(kind ArtifactKind) bool {
 	switch kind {
-	case WorldSnapshot, ServerPack, ServerRuntime, AdminState:
+	case WorldSnapshot, ServerPack, AdminState:
 		return true
 	default:
 		return false
@@ -85,8 +61,6 @@ func ClassAllowedForArtifact(kind ArtifactKind, class fileclass.FileClass) bool 
 		return class == fileclass.WorldRuntime || class == fileclass.PluginRuntimeData
 	case ServerPack:
 		return class == fileclass.ServerPack
-	case ServerRuntime:
-		return class == fileclass.ServerRuntime
 	case AdminState:
 		return class == fileclass.AdminState
 	default:

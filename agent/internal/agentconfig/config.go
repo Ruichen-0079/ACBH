@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	DirName      = "acbh"
+	DirName      = "ACBH"
 	FileName     = "config.yaml"
 	AgentVersion = "0.1.0"
 )
@@ -25,10 +25,6 @@ type Config struct {
 	Platform       string       `json:"platform"`
 	AgentVersion   string       `json:"agentVersion"`
 	Server         ServerConfig `json:"server,omitempty"`
-	ArtifactClass  string       `json:"artifactClass,omitempty"`
-	LastPushedID   string       `json:"lastPushedArtifactId,omitempty"`
-	ExcludeRules   []string     `json:"localExcludeRules,omitempty"`
-	RCON           RCONConfig   `json:"rcon,omitempty"`
 }
 
 type ServerConfig struct {
@@ -36,12 +32,6 @@ type ServerConfig struct {
 	Command     string `json:"command,omitempty"`
 	LogDir      string `json:"logDir,omitempty"`
 	StopTimeout string `json:"stopTimeout,omitempty"`
-}
-
-type RCONConfig struct {
-	Host        string `json:"host,omitempty"`
-	Port        int    `json:"port,omitempty"`
-	PasswordEnv string `json:"passwordEnv,omitempty"`
 }
 
 func DefaultPath() (string, error) {
@@ -54,12 +44,29 @@ func DefaultPath() (string, error) {
 }
 
 func DefaultDir() (string, error) {
+	if override := os.Getenv("ACBH_APP_DATA_DIR"); override != "" {
+		return override, nil
+	}
+
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("find user config directory: %w", err)
 	}
 
 	return filepath.Join(dir, DirName), nil
+}
+
+func ResolveAppDataDir(executablePath string) (string, error) {
+	if override := os.Getenv("ACBH_APP_DATA_DIR"); override != "" {
+		return override, nil
+	}
+
+	exeDir := filepath.Dir(executablePath)
+	if Exists(filepath.Join(exeDir, "portable.flag")) {
+		return filepath.Join(exeDir, "data"), nil
+	}
+
+	return DefaultDir()
 }
 
 func Exists(path string) bool {

@@ -8,19 +8,6 @@
   "deviceName": "my-device",
   "platform": "linux",
   "agentVersion": "0.1.0",
-  "artifactClass": "server-runtime",
-  "lastPushedArtifactId": "runtime-example",
-  "localExcludeRules": [
-    "logs/",
-    "crash-reports/",
-    "*.log",
-    "*.tmp"
-  ],
-  "rcon": {
-    "host": "127.0.0.1",
-    "port": 25575,
-    "passwordEnv": "ACBH_RCON_PASSWORD"
-  },
   "server": {
     "dir": "/home/user/minecraft-server",
     "command": "java -Xmx4G -Xms2G -jar fabric-server-launch.jar nogui",

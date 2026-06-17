@@ -14,7 +14,6 @@ type FileClass string
 const (
 	WorldRuntime      FileClass = "world-runtime"
 	ServerPack        FileClass = "server-pack"
-	ServerRuntime     FileClass = "server-runtime"
 	AdminState        FileClass = "admin-state"
 	PluginRuntimeData FileClass = "plugin-runtime-data"
 	Ignored           FileClass = "ignored"
@@ -30,7 +29,7 @@ var adminStateFiles = map[string]struct{}{
 	"usercache.json":      {},
 }
 
-var windowsDrivePattern = regexp.MustCompile(`^[A-Za-z]:`)
+var windowsDrivePattern = regexp.MustCompile(`^[A-Za-z]:[/\\]`)
 
 func NormalizePath(raw string) (string, error) {
 	if raw == "" {
@@ -120,7 +119,7 @@ func ClassifyNormalizedPath(normalized string) FileClass {
 
 func IsKnownClass(class FileClass) bool {
 	switch class {
-	case WorldRuntime, ServerPack, ServerRuntime, AdminState, PluginRuntimeData, Ignored, Unknown:
+	case WorldRuntime, ServerPack, AdminState, PluginRuntimeData, Ignored, Unknown:
 		return true
 	default:
 		return false

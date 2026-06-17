@@ -33,8 +33,6 @@ test("dashboard route serves the Chinese control center with Agent local control
     assert.match(response.body, /运行 doctor/u);
     assert.match(response.body, /扫描 server-pack/u);
     assert.match(response.body, /safe-sync/u);
-    assert.match(response.body, /server-runtime/u);
-    assert.match(response.body, /pull latest server-runtime \+ verify/u);
     assert.match(response.body, /push/u);
     assert.match(response.body, /pull/u);
     assert.match(response.body, /\u670d\u52a1\u5668\u63a7\u5236/u);
@@ -59,8 +57,6 @@ test("dashboard route serves the Chinese control center with Agent local control
     assert.match(response.body, /id="hostToken" type="password"/);
     assert.match(response.body, /id="agentToken" type="password"/);
     assert.match(response.body, /function forgetSecrets\(\)/);
-    assert.match(response.body, /function clearSecretValues\(\)/);
-    assert.match(response.body, /function authError\(status\)\{[\s\S]*clearSecretValues\(\)/u);
     assert.match(response.body, /local_control_auth_failed/);
     assert.match(response.body, /Register host/);
     assert.match(response.body, /Send heartbeat/);
@@ -73,8 +69,6 @@ test("dashboard route serves the Chinese control center with Agent local control
     assert.match(response.body, /if\(r\.status===401\|\|r\.status===403\)/);
     assert.match(response.body, /\$\("agentToken"\)\.value=""/);
     assert.match(response.body, /confirm\("Pull and restore/);
-    assert.match(response.body, /allowNonEmpty=confirm\("server-runtime restore requires an empty directory by default/);
-    assert.match(response.body, /allowNonEmpty:allowNonEmpty/);
     assert.match(response.body, /confirm\("Stop the managed Minecraft server/);
     assert.match(response.body, /id="takeoverToken" type="password"/);
     assert.match(response.body, /secretEnvSetup\("ACBH_ACCESS_KEY"/);

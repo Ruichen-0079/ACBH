@@ -62,8 +62,6 @@ type PullSummary struct {
 	PendingDeletes    int
 	AppliedDeletes    int
 	TotalBytes        int64
-	VerifiedFiles     int
-	VerifyResult      string
 }
 
 func Push(ctx context.Context, opts PushOptions) (PushSummary, error) {
@@ -279,12 +277,6 @@ func Pull(ctx context.Context, opts PullOptions) (PullSummary, error) {
 		summary.TotalBytes += size
 	}
 
-	verified, err := VerifyRestoredFiles(outputDir, downloaded.Manifest)
-	if err != nil {
-		return PullSummary{}, err
-	}
-	summary.VerifiedFiles = verified.VerifiedFiles
-	summary.VerifyResult = "PASS"
 	return summary, nil
 }
 

@@ -103,6 +103,6 @@ bash scripts/demo-smoke.sh
 ## 9. Notes for release
 
 - [ ] `CHANGELOG.md` or equivalent updated (if exists)
-- [ ] Release notes summarize security defaults, demo scope, and known limitations ([`release-notes-v0.1-demo.md`](release-notes-v0.1-demo.md))
+- [ ] Release notes summarize security defaults, demo scope, and known limitations
 - [ ] Version string consistent (agent `agentconfig.AgentVersion`, coordinator `package.json`)
 - [ ] Release artifacts build (`bash scripts/build-agent-release.sh`)

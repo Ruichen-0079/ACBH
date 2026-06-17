@@ -8,7 +8,6 @@ type Inspection struct {
 	ArtifactID        string                      `json:"artifactId"`
 	GroupID           string                      `json:"groupId"`
 	CreatorHostID     string                      `json:"creatorHostId"`
-	Generation        *int                        `json:"generation,omitempty"`
 	ServerPackVersion *string                     `json:"serverPackVersion,omitempty"`
 	CreatedAt         string                      `json:"createdAt"`
 	FileCount         int                         `json:"fileCount"`
@@ -28,7 +27,6 @@ func Inspect(m Manifest) (Inspection, error) {
 		ArtifactID:        m.ArtifactID,
 		GroupID:           m.GroupID,
 		CreatorHostID:     m.CreatorHostID,
-		Generation:        m.Generation,
 		ServerPackVersion: m.ServerPackVersion,
 		CreatedAt:         m.CreatedAt.Format("2006-01-02T15:04:05Z07:00"),
 		FileCount:         len(m.Files),
