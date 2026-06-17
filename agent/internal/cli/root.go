@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,7 +20,9 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/artifactsync"
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
+	"github.com/Ruichen-0079/ACBH/agent/internal/desktop"
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
+	"github.com/Ruichen-0079/ACBH/agent/internal/mcimport"
 	"github.com/Ruichen-0079/ACBH/agent/internal/mcserver"
 	"github.com/Ruichen-0079/ACBH/agent/internal/rcon"
 	"github.com/Ruichen-0079/ACBH/agent/internal/scanner"
@@ -49,7 +52,6 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(
 		newDoctorCmd(),
 		newLoginCmd(),
-		newBootstrapCmd(),
 		newHeartbeatCmd(),
 		newDaemonCmd(),
 		newScanCmd(),
@@ -63,8 +65,248 @@ func newRootCmd() *cobra.Command {
 		newGcCmd(),
 		newRelayCmd(),
 		newControlCmd(),
+		newDesktopCmd(),
 	)
 	return rootCmd
+}
+
+func newDesktopCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "desktop",
+		Short: "Windows-friendly private local launcher",
+		Long:  "管理私人本地模式：一键启动/关闭控制端和本地主机代理配置。默认只绑定 127.0.0.1。",
+	}
+	cmd.AddCommand(
+		newDesktopStartCmd(),
+		newDesktopStopCmd(),
+		newDesktopStatusCmd(),
+		newDesktopInspectServerCmd(),
+		newDesktopImportServerCmd(),
+		newDesktopResetCmd(),
+	)
+	return cmd
+}
+
+func newDesktopStartCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "一键启动控制端并自动注册本地主机",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var log bytes.Buffer
+			status, err := desktop.Start(cmd.Context(), opts, &log)
+			if log.Len() > 0 {
+				fmt.Fprint(cmd.OutOrStdout(), log.String())
+			}
+			printDesktopStatus(cmd, status)
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&opts.DisplayName, "name", "", "私人模式显示名称")
+	cmd.Flags().StringVar(&opts.DeviceName, "device-name", "", "本机设备名称")
+	return cmd
+}
+
+func newDesktopStopCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "stop",
+		Short: "一键关闭控制端",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var log bytes.Buffer
+			status, err := desktop.Stop(opts, &log)
+			if log.Len() > 0 {
+				fmt.Fprint(cmd.OutOrStdout(), log.String())
+			}
+			printDesktopStatus(cmd, status)
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	return cmd
+}
+
+func newDesktopStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "查看桌面私人模式状态",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			status, err := desktop.CurrentStatus(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(cmd, status)
+			}
+			printDesktopStatus(cmd, status)
+			return nil
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopInspectServerCmd() *cobra.Command {
+	var serverDir string
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "inspect-server",
+		Short: "检测 Minecraft 服务端目录",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			report, err := mcimport.Inspect(serverDir)
+			if err != nil {
+				return err
+			}
+			if jsonOutput {
+				return printJSON(cmd, report)
+			}
+			printMCImportReport(cmd, report)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&serverDir, "server-dir", "", "Minecraft 服务端根目录")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	_ = cmd.MarkFlagRequired("server-dir")
+	return cmd
+}
+
+func newDesktopImportServerCmd() *cobra.Command {
+	var opts desktop.Options
+	var serverDir string
+	var stopTimeout time.Duration
+	cmd := &cobra.Command{
+		Use:   "import-server",
+		Short: "导入 Minecraft 服务端目录并保存到本地配置",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			report, err := mcimport.Inspect(serverDir)
+			if err != nil {
+				return err
+			}
+			printMCImportReport(cmd, report)
+			if report.SuggestedCommand == "" {
+				return errors.New("无法生成启动命令建议，请确认服务端 jar 文件名")
+			}
+			if stopTimeout <= 0 {
+				stopTimeout = defaultServerStopTimeout
+			}
+
+			addDesktopConfigDefaults(&opts)
+			configPath := filepath.Join(opts.AppDataDir, agentconfig.FileName)
+			cfg, err := agentconfig.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("导入前请先完成 desktop start 初始化本地主机配置: %w", err)
+			}
+			cfg.Server = agentconfig.ServerConfig{
+				Dir:         report.ServerDir,
+				Command:     report.SuggestedCommand,
+				LogDir:      filepath.Join(opts.AppDataDir, "logs", "minecraft"),
+				StopTimeout: stopTimeout.String(),
+			}
+			if err := agentconfig.Save(configPath, cfg); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "服务端目录已保存到本地配置: %s\n", configPath)
+			return nil
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&serverDir, "server-dir", "", "Minecraft 服务端根目录")
+	cmd.Flags().DurationVar(&stopTimeout, "stop-timeout", defaultServerStopTimeout, "停止服务端等待时间")
+	_ = cmd.MarkFlagRequired("server-dir")
+	return cmd
+}
+
+func newDesktopResetCmd() *cobra.Command {
+	var opts desktop.Options
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "reset",
+		Short: "重置本地私人模式配置",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !yes {
+				return errors.New("重置会删除本地 groupId/accessKey/hostToken；请加 --yes 确认")
+			}
+			if err := desktop.Reset(opts); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "本地私人模式配置已重置。")
+			return nil
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&yes, "yes", false, "确认删除本地私人模式配置")
+	return cmd
+}
+
+func addDesktopCommonFlags(cmd *cobra.Command, opts *desktop.Options) {
+	cmd.Flags().StringVar(&opts.AppDataDir, "app-data-dir", "", "ACBH 数据目录，默认 %APPDATA%\\ACBH；便携模式使用 exe 同级 data")
+	cmd.Flags().StringVar(&opts.CoordinatorPath, "coordinator", "", "coordinator dist/index.js 路径")
+	cmd.Flags().StringVar(&opts.NodePath, "node", "", "Node.js 可执行文件路径")
+	cmd.Flags().StringVar(&opts.Host, "host", "127.0.0.1", "控制端监听地址")
+	cmd.Flags().StringVar(&opts.Port, "port", "6121", "控制端监听端口")
+}
+
+func addDesktopConfigDefaults(opts *desktop.Options) {
+	if opts.ExecutablePath == "" {
+		if exe, err := os.Executable(); err == nil {
+			opts.ExecutablePath = exe
+		}
+	}
+	if opts.AppDataDir == "" {
+		if dir, err := agentconfig.ResolveAppDataDir(opts.ExecutablePath); err == nil {
+			opts.AppDataDir = dir
+		}
+	}
+}
+
+func printDesktopStatus(cmd *cobra.Command, status desktop.Status) {
+	if status.AppDataDir == "" {
+		return
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "桌面私人模式状态")
+	fmt.Fprintf(cmd.OutOrStdout(), "数据目录: %s\n", status.AppDataDir)
+	fmt.Fprintf(cmd.OutOrStdout(), "控制端地址: %s\n", status.CoordinatorURL)
+	fmt.Fprintf(cmd.OutOrStdout(), "控制端状态文件: %s\n", status.CoordinatorState)
+	if status.CoordinatorPID > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "控制端 PID: %d\n", status.CoordinatorPID)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "健康检查: %t\n", status.HealthOK)
+	if status.GroupID != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "当前服务器组: %s\n", status.GroupID)
+	}
+	if status.HostID != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "当前主机: %s\n", status.HostID)
+	}
+	if status.Java != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Java: %s\n", status.Java)
+	}
+	if status.Node != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Node: %s\n", status.Node)
+	}
+	if status.LastError != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "最近错误: %s\n", status.LastError)
+	}
+}
+
+func printMCImportReport(cmd *cobra.Command, report mcimport.Report) {
+	fmt.Fprintln(cmd.OutOrStdout(), "Minecraft 服务端目录检测")
+	fmt.Fprintf(cmd.OutOrStdout(), "目录: %s\n", report.ServerDir)
+	fmt.Fprintf(cmd.OutOrStdout(), "类型: %s\n", report.ServerType)
+	if report.SuggestedCommand != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "建议启动命令: %s\n", report.SuggestedCommand)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "server.properties: %t\n", report.HasProperties)
+	fmt.Fprintf(cmd.OutOrStdout(), "eula.txt: %t\n", report.HasEULA)
+	fmt.Fprintf(cmd.OutOrStdout(), "world: %t\n", report.HasWorld)
+	fmt.Fprintf(cmd.OutOrStdout(), "mods: %t\n", report.HasMods)
+	fmt.Fprintf(cmd.OutOrStdout(), "RCON: %s\n", report.RCON.ChineseMessage)
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(cmd.OutOrStdout(), "提示: %s\n", warning)
+	}
 }
 
 func newServerCmd() *cobra.Command {
@@ -236,7 +478,6 @@ func newHeartbeatCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.status, "status", "standby", "Host status to report")
 	cmd.Flags().StringVar(&opts.latestWorldSnapshot, "latest-world-snapshot", "", "Latest local world snapshot artifact ID")
 	cmd.Flags().StringVar(&opts.latestServerPack, "latest-server-pack", "", "Latest local server pack artifact ID")
-	cmd.Flags().StringVar(&opts.latestServerRuntime, "latest-server-runtime", "", "Latest local server runtime artifact ID")
 	cmd.Flags().StringVar(&opts.latestAdminState, "latest-admin-state", "", "Latest local admin state artifact ID")
 	cmd.Flags().StringVar(&opts.javaAvailable, "java-available", "", "Override Java availability: true or false")
 	cmd.Flags().StringVar(&opts.connectionHost, "connection-host", "", "Host address players can connect to")
@@ -288,7 +529,7 @@ func newScanCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Minecraft server directory to scan")
-	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, server-runtime, or admin-state")
+	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, or admin-state")
 	cmd.Flags().StringVar(&opts.artifactID, "artifact-id", "", "Artifact ID for the generated manifest")
 	cmd.Flags().StringVar(&opts.serverPackVersion, "server-pack-version", "", "Server pack version for world snapshots")
 	cmd.Flags().StringVar(&opts.parentArtifactID, "parent-artifact-id", "", "Parent artifact ID")
@@ -296,7 +537,6 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opts.creatorHostID, "creator-host-id", "", "Creator host ID")
 	cmd.Flags().StringVar(&opts.previousManifest, "previous-manifest", "", "Previous manifest used to emit deleted entries")
 	cmd.Flags().StringVar(&opts.output, "output", "", "Path to write manifest JSON")
-	cmd.Flags().IntVar(&opts.generation, "generation", -1, "Current host generation (required for server-runtime)")
 	cmd.Flags().BoolVar(&opts.jsonOutput, "json", false, "Print JSON output")
 	_ = cmd.MarkFlagRequired("server-dir")
 	_ = cmd.MarkFlagRequired("artifact-kind")
@@ -369,7 +609,7 @@ func newPullCmd() *cobra.Command {
 			return runPull(cmd.Context(), cmd, opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, server-runtime, or admin-state")
+	cmd.Flags().StringVar(&opts.artifactKind, "artifact-kind", "", "Artifact kind: world-snapshot, server-pack, or admin-state")
 	cmd.Flags().StringVar(&opts.artifactID, "artifact-id", "latest", "Artifact ID to pull, or latest")
 	cmd.Flags().StringVar(&opts.outputDir, "output-dir", "", "Directory to restore files into")
 	cmd.Flags().BoolVar(&opts.applyDeletes, "apply-deletes", false, "Apply deleted manifest entries to local files")
@@ -466,9 +706,6 @@ func newManifestInspectCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID: %s\n", inspection.ArtifactID)
 			fmt.Fprintf(cmd.OutOrStdout(), "Group ID: %s\n", inspection.GroupID)
 			fmt.Fprintf(cmd.OutOrStdout(), "Creator host ID: %s\n", inspection.CreatorHostID)
-			if inspection.Generation != nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "Generation: %d\n", *inspection.Generation)
-			}
 			if inspection.ServerPackVersion != nil {
 				fmt.Fprintf(cmd.OutOrStdout(), "Server pack version: %s\n", *inspection.ServerPackVersion)
 			}
@@ -502,7 +739,6 @@ type heartbeatOptions struct {
 	status              string
 	latestWorldSnapshot string
 	latestServerPack    string
-	latestServerRuntime string
 	latestAdminState    string
 	javaAvailable       string
 	connectionHost      string
@@ -521,7 +757,6 @@ type scanOptions struct {
 	previousManifest  string
 	output            string
 	jsonOutput        bool
-	generation        int
 }
 
 type safeSyncOptions struct {
@@ -801,8 +1036,6 @@ func runPull(ctx context.Context, cmd *cobra.Command, opts pullOptions) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Pending deletes: %d\n", summary.PendingDeletes)
 	fmt.Fprintf(cmd.OutOrStdout(), "Applied deletes: %d\n", summary.AppliedDeletes)
 	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes restored: %d\n", summary.TotalBytes)
-	fmt.Fprintf(cmd.OutOrStdout(), "Verified files: %d\n", summary.VerifiedFiles)
-	fmt.Fprintf(cmd.OutOrStdout(), "Verify result: %s\n", summary.VerifyResult)
 	return nil
 }
 
@@ -813,17 +1046,12 @@ func runScan(cmd *cobra.Command, opts scanOptions) error {
 	}
 
 	artifactKind := manifest.ArtifactKind(opts.artifactKind)
-	var generation *int
-	if opts.generation >= 0 {
-		generation = &opts.generation
-	}
 	manifestData, report, err := scanner.Scan(scanner.Options{
 		ServerDir:            opts.serverDir,
 		ArtifactKind:         artifactKind,
 		ArtifactID:           opts.artifactID,
 		GroupID:              groupID,
 		CreatorHostID:        creatorHostID,
-		Generation:           generation,
 		ServerPackVersion:    opts.serverPackVersion,
 		ParentArtifactID:     opts.parentArtifactID,
 		PreviousManifestPath: opts.previousManifest,
@@ -1264,14 +1492,6 @@ func buildHeartbeatRequest(cfg agentconfig.Config, opts heartbeatOptions) (coord
 	}
 	if opts.latestAdminState != "" {
 		latestArtifacts[string(manifest.AdminState)] = opts.latestAdminState
-	}
-	if opts.latestServerRuntime != "" {
-		latestArtifacts[string(manifest.ServerRuntime)] = opts.latestServerRuntime
-	}
-	if cfg.ArtifactClass == string(manifest.ServerRuntime) && cfg.LastPushedID != "" {
-		if _, exists := latestArtifacts[string(manifest.ServerRuntime)]; !exists {
-			latestArtifacts[string(manifest.ServerRuntime)] = cfg.LastPushedID
-		}
 	}
 
 	var connection *coordinator.HostConnection

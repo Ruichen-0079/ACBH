@@ -67,7 +67,6 @@ async function saveArtifactMeta(
     groupId,
     createdAt: createdAt ?? "2026-06-01T00:00:00.000Z",
     creatorHostId,
-    generation: kind === "server-runtime" ? 0 : undefined,
     parentArtifactId: null,
     serverPackVersion: kind === "world-snapshot" ? "pack_000001" : null,
     files: [{ path: "test.file", class: fileClass, size: content.byteLength, sha256: objectSha256, modifiedAt: "2026-06-01T00:00:00.000Z", deleted: false }],
@@ -248,34 +247,6 @@ test("latest artifact per kind is never deleted", async () => {
     assert.equal(result.deletedArtifacts.length, 1);
     assert.equal(result.deletedArtifacts[0].artifactId, "snap_old");
     assert.equal(store.getLatestArtifact(host.groupId, "world-snapshot").artifactId, "snap_new");
-  } finally {
-    await rm(root, { force: true, recursive: true });
-  }
-});
-
-test("latest server-runtime artifact is protected by GC", async () => {
-  const store = createInMemoryCoordinatorStore({ retentionPerKind: 1, gcMinAgeMs: 0 });
-  const host = createTestHost(store);
-  const { storage, root } = await createStorage();
-  try {
-    await saveArtifactMeta(storage, host.groupId, "server-runtime", "runtime_old", host.hostId, "2026-06-01T00:00:00Z");
-    await saveArtifactMeta(storage, host.groupId, "server-runtime", "runtime_new", host.hostId, "2026-06-02T00:00:00Z");
-    recordArtifact(store, host.groupId, host, "server-runtime", "runtime_old", "2026-06-01T00:00:00Z", "available");
-    recordArtifact(store, host.groupId, host, "server-runtime", "runtime_new", "2026-06-02T00:00:00Z", "available");
-
-    const result = await store.gcArtifacts({
-      groupId: host.groupId,
-      dryRun: false,
-      hostId: host.hostId,
-      hostToken: host.hostToken,
-      retentionPerKind: 1,
-      minAgeMs: 0,
-      backend: testGcBackend(storage),
-    });
-
-    assert.equal(result.deletedArtifacts.length, 1);
-    assert.equal(result.deletedArtifacts[0].artifactId, "runtime_old");
-    assert.equal(store.getLatestArtifact(host.groupId, "server-runtime").artifactId, "runtime_new");
   } finally {
     await rm(root, { force: true, recursive: true });
   }

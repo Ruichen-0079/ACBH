@@ -108,24 +108,6 @@ actions. Credentials stay in page memory and are cleared on refresh. Follow the
 [graphical demo walkthrough](docs/demo.md#graphical-dashboard-demo) for the
 bootstrap steps and fake server directory.
 
-## Server-runtime bootstrap
-
-The v0.2 MVP can bootstrap a complete runnable server directory:
-
-```bash
-acbh-agent bootstrap create-group \
-  --coordinator http://127.0.0.1:6121 \
-  --group "example-group" \
-  --server-dir /path/to/fabric-a \
-  --artifact-class server-runtime
-```
-
-Other hosts securely provide `ACBH_ACCESS_KEY`, then run
-`bootstrap join-group` to restore and SHA-256 verify the latest
-`server-runtime`. Joining does not make the new host current; takeover remains
-explicit. See the
-[Chinese server-runtime bootstrap guide](docs/zh-CN/server-runtime-bootstrap.md).
-
 ## Security defaults
 
 - Local Control binds to `127.0.0.1:6122`; remote binding requires explicit
@@ -421,7 +403,7 @@ go run . heartbeat \
   --connection-network tailscale
 ```
 
-The Coordinator uses a deterministic score and only considers fresh `online` or `standby` hosts. `ACBH_HOST_HEARTBEAT_TIMEOUT_MS` controls freshness and defaults to `30000`. When a latest `server-runtime` exists, a candidate must report that complete runtime locally; otherwise the legacy latest world-snapshot requirement applies. `javaAvailable: false` makes a host ineligible.
+The Coordinator uses a deterministic score and only considers fresh `online` or `standby` hosts. `ACBH_HOST_HEARTBEAT_TIMEOUT_MS` controls freshness and defaults to `30000`. An available latest world snapshot must already be reported locally when one exists, and `javaAvailable: false` makes a host ineligible.
 
 Election and assignment commands:
 
@@ -470,28 +452,6 @@ It proves Host A timeout detection, Host B selection, one-time assignment accept
 - `docs/sync-design.md`
 - `docs/election-design.md`
 - `docs/codex-guide.md`
-
-## v0.1-demo
-
-Current release branch: `release/v0.1-demo-prep`
-
-- [Release notes](docs/release-notes-v0.1-demo.md) — completed capabilities, security defaults, known
-  limitations, platform verification
-- CLI demo: `bash scripts/demo-smoke.sh`
-- GUI demo: `pnpm dev:coordinator` → `http://127.0.0.1:6121/dashboard`
-- [Single VPS dual-stack deployment guide](docs/zh-CN/deploy-single-vps-dual-stack.md)
-  — two Velocity/Fabric entries with a Dashboard-assisted takeover walkthrough
-- [v0.2 real VPS runbook](docs/zh-CN/v0.2-real-vps-runbook.md)
-- [server-runtime host bootstrap](docs/zh-CN/server-runtime-bootstrap.md)
-  — deploy and verify the dual-stack flow on a real low-cost public VPS
-- [Release packaging](docs/release-packaging.md) — how to build `dist/release/v0.1-demo`
-  artifacts for Linux and Windows
-- [Release checklist](docs/release-checklist.md) — 9-section pre-release verification
-- Go tests: 14 packages (all pass), Coordinator tests: 123/123
-- Verified on Fedora 41 and Windows 11 (PowerShell)
-
-**Not production ready.** Loopback-only, in-memory by default, no TLS.
-Plain-text HTTP on localhost is acceptable for local development only.
 
 ## V1 release
 

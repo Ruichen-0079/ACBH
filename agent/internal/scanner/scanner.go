@@ -6,11 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
-	"runtime"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/fileclass"
@@ -25,13 +22,11 @@ type Options struct {
 	ArtifactID           string
 	GroupID              string
 	CreatorHostID        string
-	Generation           *int
 	ServerPackVersion    string
 	ParentArtifactID     string
 	PreviousManifestPath string
 	OutputPath           string
 	Clock                func() time.Time
-	ExcludeRules         []string
 }
 
 type Report struct {
@@ -69,13 +64,6 @@ func Scan(opts Options) (manifest.Manifest, Report, error) {
 		ServerDir:    serverDir,
 		OutputPath:   opts.OutputPath,
 	}
-	outputPath := ""
-	if opts.OutputPath != "" {
-		outputPath, err = filepath.Abs(opts.OutputPath)
-		if err != nil {
-			return manifest.Manifest{}, Report{}, fmt.Errorf("resolve manifest output path: %w", err)
-		}
-	}
 	var files []manifest.FileEntry
 
 	err = filepath.WalkDir(serverDir, func(filePath string, entry os.DirEntry, walkErr error) error {
@@ -83,10 +71,6 @@ func Scan(opts Options) (manifest.Manifest, Report, error) {
 			return walkErr
 		}
 		if filePath == serverDir {
-			return nil
-		}
-		if outputPath != "" && samePath(filePath, outputPath) {
-			report.IgnoredFiles++
 			return nil
 		}
 
@@ -107,23 +91,11 @@ func Scan(opts Options) (manifest.Manifest, Report, error) {
 			}
 			return nil
 		}
-		if opts.ArtifactKind == manifest.ServerRuntime &&
-			IsServerRuntimeExcluded(normalized, entry.IsDir(), opts.ExcludeRules) {
-			report.IgnoredFiles++
-			addSample(&report.IgnoredSample, normalized)
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
 		if entry.IsDir() {
 			return nil
 		}
 
 		class := fileclass.ClassifyNormalizedPath(normalized)
-		if opts.ArtifactKind == manifest.ServerRuntime {
-			class = fileclass.ServerRuntime
-		}
 		if class == fileclass.Ignored {
 			report.IgnoredFiles++
 			addSample(&report.IgnoredSample, normalized)
@@ -199,7 +171,6 @@ func Scan(opts Options) (manifest.Manifest, Report, error) {
 		GroupID:           opts.GroupID,
 		CreatedAt:         createdAt,
 		CreatorHostID:     opts.CreatorHostID,
-		Generation:        opts.Generation,
 		ParentArtifactID:  parentArtifactID,
 		ServerPackVersion: serverPackVersion,
 		Files:             files,
@@ -218,13 +189,6 @@ func Scan(opts Options) (manifest.Manifest, Report, error) {
 	return out, report, nil
 }
 
-func samePath(left, right string) bool {
-	if filepath.Clean(left) == filepath.Clean(right) {
-		return true
-	}
-	return runtime.GOOS == "windows" && strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
-}
-
 func validateOptions(opts Options) error {
 	switch {
 	case opts.ServerDir == "":
@@ -239,87 +203,9 @@ func validateOptions(opts Options) error {
 		return fmt.Errorf("creator host ID is required")
 	case opts.ArtifactKind == manifest.WorldSnapshot && opts.ServerPackVersion == "":
 		return fmt.Errorf("server pack version is required for world-snapshot scans")
-	case opts.ArtifactKind == manifest.ServerRuntime && opts.Generation == nil:
-		return fmt.Errorf("generation is required for server-runtime scans")
 	default:
 		return nil
 	}
-}
-
-var defaultServerRuntimeExcludeRules = []string{
-	"logs/",
-	"crash-reports/",
-	"cache/",
-	".cache/",
-	"tmp/",
-	"temp/",
-	"dist/",
-	"node_modules/",
-	".git/",
-	"session.lock",
-	"*.log",
-	"*.tmp",
-	".DS_Store",
-	"Thumbs.db",
-}
-
-var defaultServerRuntimeExcludedDirectories = map[string]struct{}{
-	"logs":          {},
-	"crash-reports": {},
-	"cache":         {},
-	".cache":        {},
-	"tmp":           {},
-	"temp":          {},
-	"dist":          {},
-	"node_modules":  {},
-	".git":          {},
-}
-
-func DefaultServerRuntimeExcludeRules() []string {
-	return append([]string(nil), defaultServerRuntimeExcludeRules...)
-}
-
-func IsServerRuntimeExcluded(normalized string, isDir bool, extraRules []string) bool {
-	parts := strings.Split(normalized, "/")
-	for _, part := range parts {
-		if _, ok := defaultServerRuntimeExcludedDirectories[strings.ToLower(part)]; ok {
-			return true
-		}
-	}
-
-	base := path.Base(normalized)
-	lowerBase := strings.ToLower(base)
-	if lowerBase == "session.lock" || lowerBase == ".ds_store" || lowerBase == "thumbs.db" ||
-		strings.HasSuffix(lowerBase, ".log") || strings.HasSuffix(lowerBase, ".tmp") {
-		return true
-	}
-
-	for _, rule := range extraRules {
-		if matchesExcludeRule(normalized, isDir, rule) {
-			return true
-		}
-	}
-	return false
-}
-
-func matchesExcludeRule(normalized string, isDir bool, rawRule string) bool {
-	rule := strings.TrimSpace(strings.ReplaceAll(rawRule, "\\", "/"))
-	if rule == "" {
-		return false
-	}
-	if strings.HasSuffix(rule, "/") {
-		prefix := strings.TrimSuffix(rule, "/")
-		return normalized == prefix || strings.HasPrefix(normalized, prefix+"/") ||
-			strings.Contains(normalized, "/"+prefix+"/") ||
-			(isDir && strings.HasSuffix(normalized, "/"+prefix))
-	}
-	if matched, err := path.Match(rule, normalized); err == nil && matched {
-		return true
-	}
-	if matched, err := path.Match(rule, path.Base(normalized)); err == nil && matched {
-		return true
-	}
-	return normalized == rule || strings.HasPrefix(normalized, rule+"/")
 }
 
 func addDeletedEntries(opts Options, files []manifest.FileEntry) ([]manifest.FileEntry, int, error) {

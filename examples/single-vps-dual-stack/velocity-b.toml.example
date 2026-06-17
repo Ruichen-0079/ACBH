@@ -1,8 +1,0 @@
-# Minimal Velocity B routing fragment for the standby public entry.
-# Merge this into a complete velocity.toml and configure modern forwarding
-# according to your Velocity/Fabric authentication design.
-bind = "0.0.0.0:25575"
-
-[servers]
-main = "127.0.0.1:25576"
-try = ["main"]
