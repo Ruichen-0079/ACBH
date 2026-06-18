@@ -174,29 +174,40 @@ function Run-ActionAsync {
         [scriptblock]$Action,
         [switch]$Refresh
     )
-    Append-Log "$Title ..."
-    $form.UseWaitCursor = $true
-    $worker = New-Object System.ComponentModel.BackgroundWorker
-    $worker.DoWork += {
-        param($sender, $eventArgs)
-        try {
-            $eventArgs.Result = & $Action
-        } catch {
-            $eventArgs.Result = $_
-        }
-    }
-    $worker.RunWorkerCompleted += {
-        param($sender, $eventArgs)
+    try {
+        Append-Log "$Title ..."
+        $form.UseWaitCursor = $true
+        $worker = New-Object System.ComponentModel.BackgroundWorker
+        $actionToRun = $Action.GetNewClosure()
+        $refreshAfter = $Refresh.IsPresent
+        $worker.add_DoWork({
+            param($sender, $eventArgs)
+            try {
+                $eventArgs.Result = & $actionToRun
+            } catch {
+                $eventArgs.Result = $_
+            }
+        }.GetNewClosure())
+        $worker.add_RunWorkerCompleted({
+            param($sender, $eventArgs)
+            $form.UseWaitCursor = $false
+            if ($eventArgs.Result -is [System.Management.Automation.ErrorRecord]) {
+                Append-Log ("失败：" + $eventArgs.Result.Exception.Message)
+                Show-ChineseError $eventArgs.Result.Exception.Message
+            } elseif ($eventArgs.Error) {
+                Append-Log ("失败：" + $eventArgs.Error.Message)
+                Show-ChineseError $eventArgs.Error.Message
+            } else {
+                Append-Log ([string]$eventArgs.Result)
+                if ($refreshAfter) { Refresh-Status }
+            }
+        }.GetNewClosure())
+        $worker.RunWorkerAsync()
+    } catch {
         $form.UseWaitCursor = $false
-        if ($eventArgs.Result -is [System.Management.Automation.ErrorRecord]) {
-            Append-Log ("失败：" + $eventArgs.Result.Exception.Message)
-            Show-ChineseError $eventArgs.Result.Exception.Message
-        } else {
-            Append-Log ([string]$eventArgs.Result)
-            if ($Refresh) { Refresh-Status }
-        }
+        Append-Log ("按钮操作失败：" + $_.Exception.Message)
+        Show-ChineseError $_.Exception.Message
     }
-    $worker.RunWorkerAsync()
 }
 
 function Choose-ServerDir {
@@ -291,10 +302,23 @@ function Add-Button {
     $button.Text = $Text
     $button.Location = New-Object System.Drawing.Point($X, $Y)
     $button.Size = New-Object System.Drawing.Size(202, 34)
-    $button.Add_Click($Click)
+    Add-SafeClick $button $Click
     if ($Tip) { $script:ToolTip.SetToolTip($button, $Tip) }
     $buttonPanel.Controls.Add($button)
     return $button
+}
+
+function Add-SafeClick {
+    param([System.Windows.Forms.Control]$Control, [scriptblock]$Click)
+    $safeClick = {
+        try {
+            & $Click
+        } catch {
+            Append-Log ("按钮操作失败：" + $_.Exception.Message)
+            Show-ChineseError $_.Exception.Message
+        }
+    }.GetNewClosure()
+    $Control.Add_Click($safeClick)
 }
 
 $form = New-Object System.Windows.Forms.Form
@@ -377,12 +401,12 @@ $resetButton.Text = "重置本地配置"
 $resetButton.Location = New-Object System.Drawing.Point(20, 596)
 $resetButton.Size = New-Object System.Drawing.Size(202, 34)
 $script:ToolTip.SetToolTip($resetButton, "删除本地 groupId/accessKey/hostToken；不会删除真实 MC 服务端目录。")
-$resetButton.Add_Click({
+Add-SafeClick $resetButton {
     $answer = [System.Windows.Forms.MessageBox]::Show("重置会删除本地 Group ID、accessKey 和 hostToken，确定继续？", "确认重置", "YesNo", "Warning")
     if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
         Run-ActionAsync "重置本地配置" { Invoke-Agent @("desktop", "reset", "--app-data-dir", $AppDataDir, "--yes") } -Refresh
     }
-})
+}
 $form.Controls.Add($resetButton)
 
 $help = New-Object System.Windows.Forms.TextBox

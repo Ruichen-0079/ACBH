@@ -64,6 +64,32 @@ try {
     if ($ParseErrors -and $ParseErrors.Count -gt 0) {
         throw "GUI script parse failed: $($ParseErrors[0].Message)"
     }
+    foreach ($ForbiddenPattern in @(
+        '\.DoWork\s*(\+)?\s*=',
+        '\.RunWorkerCompleted\s*(\+)?\s*=',
+        '\.ProgressChanged\s*(\+)?\s*='
+    )) {
+        if ($GuiText -match $ForbiddenPattern) {
+            throw "GUI event binding smoke failed; forbidden pattern: $ForbiddenPattern"
+        }
+    }
+    foreach ($RequiredText in @(".add_DoWork(", ".add_RunWorkerCompleted(")) {
+        if (-not $GuiText.Contains($RequiredText)) {
+            throw "GUI event binding smoke failed; missing $RequiredText"
+        }
+    }
+    try {
+        $SmokeWorker = New-Object System.ComponentModel.BackgroundWorker
+        $SmokeWorker.add_DoWork({
+            param($Sender, $EventArgs)
+            $EventArgs.Result = "ok"
+        })
+        $SmokeWorker.add_RunWorkerCompleted({
+            param($Sender, $EventArgs)
+        })
+    } catch {
+        throw "BackgroundWorker event binding failed: $($_.Exception.Message)"
+    }
     foreach ($Word in @("发送心跳", "后台服务", "扫描服务端包", "安全同步世界快照", "上传同步制品", "拉取同步制品", "接管演练", "控制端", "本地主机代理", "术语说明")) {
         if (-not $GuiText.Contains($Word)) {
             throw "GUI wording smoke failed; missing $Word"
