@@ -23,6 +23,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/mcimport"
 	"github.com/Ruichen-0079/ACBH/agent/internal/mcserver"
 	"github.com/Ruichen-0079/ACBH/agent/internal/rcon"
+	"github.com/Ruichen-0079/ACBH/agent/internal/relay"
 	"github.com/Ruichen-0079/ACBH/agent/internal/scanner"
 )
 
@@ -624,6 +625,163 @@ func processRunning(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+type RelayHostState struct {
+	Running  bool   `json:"running"`
+	PID      int    `json:"pid,omitempty"`
+	Target   string `json:"target,omitempty"`
+	Message  string `json:"message"`
+	Sessions int    `json:"activeSessions,omitempty"`
+}
+
+const relayHostPIDFileName = "relay-host.pid"
+
+func relayHostPIDPath(opts Options) string {
+	return filepath.Join(opts.AppDataDir, "run", relayHostPIDFileName)
+}
+
+// StartRelayHost starts (or ensures) the relay host manager for public entry.
+// It checks current host, writes pid, and runs a discovery loop for assigned tunnel sessions.
+func StartRelayHost(opts Options, targetAddress string) (RelayHostState, error) {
+	opts = withDefaults(opts)
+	if err := ensureRunAndLogDirs(opts); err != nil {
+		return RelayHostState{}, err
+	}
+
+	// current host check
+	cp, err := CanPush(context.Background(), opts)
+	if err != nil {
+		return RelayHostState{}, fmt.Errorf("无法检查 current host: %w", err)
+	}
+	cfg, _ := loadDesktopConfig(opts)
+	if !cp.CanPush || cp.CurrentHostID != cfg.HostID {
+		return RelayHostState{Message: "当前本地主机不是 current host，不能启动公网中转 relay。"}, nil
+	}
+
+	pidPath := relayHostPIDPath(opts)
+	// if already running, return
+	if raw, err := os.ReadFile(pidPath); err == nil {
+		if p, _ := strconv.Atoi(strings.TrimSpace(string(raw))); p > 0 && processRunning(p) {
+			return RelayHostState{Running: true, PID: p, Target: targetAddress, Message: "公网中转 relay host 已在运行。"}, nil
+		}
+	}
+
+	if targetAddress == "" {
+		// auto from server config or default 25565
+		if cfg.Server.Dir != "" {
+			if r, _ := mcimport.Inspect(cfg.Server.Dir); r.LaunchJar != "" {
+				targetAddress = "127.0.0.1:25565"
+			}
+		}
+		if targetAddress == "" {
+			targetAddress = "127.0.0.1:25565"
+		}
+	}
+
+	// write pid
+	pid := os.Getpid()
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		return RelayHostState{}, fmt.Errorf("写入 relay host pid 失败: %w", err)
+	}
+
+	// In CLI this func is called from long-running cmd, so we can block here with the manager loop.
+	// For the manager, we poll list and start per-session host clients.
+	go runRelayHostManager(opts, targetAddress, pidPath)
+
+	return RelayHostState{Running: true, PID: pid, Target: targetAddress, Message: "公网中转 relay host 已启动 (manager 运行中)。"}, nil
+}
+
+func StopRelayHost(opts Options) (RelayHostState, error) {
+	opts = withDefaults(opts)
+	pidPath := relayHostPIDPath(opts)
+	raw, err := os.ReadFile(pidPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return RelayHostState{Message: "公网中转 relay host 未运行。"}, nil
+	}
+	if err != nil {
+		return RelayHostState{}, err
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if pid <= 0 || !processRunning(pid) {
+		_ = os.Remove(pidPath)
+		return RelayHostState{Message: "公网中转 relay host 记录已清理。"}, nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return RelayHostState{}, err
+	}
+	if err := proc.Kill(); err != nil {
+		return RelayHostState{}, fmt.Errorf("停止 relay host 失败: %w", err)
+	}
+	_ = os.Remove(pidPath)
+	return RelayHostState{Running: false, Message: "公网中转 relay host 已停止。"}, nil
+}
+
+func RelayHostStatus(opts Options) (RelayHostState, error) {
+	opts = withDefaults(opts)
+	pidPath := relayHostPIDPath(opts)
+	raw, err := os.ReadFile(pidPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return RelayHostState{Running: false, Message: "公网中转 relay host 未运行。"}, nil
+	}
+	if err != nil {
+		return RelayHostState{}, err
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	running := pid > 0 && processRunning(pid)
+	return RelayHostState{Running: running, PID: pid, Message: "公网中转 relay host 状态已查询。"}, nil
+}
+
+// runRelayHostManager discovers tunnel sessions assigned to us and starts HostRelayClient for each.
+func runRelayHostManager(opts Options, targetAddress string, pidPath string) {
+	// simple poll loop
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	activeSessions := map[string]context.CancelFunc{}
+
+	for {
+		select {
+		case <-ticker.C:
+			// list
+			cfg, err := loadDesktopConfig(opts)
+			if err != nil {
+				continue
+			}
+			client, _ := coordinator.NewClient(cfg.CoordinatorURL) // note: may need full auth but for list we added open
+			sessions, err := client.ListTunnelSessions(context.Background(), cfg.GroupID)
+			if err != nil {
+				continue
+			}
+			for _, s := range sessions {
+				if s.HostID != cfg.HostID || s.Status == "closed" {
+					continue
+				}
+				if _, ok := activeSessions[s.SessionID]; ok {
+					continue
+				}
+				// start a host client for this session
+				ctx, cancel := context.WithCancel(context.Background())
+				activeSessions[s.SessionID] = cancel
+				go func(sessID string, gen int) {
+					defer func() {
+						delete(activeSessions, sessID)
+					}()
+					hc := relay.NewHostRelayClient(relay.HostRelayOptions{
+						CoordinatorURL: cfg.CoordinatorURL,
+						GroupID:        cfg.GroupID,
+						SessionID:      sessID,
+						HostID:         cfg.HostID,
+						HostToken:      cfg.HostToken,
+						HostGeneration: gen,
+						TargetAddress:  targetAddress,
+					})
+					_ = hc.Run(ctx)
+				}(s.SessionID, s.CurrentHostGeneration)
+			}
+		}
+	}
 }
 
 func isPortLikelyInUse(port string) bool {

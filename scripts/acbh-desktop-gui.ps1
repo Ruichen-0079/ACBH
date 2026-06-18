@@ -241,6 +241,9 @@ function Set-StatusText {
     $peMsg = if ($Status.publicEntryMessage) { $Status.publicEntryMessage } else { "私人模式默认仅本机/可信局域网使用；如需外网连接，请配置端口转发、VPS relay 或隧道。" }
     $statusLabels[15].Text = "公网入口：未配置 public entry $peStatus"
     $statusLabels[16].Text = "公网入口说明：$peMsg"
+    # remote public / relay status (v0.3.2)
+    $mode = if ($Status.mode) { $Status.mode } else { "local-private" }
+    $statusLabels[14].Text = "数据同步源：$(if ($Status.dataSyncSource) { $Status.dataSyncSource } else { 'local' }) | 模式: $mode"
 }
 
 function Refresh-Status {
@@ -501,6 +504,35 @@ Add-Button "接管演练 takeover" 214 120 { Invoke-AgentCommandSafe -ActionName
 Add-Button "检查远程控制 RCON" 428 120 { Invoke-AgentCommandSafe -ActionName "检查远程控制 RCON" -Args @("desktop", "rcon-status", "--app-data-dir", $AppDataDir) -Refresh } "RCON 是 Minecraft 服务端远程控制接口，safe-sync 需要它执行 save-all flush。"
 Add-Button "刷新日志" 642 120 { Refresh-Logs } "读取 ACBH logs 目录内最新日志文件的最近 100 行。"
 Add-Button "清空 GUI 显示" 856 120 { $logBox.Clear(); Append-Log "已清空 GUI 日志显示；真实日志文件未删除。" } "只清空当前窗口显示，不删除真实日志文件。"
+
+# v0.3.2 remote public + relay (do not break local private)
+Add-Button "配置远程公网" 0 160 { 
+  $url = Read-Host "请输入公网 Coordinator URL (例如 http://1.2.3.4:6121)"
+  if ($url) { Run-Action "配置远程公网" @("desktop", "remote", "configure", "--coordinator-url", $url, "--public-entry", "1.2.3.4:25565") -Refresh }
+} "配置 VPS Coordinator 作为远程公网控制端和数据同步源"
+Add-Button "启动公网中转 relay" 214 160 { 
+  # relay host is long-running manager; start detached so GUI not block
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = $AgentPath
+  $psi.ArgumentList.Add("desktop")
+  $psi.ArgumentList.Add("relay")
+  $psi.ArgumentList.Add("start-host")
+  $psi.ArgumentList.Add("--app-data-dir")
+  $psi.ArgumentList.Add($AppDataDir)
+  $psi.UseShellExecute = $true
+  $psi.CreateNoWindow = $false
+  [System.Diagnostics.Process]::Start($psi) | Out-Null
+  Append-Log "公网中转 relay host 已后台启动（请在终端查看或使用 status 检查）。"
+  Start-Sleep -Milliseconds 500
+  Refresh-Status
+} "仅 current host 可启动；流量从 VPS:25565 转发到本机 MC"
+Add-Button "停止公网中转 relay" 428 160 { Run-Action "停止公网中转 relay" @("desktop", "relay", "stop-host", "--json") -Refresh } "停止由 ACBH 启动的公网中转"
+Add-Button "复制玩家连接地址" 642 160 { 
+  $addr = "VPS_PUBLIC_IP:25565 (请替换真实IP)"
+  if ($script:LastStatus -and $script:LastStatus.publicEntryStatus -eq "configured") { $addr = "公网入口已配置，请查看 VPS IP" }
+  [System.Windows.Forms.Clipboard]::SetText($addr)
+  Append-Log "玩家连接地址已复制: $addr （原版 MC 客户端直连）"
+} "复制给玩家：原版客户端直连 VPS 入口"
 
 $resetButton = New-Object System.Windows.Forms.Button
 $resetButton.Text = "重置本地配置"

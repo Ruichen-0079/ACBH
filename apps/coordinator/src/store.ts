@@ -1306,6 +1306,11 @@ export class InMemoryCoordinatorStore {
     return { ...session };
   }
 
+  listTunnelSessions(groupId: string): TunnelSession[] {
+    const group = this.requireGroup(groupId);
+    return Array.from(group.tunnelSessions.values()).map(s => ({ ...s }));
+  }
+
   updateTunnelSessionStatus(
     groupId: string,
     sessionId: string,

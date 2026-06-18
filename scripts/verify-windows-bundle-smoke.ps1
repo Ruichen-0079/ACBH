@@ -83,7 +83,7 @@ try {
             throw "GUI safe command smoke failed; missing $RequiredText"
         }
     }
-    foreach ($Word in @("发送心跳", "后台服务", "扫描服务端包", "安全同步世界快照", "上传同步制品", "拉取同步制品", "接管演练", "控制端", "本地主机代理", "术语说明", "启动 MC 服务端", "desktop start-server")) {
+    foreach ($Word in @("发送心跳", "后台服务", "扫描服务端包", "安全同步世界快照", "上传同步制品", "拉取同步制品", "接管演练", "控制端", "本地主机代理", "术语说明", "启动 MC 服务端", "desktop start-server", "公网中转", "relay host", "current host", "玩家连接地址", "远程公网")) {
         if (-not $GuiText.Contains($Word)) {
             throw "GUI wording smoke failed; missing $Word"
         }

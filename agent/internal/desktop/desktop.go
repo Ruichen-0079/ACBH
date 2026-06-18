@@ -79,6 +79,7 @@ type Status struct {
 	PublicEntryMessage    string   `json:"publicEntryMessage"`
 	LatestManifest        string   `json:"latestManifest"`
 	DataDir               string   `json:"dataDir"`
+	DataSyncSource        string   `json:"dataSyncSource"`
 	Warnings              []string `json:"warnings"`
 }
 
@@ -272,7 +273,7 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 	}
 
 	// populate hotfix3 required fields (keep old fields too for compat)
-	status.Mode = "private-desktop"
+	status.Mode = "local-private"
 	status.DataDir = opts.AppDataDir
 	status.PublicEntryStatus = "not_configured"
 	status.PublicEntryMessage = "私人模式默认仅本机/可信局域网使用；如需外网连接，请配置端口转发、VPS relay 或隧道。"
@@ -280,6 +281,15 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 	status.ServerType = status.MCServerType
 	status.JavaStatus = status.Java
 	status.LatestManifest = status.LatestManifestPath
+	status.DataSyncSource = "local"
+
+	// remote public detection (simple: if coordinator url not localhost)
+	if cfg, _ := loadDesktopConfig(opts); cfg.CoordinatorURL != "" && !strings.Contains(cfg.CoordinatorURL, "127.0.0.1") && !strings.Contains(cfg.CoordinatorURL, "localhost") {
+		status.Mode = "remote-public"
+		status.DataSyncSource = "public-vps"
+		status.PublicEntryStatus = "configured"
+		status.PublicEntryMessage = "公网中转已配置，玩家可直连 VPS 入口。"
+	}
 
 	status.CoordinatorStatus = "stopped"
 	if status.CoordinatorPID > 0 {

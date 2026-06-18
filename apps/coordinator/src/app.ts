@@ -88,5 +88,9 @@ export async function buildApp(options?: {
     maxObjectBytes: options?.maxObjectBytes,
   });
 
+  // Expose for public relay ingress and tests (v0.3.2)
+  (app as any).store = store;
+  (app as any).relay = relay;
+
   return app;
 }

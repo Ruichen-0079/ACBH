@@ -468,6 +468,43 @@ type GcResponse struct {
 	ProtectedArtifactIds []string            `json:"protectedArtifactIds"`
 }
 
+type TunnelSession struct {
+	SessionID             string `json:"sessionId"`
+	GroupID               string `json:"groupId"`
+	HostID                string `json:"hostId"`
+	PlayerID              string `json:"playerId"`
+	Mode                  string `json:"mode"`
+	Status                string `json:"status"`
+	CurrentHostGeneration int    `json:"currentHostGeneration"`
+	CreatedAt             string `json:"createdAt"`
+	ExpiresAt             string `json:"expiresAt"`
+}
+
+func (c *Client) ListTunnelSessions(ctx context.Context, groupID string) ([]TunnelSession, error) {
+	if groupID == "" {
+		return nil, fmt.Errorf("groupID required")
+	}
+	url := fmt.Sprintf("%s/v1/groups/%s/tunnel-sessions", c.baseURL, groupID)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list tunnel sessions: %s: %s", resp.Status, string(b))
+	}
+	var list []TunnelSession
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
 func (c *Client) RunGC(ctx context.Context, req GcRequest, auth ArtifactAuth, generation *int) (GcResponse, error) {
 	payload, err := json.Marshal(req)
 	if err != nil {

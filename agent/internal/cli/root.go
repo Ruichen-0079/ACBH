@@ -82,6 +82,8 @@ func newDesktopCmd() *cobra.Command {
 		newDesktopStatusCmd(),
 		newDesktopStartServerCmd(),
 		newDesktopStopServerCmd(),
+		newDesktopRelayCmd(),
+		newDesktopRemoteCmd(),
 		newDesktopDaemonCmd(),
 		newDesktopScanPackCmd(),
 		newDesktopSafeSyncWorldCmd(),
@@ -328,6 +330,151 @@ func newDesktopStopServerCmd() *cobra.Command {
 	}
 	addDesktopCommonFlags(cmd, &opts)
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出结构化 JSON")
+	return cmd
+}
+
+func newDesktopRelayCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "relay",
+		Short: "公网中转 relay host 管理（仅 current host 可启动）",
+	}
+	cmd.AddCommand(newDesktopRelayStartHostCmd())
+	cmd.AddCommand(newDesktopRelayStopHostCmd())
+	cmd.AddCommand(newDesktopRelayStatusCmd())
+	return cmd
+}
+
+func newDesktopRelayStartHostCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	var target string
+	cmd := &cobra.Command{
+		Use:   "start-host",
+		Short: "启动公网中转 relay host（仅 current host 有效，自动发现玩家 tunnel sessions）",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.StartRelayHost(opts, target)
+			if jsonOutput {
+				_ = printJSON(cmd, result)
+			}
+			if err != nil {
+				return err
+			}
+			if !jsonOutput {
+				fmt.Fprintln(cmd.OutOrStdout(), result.Message)
+			}
+			if !result.Running {
+				return fmt.Errorf("relay host start blocked or failed")
+			}
+			// block to keep manager running
+			select {}
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	cmd.Flags().StringVar(&target, "target-address", "", "本地目标地址 (默认从已导入 MC 配置推导 127.0.0.1:25565)")
+	return cmd
+}
+
+func newDesktopRelayStopHostCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "stop-host",
+		Short: "停止公网中转 relay host",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.StopRelayHost(opts)
+			if jsonOutput {
+				_ = printJSON(cmd, result)
+			} else {
+				fmt.Fprintln(cmd.OutOrStdout(), result.Message)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopRelayStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "公网中转 relay host 状态",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.RelayHostStatus(opts)
+			if jsonOutput {
+				_ = printJSON(cmd, result)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "running: %t pid: %d target: %s\n%s\n", result.Running, result.PID, result.Target, result.Message)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopRemoteCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "remote",
+		Short: "远程公网模式配置与切换（VPS Coordinator + relay + artifact sync）",
+	}
+	cmd.AddCommand(newDesktopRemoteConfigureCmd())
+	cmd.AddCommand(newDesktopRemoteStatusCmd())
+	// test, login, switch 可以后续或用现有 login/heartbeat
+	return cmd
+}
+
+func newDesktopRemoteConfigureCmd() *cobra.Command {
+	var opts desktop.Options
+	var coordURL, publicEntry, groupID string
+	cmd := &cobra.Command{
+		Use:   "configure",
+		Short: "配置远程公网 Coordinator URL 和玩家入口",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
+			if err != nil {
+				cfg = agentconfig.Config{}
+			}
+			if coordURL != "" {
+				cfg.CoordinatorURL = coordURL
+			}
+			if groupID != "" {
+				cfg.GroupID = groupID
+			}
+			// publicEntry 可存入扩展或 Server 注释；这里简单保存到 coordinator url 后
+			if err := agentconfig.Save(filepath.Join(opts.AppDataDir, agentconfig.FileName), cfg); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "远程公网配置已保存。Coordinator: %s\n", cfg.CoordinatorURL)
+			return nil
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&coordURL, "coordinator-url", "", "公网 Coordinator URL (例如 http://vps:6121)")
+	cmd.Flags().StringVar(&publicEntry, "public-entry", "", "玩家公网入口 (例如 1.2.3.4:25565)")
+	cmd.Flags().StringVar(&groupID, "group-id", "", "组 ID")
+	return cmd
+}
+
+func newDesktopRemoteStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "显示当前远程公网模式状态",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			st, err := desktop.CurrentStatus(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "mode: %s\ncoordinatorUrl: %s\ndataSyncSource: %s\npublicEntry: %s\nisCurrentHost: %v\n", st.Mode, st.CoordinatorURL, "public-vps", st.PublicEntryMessage, st.IsCurrentHost != nil && *st.IsCurrentHost)
+			return nil
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
 	return cmd
 }
 

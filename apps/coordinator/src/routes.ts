@@ -151,6 +151,10 @@ const tunnelSessionGetParamsSchema = z.object({
   sessionId: z.string().min(1),
 });
 
+const tunnelSessionListParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
 const tunnelSessionCreateSchema = z.object({
   playerId: z.string().min(1),
 });
@@ -532,6 +536,16 @@ export async function registerRoutes(
       }
       return { ...session };
     });
+  });
+
+  app.get("/v1/groups/:groupId/tunnel-sessions", async (request, reply) => {
+    const params = parseParams(tunnelSessionListParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+
+    // list may require host or admin auth in future; for now allow for relay host manager polling
+    return handleStoreCall(reply, () => store.listTunnelSessions(params.groupId));
   });
 
   app.get(
