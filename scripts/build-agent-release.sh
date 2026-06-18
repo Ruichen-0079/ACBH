@@ -76,7 +76,7 @@ done
 if [ -f "$DIST_DIR/acbh-desktop-windows-amd64.exe" ]; then
   echo ""
   echo "=== Building private desktop bundle ==="
-  BUNDLE_NAME="acbh-v0.3-private-desktop-bundle"
+  BUNDLE_NAME="acbh-v0.3.1-private-desktop-bundle"
   BUNDLE_PARENT="$(mktemp -d)"
   BUNDLE_ROOT="$BUNDLE_PARENT/$BUNDLE_NAME"
   rm -rf "$DIST_DIR/$BUNDLE_NAME" "$DIST_DIR/$BUNDLE_NAME.zip"
