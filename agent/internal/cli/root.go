@@ -80,6 +80,15 @@ func newDesktopCmd() *cobra.Command {
 		newDesktopStartCmd(),
 		newDesktopStopCmd(),
 		newDesktopStatusCmd(),
+		newDesktopDaemonCmd(),
+		newDesktopScanPackCmd(),
+		newDesktopSafeSyncWorldCmd(),
+		newDesktopPushLatestCmd(),
+		newDesktopPullLatestCmd(),
+		newDesktopRCONStatusCmd(),
+		newDesktopLatestManifestCmd(),
+		newDesktopCanPushCmd(),
+		newDesktopTakeoverStatusCmd(),
 		newDesktopInspectServerCmd(),
 		newDesktopImportServerCmd(),
 		newDesktopResetCmd(),
@@ -242,6 +251,266 @@ func newDesktopResetCmd() *cobra.Command {
 	return cmd
 }
 
+func newDesktopDaemonCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "daemon",
+		Short: "管理后台服务 daemon",
+	}
+	cmd.AddCommand(
+		newDesktopDaemonStartCmd(),
+		newDesktopDaemonStopCmd(),
+		newDesktopDaemonStatusCmd(),
+	)
+	return cmd
+}
+
+func newDesktopDaemonStartCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "启动后台服务 daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			state, err := desktop.StartDaemon(opts)
+			if jsonOutput {
+				_ = printJSON(cmd, state)
+			} else {
+				printDesktopDaemonState(cmd, state)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopDaemonStopCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "stop",
+		Short: "停止后台服务 daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			state, err := desktop.StopDaemon(opts)
+			if jsonOutput {
+				_ = printJSON(cmd, state)
+			} else {
+				printDesktopDaemonState(cmd, state)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopDaemonStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "查看后台服务 daemon 状态",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			state, err := desktop.DaemonStatus(opts)
+			if jsonOutput {
+				_ = printJSON(cmd, state)
+			} else {
+				printDesktopDaemonState(cmd, state)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopScanPackCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "scan-pack",
+		Short: "扫描服务端包 scan server-pack",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.ScanPack(opts)
+			if jsonOutput {
+				_ = printJSON(cmd, result)
+			} else if err == nil {
+				printDesktopScanResult(cmd, result)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopSafeSyncWorldCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	var rconPassword string
+	cmd := &cobra.Command{
+		Use:   "safe-sync-world",
+		Short: "安全同步世界快照 safe-sync",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.SafeSyncWorld(cmd.Context(), opts, rconPassword)
+			if jsonOutput {
+				_ = printJSON(cmd, result)
+			} else if err == nil {
+				fmt.Fprintln(cmd.OutOrStdout(), result.RCONMessage)
+				printDesktopScanResult(cmd, result.ScanResult)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&rconPassword, "rcon-password", "", "RCON 密码；建议使用 ACBH_RCON_PASSWORD 环境变量")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopPushLatestCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "push-latest",
+		Short: "上传最近 manifest 对应的同步制品 push",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			summary, err := desktop.PushLatest(cmd.Context(), opts)
+			if jsonOutput {
+				_ = printJSON(cmd, summary)
+			} else if err == nil {
+				printDesktopPushSummary(cmd, summary)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopPullLatestCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	var artifactKind string
+	var artifactID string
+	var applyDeletes bool
+	cmd := &cobra.Command{
+		Use:   "pull-latest",
+		Short: "拉取同步制品 pull",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			summary, err := desktop.PullLatest(cmd.Context(), opts, manifest.ArtifactKind(artifactKind), artifactID, applyDeletes)
+			if jsonOutput {
+				_ = printJSON(cmd, summary)
+			} else if err == nil {
+				printDesktopPullSummary(cmd, summary)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&artifactKind, "artifact-kind", string(manifest.WorldSnapshot), "制品类型：server-pack 或 world-snapshot")
+	cmd.Flags().StringVar(&artifactID, "artifact-id", "latest", "制品 ID，默认 latest")
+	cmd.Flags().BoolVar(&applyDeletes, "apply-deletes", false, "应用删除项；默认不删除本地文件")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopRCONStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	var serverDir string
+	cmd := &cobra.Command{
+		Use:   "rcon-status",
+		Short: "检查远程控制 RCON 状态",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			status, err := desktop.RCONStatusForServer(opts, serverDir)
+			if jsonOutput {
+				_ = printJSON(cmd, status)
+			} else if err == nil {
+				printDesktopRCONStatus(cmd, status)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&serverDir, "server-dir", "", "Minecraft 服务端目录；默认读取已导入配置")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopLatestManifestCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "latest-manifest",
+		Short: "查看最近生成的 manifest",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			latest, err := desktop.LatestManifest(opts)
+			if jsonOutput {
+				_ = printJSON(cmd, latest)
+			} else if err == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "最近 manifest: %s\n", latest.Path)
+				fmt.Fprintf(cmd.OutOrStdout(), "同步制品 Artifact: %s / %s\n", latest.ArtifactKind, latest.ArtifactID)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopCanPushCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "can-push",
+		Short: "检查当前主机 Current Host 是否允许 push",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.CanPush(cmd.Context(), opts)
+			if jsonOutput {
+				_ = printJSON(cmd, result)
+			} else if err == nil {
+				fmt.Fprintln(cmd.OutOrStdout(), result.Reason)
+				fmt.Fprintf(cmd.OutOrStdout(), "下一步: %s\n", result.NextStep)
+			}
+			if err == nil && !result.CanPush {
+				return errors.New(result.Reason)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopTakeoverStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "takeover-status",
+		Short: "接管演练 takeover 状态检查",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			status, err := desktop.TakeoverStatusForDesktop(cmd.Context(), opts)
+			if jsonOutput {
+				_ = printJSON(cmd, status)
+			} else if err == nil {
+				printDesktopTakeoverStatus(cmd, status)
+			}
+			return err
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
 func addDesktopCommonFlags(cmd *cobra.Command, opts *desktop.Options) {
 	cmd.Flags().StringVar(&opts.AppDataDir, "app-data-dir", "", "ACBH 数据目录，默认 %APPDATA%\\ACBH；便携模式使用 exe 同级 data")
 	cmd.Flags().StringVar(&opts.CoordinatorPath, "coordinator", "", "coordinator dist/index.js 路径")
@@ -307,6 +576,71 @@ func printMCImportReport(cmd *cobra.Command, report mcimport.Report) {
 	for _, warning := range report.Warnings {
 		fmt.Fprintf(cmd.OutOrStdout(), "提示: %s\n", warning)
 	}
+}
+
+func printDesktopDaemonState(cmd *cobra.Command, state desktop.DaemonState) {
+	fmt.Fprintln(cmd.OutOrStdout(), state.Message)
+	if state.PID > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "daemon PID: %d\n", state.PID)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "pid file: %s\n", state.PIDPath)
+	fmt.Fprintf(cmd.OutOrStdout(), "日志文件: %s\n", state.LogPath)
+}
+
+func printDesktopScanResult(cmd *cobra.Command, result desktop.ScanResult) {
+	fmt.Fprintln(cmd.OutOrStdout(), result.Message)
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind / 制品类型: %s\n", result.ArtifactKind)
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID / 制品 ID: %s\n", result.ArtifactID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Manifest / 文件清单: %s\n", result.ManifestPath)
+	fmt.Fprintf(cmd.OutOrStdout(), "Included files / 已包含文件: %d\n", result.Report.IncludedFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Ignored files / 已忽略文件: %d\n", result.Report.IgnoredFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes / 总字节数: %d\n", result.Report.TotalBytes)
+}
+
+func printDesktopPushSummary(cmd *cobra.Command, summary artifactsync.PushSummary) {
+	fmt.Fprintln(cmd.OutOrStdout(), "上传同步制品 push 完成。")
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind / 制品类型: %s\n", summary.ArtifactKind)
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID / 制品 ID: %s\n", summary.ArtifactID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Uploaded objects / 已上传对象: %d\n", summary.UploadedObjects)
+	fmt.Fprintf(cmd.OutOrStdout(), "Skipped existing objects / 已跳过已有对象: %d\n", summary.SkippedObjects)
+	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes uploaded / 上传字节数: %d\n", summary.TotalBytesUploaded)
+}
+
+func printDesktopPullSummary(cmd *cobra.Command, summary artifactsync.PullSummary) {
+	fmt.Fprintln(cmd.OutOrStdout(), "拉取同步制品 pull 完成。")
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact kind / 制品类型: %s\n", summary.ArtifactKind)
+	fmt.Fprintf(cmd.OutOrStdout(), "Artifact ID / 制品 ID: %s\n", summary.ArtifactID)
+	fmt.Fprintf(cmd.OutOrStdout(), "Written files / 写入文件: %d\n", summary.WrittenFiles)
+	fmt.Fprintf(cmd.OutOrStdout(), "Downloaded objects / 下载对象: %d\n", summary.DownloadedObjects)
+	fmt.Fprintf(cmd.OutOrStdout(), "Pending deletes / 待确认删除: %d\n", summary.PendingDeletes)
+	fmt.Fprintf(cmd.OutOrStdout(), "Total bytes / 总字节数: %d\n", summary.TotalBytes)
+}
+
+func printDesktopRCONStatus(cmd *cobra.Command, status desktop.RCONStatus) {
+	fmt.Fprintf(cmd.OutOrStdout(), "MC 目录: %s\n", status.ServerDir)
+	fmt.Fprintf(cmd.OutOrStdout(), "server.properties: %t\n", status.PropertiesExists)
+	fmt.Fprintf(cmd.OutOrStdout(), "RCON 已启用 enabled: %t\n", status.Enabled)
+	fmt.Fprintf(cmd.OutOrStdout(), "RCON 端口 port: %s\n", status.Port)
+	fmt.Fprintf(cmd.OutOrStdout(), "RCON 密码是否已配置 password configured: %t\n", status.PasswordConfigured)
+	fmt.Fprintln(cmd.OutOrStdout(), status.Message)
+	if !status.Enabled || !status.PasswordConfigured || status.Port == "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "建议配置:\n%s\n", status.SuggestedConfig)
+	}
+}
+
+func printDesktopTakeoverStatus(cmd *cobra.Command, status desktop.TakeoverStatus) {
+	fmt.Fprintf(cmd.OutOrStdout(), "服务器组 Group ID: %s\n", status.GroupID)
+	fmt.Fprintf(cmd.OutOrStdout(), "本地主机 Host ID: %s\n", status.HostID)
+	fmt.Fprintf(cmd.OutOrStdout(), "当前主机 Current Host: %s\n", status.CurrentHostID)
+	fmt.Fprintf(cmd.OutOrStdout(), "当前主机代数 Generation: %d\n", status.CurrentHostGeneration)
+	fmt.Fprintf(cmd.OutOrStdout(), "是否本机 current host: %t\n", status.IsCurrentHost)
+	if status.ActiveTakeoverAssignment != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "takeover assignment: %s / %s\n", status.ActiveTakeoverAssignment.AssignmentID, status.ActiveTakeoverAssignment.Status)
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "takeover assignment: 无")
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), status.Message)
+	fmt.Fprintf(cmd.OutOrStdout(), "下一步 CLI: %s\n", status.NextCLICommand)
 }
 
 func newServerCmd() *cobra.Command {

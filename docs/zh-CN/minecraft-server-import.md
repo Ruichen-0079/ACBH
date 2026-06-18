@@ -1,22 +1,19 @@
 # Minecraft 服务端目录导入
 
-私人桌面版会逐步提供图形化导入向导。当前版本先约定导入校验规则，桌面入口和后续 GUI 都按这些规则实现。
+v0.3.1 的 WinForms GUI 已接通导入、启动、扫描、安全同步和上传闭环。
 
 ## 选择目录
 
-选择 Minecraft 服务端根目录，也就是包含 `server.properties`、`world\`、`mods\` 等文件的目录。
+点击“导入 MC 服务端目录”，选择 Minecraft 服务端根目录，也就是包含这些文件或目录的位置：
 
-常见可识别文件：
-
-- `fabric-server-launch.jar`
-- `server.jar`
-- `paper.jar`
-- `velocity.jar`
+- `server.properties`
+- `world\`
 - `mods\`
 - `config\`
-- `world\`
-- `server.properties`
 - `eula.txt`
+- `fabric-server-launch.jar`、`paper.jar`、`server.jar` 或 `velocity.jar`
+
+路径可以包含空格。保存导入配置后，ACBH 会把 `serverDir` 和建议启动命令写入本地 `config.yaml`。
 
 ## 服务端类型识别
 
@@ -28,34 +25,22 @@ ACBH 按以下优先级识别：
 - 存在 `server.jar`：Vanilla
 - 都不存在：Unknown
 
-## 启动命令建议
+## 启动和停止
 
-示例：
+GUI 的“启动 MC 服务端”会使用导入时保存的 command。日志写入 ACBH 日志目录，进程状态由 ACBH runtime state 管理。
 
-```powershell
-java -Xms2G -Xmx4G -jar fabric-server-launch.jar nogui
-```
-
-后续 GUI 会允许修改 `Xms` 和 `Xmx`。不要把 RCON 密码放进启动命令。
-
-## EULA
-
-如果 `eula.txt` 不存在，ACBH 只能提示你阅读并确认 Minecraft EULA。只有你明确确认后，程序才可以写入：
-
-```text
-eula=true
-```
+GUI 的“停止 MC 服务端”只停止由 ACBH 启动的服务端，不会误杀用户自己启动的 Java 进程。
 
 ## RCON 检查
 
-ACBH 会检查 `server.properties` 中的：
+点击“检查远程控制 RCON”会检查：
 
-- `server-port`
-- `enable-rcon`
-- `rcon.port`
-- `rcon.password`
+- `server.properties` 是否存在
+- `enable-rcon=true`
+- `rcon.port` 是否存在
+- `rcon.password` 是否已设置
 
-如果 RCON 未开启，会提示你写入建议配置，但不会自动覆盖 `server.properties`。只有点击确认后才会修改。
+ACBH 只显示“是否已设置密码”，不会输出密码本身。
 
 建议配置：
 
@@ -65,15 +50,46 @@ rcon.port=25575
 rcon.password=请换成你自己的强密码
 ```
 
-## 第一次世界快照
+## safe-sync 世界快照
 
-1. 先确认桌面入口启动成功，并且心跳已发送。
-2. 导入服务端目录。
-3. 确认 RCON 已开启且密码正确。
-4. 执行 `safe-sync world-snapshot`。
+点击“安全同步世界快照”后：
 
-`safe-sync` 会先通过 RCON 执行保存，再扫描目录生成世界快照。RCON 密码不会打印到日志。
+1. GUI 先检查 RCON。
+2. 如果 RCON 未开启或密码未配置，直接显示中文修复建议，不进入密码输入。
+3. 如果 RCON 已配置，GUI 通过隐藏输入框读取密码。
+4. ACBH 通过 RCON 执行 `save-all flush`。
+5. ACBH 生成 `world-YYYYMMDD-HHMMSS.manifest.json`。
 
-## 后续 scan/safe-sync/push
+RCON 密码不会出现在 GUI 文本框、日志或命令行参数中。
 
-导入完成后，`serverDir`、启动命令、日志目录和停止超时会保存到本地配置。后续 `scan`、`safe-sync`、`push` 默认使用已导入的目录，不再要求普通用户反复手写路径。
+## scan 服务端包
+
+点击“扫描服务端包 scan server-pack”会生成：
+
+```text
+%APPDATA%\ACBH\manifests\server-pack-YYYYMMDD-HHMMSS.manifest.json
+```
+
+成功后 GUI 会显示制品类型、Artifact ID、manifest 路径、included files、ignored files 和 total bytes。
+
+## push 上传
+
+点击“上传同步制品 push”会默认上传最近一次成功生成的 manifest。
+
+上传前必须满足：
+
+- 本机 Host 是 current host。
+- manifest 的 `groupId` 和 `creatorHostId` 与本地配置匹配。
+- 本地文件与 manifest 中的 SHA256 一致。
+
+如果不是 current host，GUI 会提前阻断并提示中文原因。
+
+## pull 拉取
+
+点击“拉取同步制品 pull”会提示：
+
+```text
+pull 可能覆盖本地服务端文件，请确认已备份。
+```
+
+默认拉取最新 `world-snapshot`，输出目录是已导入的 `serverDir`，默认不应用删除项。

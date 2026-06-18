@@ -40,18 +40,31 @@ type Options struct {
 }
 
 type Status struct {
-	AppDataDir       string `json:"appDataDir"`
-	ConfigPath       string `json:"configPath"`
-	CoordinatorState string `json:"coordinatorState"`
-	CoordinatorPID   int    `json:"coordinatorPid,omitempty"`
-	CoordinatorURL   string `json:"coordinatorUrl"`
-	GroupID          string `json:"groupId,omitempty"`
-	HostID           string `json:"hostId,omitempty"`
-	PrivateMode      bool   `json:"privateMode"`
-	HealthOK         bool   `json:"healthOk"`
-	Java             string `json:"java"`
-	Node             string `json:"node"`
-	LastError        string `json:"lastError,omitempty"`
+	AppDataDir            string `json:"appDataDir"`
+	ConfigPath            string `json:"configPath"`
+	CoordinatorState      string `json:"coordinatorState"`
+	CoordinatorPID        int    `json:"coordinatorPid,omitempty"`
+	CoordinatorURL        string `json:"coordinatorUrl"`
+	GroupID               string `json:"groupId,omitempty"`
+	HostID                string `json:"hostId,omitempty"`
+	PrivateMode           bool   `json:"privateMode"`
+	HealthOK              bool   `json:"healthOk"`
+	Java                  string `json:"java"`
+	Node                  string `json:"node"`
+	LogDir                string `json:"logDir"`
+	DaemonRunning         bool   `json:"daemonRunning"`
+	DaemonPID             int    `json:"daemonPid,omitempty"`
+	MCServerRunning       bool   `json:"mcServerRunning"`
+	MCServerDir           string `json:"mcServerDir,omitempty"`
+	MCServerType          string `json:"mcServerType,omitempty"`
+	RCONStatus            string `json:"rconStatus,omitempty"`
+	LatestManifestPath    string `json:"latestManifestPath,omitempty"`
+	LatestArtifactID      string `json:"latestArtifactId,omitempty"`
+	LatestArtifactKind    string `json:"latestArtifactKind,omitempty"`
+	CurrentHostID         string `json:"currentHostId,omitempty"`
+	IsCurrentHost         *bool  `json:"isCurrentHost,omitempty"`
+	CurrentHostGeneration int    `json:"currentHostGeneration,omitempty"`
+	LastError             string `json:"lastError,omitempty"`
 }
 
 type processState struct {
@@ -201,6 +214,13 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 		status.GroupID = cfg.GroupID
 		status.HostID = cfg.HostID
 		status.PrivateMode = true
+		status.MCServerDir = cfg.Server.Dir
+		if cfg.Server.Dir != "" {
+			if report, inspectErr := mcImportReport(cfg.Server.Dir); inspectErr == nil {
+				status.MCServerType = string(report.ServerType)
+				status.RCONStatus = report.RCON.ChineseMessage
+			}
+		}
 	}
 	if nodePath, err := resolveNode(opts); err == nil {
 		status.Node = nodePath
@@ -215,6 +235,25 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 	client, err := coordinator.NewClient(status.CoordinatorURL)
 	if err == nil {
 		status.HealthOK = client.Health(ctx) == nil
+	}
+	status.LogDir = filepath.Join(opts.AppDataDir, "logs")
+	if daemonStatus, daemonErr := DaemonStatus(opts); daemonErr == nil {
+		status.DaemonRunning = daemonStatus.Running
+		status.DaemonPID = daemonStatus.PID
+	}
+	if serverStatus, serverErr := ManagedServerStatus(opts); serverErr == nil {
+		status.MCServerRunning = serverStatus.Running
+	}
+	if latest, latestErr := LatestManifest(opts); latestErr == nil {
+		status.LatestManifestPath = latest.Path
+		status.LatestArtifactID = latest.ArtifactID
+		status.LatestArtifactKind = string(latest.ArtifactKind)
+	}
+	if canPush, canPushErr := CanPush(ctx, opts); canPushErr == nil {
+		status.CurrentHostGeneration = canPush.CurrentHostGeneration
+		status.CurrentHostID = canPush.CurrentHostID
+		v := canPush.CanPush
+		status.IsCurrentHost = &v
 	}
 	return status, nil
 }

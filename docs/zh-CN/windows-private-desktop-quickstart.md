@@ -4,71 +4,90 @@
 
 ## 下载和启动
 
-1. 下载 `acbh-v0.3-private-desktop-bundle.zip`。
-2. 解压到一个普通用户可写目录，例如 `D:\Apps\ACBH`。
+1. 下载 `acbh-v0.3.1-private-desktop-bundle.zip`。
+2. 解压到普通用户可写目录，例如 `D:\Apps\ACBH`。
 3. 双击 `acbh-desktop-windows-amd64.exe`。
 
-正常情况下会打开“ACBH 私人本地桌面版”窗口。点击“一键启动”后，桌面入口会自动完成：
+点击“一键启动”后，ACBH 会：
 
-- 使用 `127.0.0.1:6121` 启动控制端。
-- 使用 `%APPDATA%\ACBH` 保存状态、日志、服务器组和主机身份。
+- 只在 `127.0.0.1:6121` 启动控制端 Coordinator。
+- 在 `%APPDATA%\ACBH` 保存状态、日志、服务器组 Group 和主机 Host 身份。
 - 第一次启动时创建私人本地服务器组。
 - 后续启动时复用同一个 `groupId`、`accessKey` 和 `hostToken`。
-- 自动注册本机主机并发送一次心跳。
+- 自动注册本机 Agent 并发送一次心跳 heartbeat。
 
 如果 exe 同级存在 `portable.flag`，ACBH 会进入便携模式，状态写入当前目录的 `data\`。
 
-## 成功标志
-
-一键启动成功后，你会看到：
-
-- GUI 中“控制端状态”为“运行中”。
-- GUI 中“本地主机代理”为“已登录 / heartbeat 可用”。
-- GUI 中显示当前服务器组和主机 ID。
-- 日志窗口显示 `控制端已启动，/health 正常。`
-- 日志窗口显示 `心跳已发送，主机已在控制端可见。`
-
-如果你需要排错，也可以使用命令行模式：
-
-```powershell
-.\acbh-desktop-windows-amd64.exe --cli
-```
-
-不要把日志或截图里的密钥发给别人。ACBH 不会主动把 `accessKey`、`hostToken`、RCON 密码写进普通日志。
-
-## GUI 按钮可用性
-
-当前 v0.3 pre-release 中，以下按钮是真实可用的：
+## v0.3.1 已接通的 GUI 按钮
 
 - 一键初始化
 - 一键启动
 - 一键关闭
 - 刷新状态
 - 打开日志目录
-- 导入 MC 目录
+- 导入 MC 服务端目录
 - 保存导入配置
 - 启动 MC 服务端
 - 停止 MC 服务端
-- 发送 heartbeat
+- 发送心跳 heartbeat
+- 启动后台服务 daemon
+- 停止后台服务 daemon
+- 扫描服务端包 scan server-pack
+- 安全同步世界快照 safe-sync
+- 上传同步制品 push
+- 拉取同步制品 pull
+- 接管演练 takeover
+- 检查远程控制 RCON
+- 刷新日志
+- 清空 GUI 显示
 - 重置本地配置
 
-以下按钮会在界面上标注“暂不可用”，点击后只显示说明，不会执行危险或不完整操作：
+v0.3.1 的接管演练 takeover 是安全状态检查入口。它会显示 election status、当前 Host 和 takeover assignment，不会自动执行危险接管。完整接管仍建议先使用 CLI dry-run。
 
-- 启动/停止 daemon
-- scan 服务端包
-- safe-sync 世界快照
-- push / pull 制品
-- takeover 演练
+## 推荐 GUI 闭环
 
-## 关闭
+1. 点击“一键启动”。
+2. 点击“导入 MC 服务端目录”，选择包含 `server.properties`、`world\`、`mods\` 的目录。
+3. 点击“保存导入配置”。
+4. 点击“启动 MC 服务端”。
+5. 点击“检查远程控制 RCON”，按提示开启 RCON。
+6. 点击“安全同步世界快照”，在隐藏输入框填写 RCON 密码。
+7. 点击“上传同步制品 push”。
+8. 完成后点击“停止 MC 服务端”和“一键关闭”。
 
-推荐使用：
+push 上传前必须是当前主机 Current Host。这样可以避免旧主机或离线主机覆盖最新同步制品。如果 GUI 提示“不是 current host”，请先在控制端完成选举/接管，或使用 CLI 高级流程。
 
-```powershell
-.\acbh-agent-windows-amd64.exe desktop stop
+## RCON 配置
+
+safe-sync 会通过 RCON 执行 `save-all flush`，确保世界文件落盘后再生成世界快照。
+
+在 `server.properties` 中配置：
+
+```properties
+enable-rcon=true
+rcon.port=25575
+rcon.password=请换成你自己的强密码
 ```
 
-也可以在 GUI 中点击“一键关闭”。
+ACBH 不会自动写入 RCON 密码，不会在 GUI 日志、普通日志或命令行参数中明文打印密码。GUI 会使用隐藏输入框，并通过 `ACBH_RCON_PASSWORD` 进程环境变量传递给子命令。
+
+## 日志
+
+GUI 的日志区显示当前窗口最近输出，并提供：
+
+- 刷新日志：读取 ACBH logs 目录内最新日志文件的最近 100 行。
+- 打开日志目录：打开 `%APPDATA%\ACBH\logs` 或便携模式 `data\logs`。
+- 清空 GUI 显示：只清空窗口显示，不删除真实日志文件。
+
+日志显示会隐藏 `accessKey`、`hostToken`、RCON password 和形如 `ak_...`、`ht_...` 的密钥。
+
+## 安全关闭
+
+推荐顺序：
+
+1. 停止 MC 服务端。
+2. 停止后台服务 daemon。
+3. 一键关闭控制端 Coordinator。
 
 关闭不会删除私人服务器组、加入密钥或主机令牌。只有明确执行下面命令才会重置本地身份：
 
@@ -76,32 +95,27 @@
 .\acbh-agent-windows-amd64.exe desktop reset --yes
 ```
 
-## 不再需要手动执行
+## GUI 术语对照表
 
-普通私人模式不再要求你手动运行：
-
-- `npm install`
-- `pnpm install`
-- `corepack enable`
-- `node index.js`
-- 多行 PowerShell 反引号命令
-- 手动复制 `groupId` / `accessKey`
-
-文档中也不再使用 `<host-id>` 这类 PowerShell 会误解析的占位符。需要示例时使用 `YOUR_HOST_ID`。
-
-## 数据目录
-
-默认目录：
-
-```text
-%APPDATA%\ACBH
-```
-
-主要文件：
-
-- `config.yaml`：本地主机代理配置。
-- `private-local-state.json`：私人模式服务器组和主机身份。
-- `coordinator-state.json`：控制端状态。
-- `logs\coordinator.log`：控制端日志。
-
-如果 `config.yaml` 还在，但 `coordinator-state.json` 被删除，启动时会提示控制端状态丢失。此时请选择恢复、重建或清空本地配置，不要继续复制旧密钥反复登录。
+| 英文 | 中文解释 |
+| --- | --- |
+| Coordinator | 控制端 |
+| Agent | 本地主机代理 |
+| Group | 服务器组 |
+| Host | 主机 |
+| Current Host | 当前主机 |
+| heartbeat | 心跳 |
+| daemon | 后台心跳服务 |
+| scan | 扫描 |
+| safe-sync | 安全同步 |
+| push | 上传同步制品 |
+| pull | 拉取同步制品 |
+| takeover | 接管 |
+| artifact | 同步制品 |
+| manifest | 文件清单 |
+| server-pack | 服务端包 |
+| world-snapshot | 世界快照 |
+| server-runtime | 完整服务端运行目录 |
+| RCON | Minecraft 远程控制接口 |
+| accessKey | 加入密钥 |
+| hostToken | 主机令牌 |
