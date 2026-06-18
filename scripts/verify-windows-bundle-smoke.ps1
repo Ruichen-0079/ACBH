@@ -78,10 +78,25 @@ try {
             throw "GUI event binding smoke failed; forbidden pattern: $ForbiddenPattern"
         }
     }
-    foreach ($RequiredText in @("Invoke-AgentCommandSafe", "Redact-Secrets", "try", "catch", "[System.Diagnostics.ProcessStartInfo]::new()", ".ArgumentList.Add(", "ConvertFrom-JsonSafe", "StartsWith", "desktop status --json")) {
+    foreach ($RequiredText in @("Invoke-AgentCommandSafe", "Redact-Secrets", "try", "catch", "[System.Diagnostics.ProcessStartInfo]::new()", ".ArgumentList.Add(", "ConvertFrom-JsonSafe", "StartsWith", "desktop status --json", "function Add-GuiLog", "function Write-GuiLogSafe")) {
         if (-not $GuiText.Contains($RequiredText)) {
             throw "GUI safe command smoke failed; missing $RequiredText"
         }
+    }
+    # check ConvertFrom-JsonSafe uses Write-GuiLogSafe not direct Add-GuiLog
+    if ($GuiText -match 'function ConvertFrom-JsonSafe[\s\S]*?\{[\s\S]*?Add-GuiLog') {
+        throw "ConvertFrom-JsonSafe must use Write-GuiLogSafe, not direct Add-GuiLog"
+    }
+    if (-not ($GuiText -match 'function ConvertFrom-JsonSafe[\s\S]*?Write-GuiLogSafe')) {
+        throw "ConvertFrom-JsonSafe missing Write-GuiLogSafe call"
+    }
+    # check no direct Add-GuiLog in ConvertFrom-JsonSafe or other bottom helpers
+    if ($GuiText -match 'ConvertFrom-JsonSafe[\s\S]{0,400}Add-GuiLog') {
+        throw "ConvertFrom-JsonSafe must not directly call Add-GuiLog (use Write-GuiLogSafe)"
+    }
+    # check for relay/remote handlers etc use safe logs or wrapped
+    if ($GuiText -match 'Add-Button[\s\S]{0,100}公网中转[\s\S]{0,100}Append-Log') {
+        # prefer but not strict fail if any
     }
     foreach ($Word in @("发送心跳", "后台服务", "扫描服务端包", "安全同步世界快照", "上传同步制品", "拉取同步制品", "接管演练", "控制端", "本地主机代理", "术语说明", "启动 MC 服务端", "desktop start-server", "公网中转", "relay host", "current host", "玩家连接地址", "远程公网")) {
         if (-not $GuiText.Contains($Word)) {

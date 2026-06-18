@@ -43,6 +43,57 @@ function Protect-Text {
     return (Redact-Secrets $Text)
 }
 
+# Definitions for logging, placed after Redact/Protect so they can call them.
+# Add-GuiLog defined here (top-ish, before helpers that may reference) to fix "unrecognized" error in status refresh etc.
+function Write-GuiLogSafe {
+  param([string]$Message)
+
+  try {
+    if (Get-Command Add-GuiLog -ErrorAction SilentlyContinue) {
+      Add-GuiLog $Message
+      return
+    }
+
+    if ($script:LogTextBox -ne $null) {
+      $script:LogTextBox.AppendText("[$(Get-Date -Format HH:mm:ss)] $Message`r`n")
+      return
+    }
+
+    if (Get-Variable -Name logBox -Scope Script -ErrorAction SilentlyContinue) {
+      if ($script:logBox -ne $null) {
+        $script:logBox.AppendText("[$(Get-Date -Format HH:mm:ss)] $Message`r`n")
+        $script:logBox.SelectionStart = $script:logBox.TextLength
+        $script:logBox.ScrollToCaret()
+        return
+      }
+    }
+
+    Write-Host $Message
+  } catch {
+    Write-Host $Message
+  }
+}
+
+function Add-GuiLog {
+    param([string]$Text)
+    Write-GuiLogSafe $Text
+}
+
+function Append-Log {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    $safe = Protect-Text $Text
+    if (Get-Variable -Name logBox -Scope Script -ErrorAction SilentlyContinue -ValueOnly) {
+        if ($script:logBox -ne $null) {
+            $script:logBox.AppendText(("[" + (Get-Date -Format "HH:mm:ss") + "] " + $safe + [Environment]::NewLine))
+            $script:logBox.SelectionStart = $script:logBox.TextLength
+            $script:logBox.ScrollToCaret()
+            return
+        }
+    }
+    Write-GuiLogSafe $Text  # fallback
+}
+
 function Invoke-AgentProcess {
     param(
         [string[]]$Args,
@@ -93,28 +144,28 @@ function Invoke-AgentCommandSafe {
         [switch]$Refresh
     )
     try {
-        Append-Log "$ActionName ..."
+        Write-GuiLogSafe "$ActionName ..."
         $form.UseWaitCursor = $true
         [System.Windows.Forms.Application]::DoEvents()
         $result = Invoke-AgentProcess -Args $Args -ExtraEnv $ExtraEnv
         if ($result.ExitCode -eq 0) {
             if (-not [string]::IsNullOrWhiteSpace($result.Output)) {
-                Append-Log $result.Output
+                Write-GuiLogSafe $result.Output
             }
-            Append-Log "$ActionName 完成。"
+            Write-GuiLogSafe "$ActionName 完成。"
             if ($Refresh) { Refresh-Status }
             return $true
         }
 
-        Append-Log ("$ActionName 失败，退出码 " + $result.ExitCode)
+        Write-GuiLogSafe ("$ActionName 失败，退出码 " + $result.ExitCode)
         if (-not [string]::IsNullOrWhiteSpace($result.Output)) {
-            Append-Log $result.Output
+            Write-GuiLogSafe $result.Output
         }
         Show-ChineseError "$ActionName 失败。请查看 GUI 日志区。"
         return $false
     } catch {
         $msg = Redact-Secrets $_.Exception.Message
-        Append-Log ("$ActionName 异常：" + $msg)
+        Write-GuiLogSafe ("$ActionName 异常：" + $msg)
         Show-ChineseError "$ActionName 异常：$msg"
         return $false
     } finally {
@@ -152,14 +203,14 @@ function ConvertFrom-JsonSafe {
     }
 
     if (-not ($trimmed.StartsWith("{") -or $trimmed.StartsWith("["))) {
-        Add-GuiLog "$ActionName 没有返回 JSON，实际输出：$trimmed"
+        Write-GuiLogSafe "$ActionName 没有返回 JSON，实际输出：$trimmed"
         throw "$ActionName 没有返回 JSON。请检查 desktop status --json 是否输出纯 JSON。"
     }
 
     try {
         return $trimmed | ConvertFrom-Json
     } catch {
-        Add-GuiLog "$ActionName JSON 解析失败，原始输出：$trimmed"
+        Write-GuiLogSafe "$ActionName JSON 解析失败，原始输出：$trimmed"
         throw "$ActionName JSON 解析失败：$($_.Exception.Message)"
     }
 }
@@ -171,15 +222,6 @@ function Invoke-AgentJson {
     )
     $text = Invoke-Agent -Args $Args -ExtraEnv $ExtraEnv
     return ConvertFrom-JsonSafe -Text $text -ActionName ($Args -join ' ')
-}
-
-function Append-Log {
-    param([string]$Text)
-    if ([string]::IsNullOrWhiteSpace($Text)) { return }
-    $safe = Protect-Text $Text
-    $logBox.AppendText(("[" + (Get-Date -Format "HH:mm:ss") + "] " + $safe + [Environment]::NewLine))
-    $logBox.SelectionStart = $logBox.TextLength
-    $logBox.ScrollToCaret()
 }
 
 function Show-ChineseError {
@@ -251,13 +293,13 @@ function Refresh-Status {
         $status = Invoke-AgentJson -Args @("desktop", "status", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port, "--json")
         Refresh-ServerConfig
         Set-StatusText $status
-        Append-Log "状态已刷新。"
+        Write-GuiLogSafe "状态已刷新。"
     } catch {
         $msg = $_.Exception.Message
-        Append-Log ("状态刷新失败：" + $msg)
+        Write-GuiLogSafe ("状态刷新失败：" + $msg)
         if ($msg -match "没有返回 JSON|JSON 解析失败|无效的 JSON") {
-            Append-Log "状态命令没有返回 JSON。请检查 acbh-agent desktop status --json。"
-            Append-Log "实际输出已写入日志区。"
+            Write-GuiLogSafe "状态命令没有返回 JSON。请检查 acbh-agent desktop status --json。"
+            Write-GuiLogSafe "实际输出已写入日志区。"
         }
     }
 }
@@ -271,13 +313,13 @@ function Refresh-ServerConfig {
             $script:ServerDir = $config.server.dir
         }
     } catch {
-        Append-Log ("读取本地配置失败：" + $_.Exception.Message)
+        Write-GuiLogSafe ("读取本地配置失败：" + $_.Exception.Message)
     }
 }
 
 function Start-MCServer {
     try {
-        Append-Log "启动 MC 服务端 (使用 desktop start-server --json) ..."
+        Write-GuiLogSafe "启动 MC 服务端 (使用 desktop start-server --json) ..."
         $form.UseWaitCursor = $true
         [System.Windows.Forms.Application]::DoEvents()
         $result = Invoke-AgentProcess -Args @("desktop", "start-server", "--app-data-dir", $AppDataDir, "--json")
@@ -286,35 +328,35 @@ function Start-MCServer {
         try {
             $jr = ConvertFrom-JsonSafe -Text $text -ActionName "启动 MC 服务端"
         } catch {
-            Append-Log ("启动 MC 服务端 返回非 JSON 或解析失败。原始: " + $text)
+            Write-GuiLogSafe ("启动 MC 服务端 返回非 JSON 或解析失败。原始: " + $text)
             Show-ChineseError "启动 MC 服务端失败：返回数据异常，请查看日志区。"
             return $false
         }
         if ($jr.ok) {
-            Append-Log "MC 服务端启动成功。"
-            if ($jr.pid) { Append-Log "PID: $($jr.pid)" }
-            if ($jr.logFile) { Append-Log "logFile: $($jr.logFile)" }
-            if ($jr.launchCommand) { Append-Log "launchCommand: $($jr.launchCommand)" }
+            Write-GuiLogSafe "MC 服务端启动成功。"
+            if ($jr.pid) { Write-GuiLogSafe "PID: $($jr.pid)" }
+            if ($jr.logFile) { Write-GuiLogSafe "logFile: $($jr.logFile)" }
+            if ($jr.launchCommand) { Write-GuiLogSafe "launchCommand: $($jr.launchCommand)" }
             Refresh-Status
             return $true
         } else {
-            Append-Log ("启动 MC 服务端失败，errorCode=" + $jr.errorCode)
-            if ($jr.message) { Append-Log ("message: " + $jr.message) }
-            if ($jr.serverDir) { Append-Log ("serverDir: " + $jr.serverDir) }
-            if ($jr.workingDirectory) { Append-Log ("workingDirectory: " + $jr.workingDirectory) }
-            if ($jr.launchCommand) { Append-Log ("launchCommand: " + $jr.launchCommand) }
-            if ($jr.javaPath) { Append-Log ("javaPath: " + $jr.javaPath) }
-            if ($jr.jarPath) { Append-Log ("jarPath: " + $jr.jarPath) }
-            if ($jr.logFile) { Append-Log ("logFile: " + $jr.logFile) }
-            if ($jr.suggestion) { Append-Log ("suggestion: " + $jr.suggestion) }
-            if ($jr.warnings) { $jr.warnings | ForEach-Object { Append-Log ("warning: " + $_) } }
+            Write-GuiLogSafe ("启动 MC 服务端失败，errorCode=" + $jr.errorCode)
+            if ($jr.message) { Write-GuiLogSafe ("message: " + $jr.message) }
+            if ($jr.serverDir) { Write-GuiLogSafe ("serverDir: " + $jr.serverDir) }
+            if ($jr.workingDirectory) { Write-GuiLogSafe ("workingDirectory: " + $jr.workingDirectory) }
+            if ($jr.launchCommand) { Write-GuiLogSafe ("launchCommand: " + $jr.launchCommand) }
+            if ($jr.javaPath) { Write-GuiLogSafe ("javaPath: " + $jr.javaPath) }
+            if ($jr.jarPath) { Write-GuiLogSafe ("jarPath: " + $jr.jarPath) }
+            if ($jr.logFile) { Write-GuiLogSafe ("logFile: " + $jr.logFile) }
+            if ($jr.suggestion) { Write-GuiLogSafe ("suggestion: " + $jr.suggestion) }
+            if ($jr.warnings) { $jr.warnings | ForEach-Object { Write-GuiLogSafe ("warning: " + $_) } }
             $shortMsg = if ($jr.message) { $jr.message } else { "未知原因 (exit " + $result.ExitCode + ")" }
             Show-ChineseError ("MC 服务端启动失败：" + $shortMsg + "`n详细已写入日志区。建议: " + $jr.suggestion)
             return $false
         }
     } catch {
         $m = Redact-Secrets $_.Exception.Message
-        Append-Log ("启动 MC 服务端 异常：" + $m)
+        Write-GuiLogSafe ("启动 MC 服务端 异常：" + $m)
         Show-ChineseError ("启动 MC 服务端异常：" + $m)
         return $false
     } finally {
@@ -385,19 +427,19 @@ function Prompt-Secret {
 function Refresh-Logs {
     $logDir = Join-Path $AppDataDir "logs"
     if (-not (Test-Path $logDir)) {
-        Append-Log "日志目录还不存在：$logDir"
+        Write-GuiLogSafe "日志目录还不存在：$logDir"
         return
     }
     $latest = Get-ChildItem -Path $logDir -File -Recurse -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $latest) {
-        Append-Log "日志目录中还没有日志文件。"
+        Write-GuiLogSafe "日志目录中还没有日志文件。"
         return
     }
     $lines = Get-Content -Path $latest.FullName -Tail 100 -ErrorAction SilentlyContinue
-    Append-Log "读取最新日志：$($latest.FullName)"
-    Append-Log (($lines | ForEach-Object { Protect-Text $_ }) -join [Environment]::NewLine)
+    Write-GuiLogSafe "读取最新日志：$($latest.FullName)"
+    Write-GuiLogSafe (($lines | ForEach-Object { Protect-Text $_ }) -join [Environment]::NewLine)
 }
 
 function Open-LogDir {
@@ -503,7 +545,7 @@ Add-Button "拉取同步制品 pull" 0 120 {
 Add-Button "接管演练 takeover" 214 120 { Invoke-AgentCommandSafe -ActionName "接管演练 takeover" -Args @("desktop", "takeover-status", "--app-data-dir", $AppDataDir) -Refresh } "接管演练：检查当前主机是否可接管，不满足条件时不会执行危险操作。"
 Add-Button "检查远程控制 RCON" 428 120 { Invoke-AgentCommandSafe -ActionName "检查远程控制 RCON" -Args @("desktop", "rcon-status", "--app-data-dir", $AppDataDir) -Refresh } "RCON 是 Minecraft 服务端远程控制接口，safe-sync 需要它执行 save-all flush。"
 Add-Button "刷新日志" 642 120 { Refresh-Logs } "读取 ACBH logs 目录内最新日志文件的最近 100 行。"
-Add-Button "清空 GUI 显示" 856 120 { $logBox.Clear(); Append-Log "已清空 GUI 日志显示；真实日志文件未删除。" } "只清空当前窗口显示，不删除真实日志文件。"
+Add-Button "清空 GUI 显示" 856 120 { $logBox.Clear(); Write-GuiLogSafe "已清空 GUI 日志显示；真实日志文件未删除。" } "只清空当前窗口显示，不删除真实日志文件。"
 
 # v0.3.2 remote public + relay (do not break local private)
 Add-Button "配置远程公网" 0 160 { 
@@ -522,7 +564,7 @@ Add-Button "启动公网中转 relay" 214 160 {
   $psi.UseShellExecute = $true
   $psi.CreateNoWindow = $false
   [System.Diagnostics.Process]::Start($psi) | Out-Null
-  Append-Log "公网中转 relay host 已后台启动（请在终端查看或使用 status 检查）。"
+  Write-GuiLogSafe "公网中转 relay host 已后台启动（请在终端查看或使用 status 检查）。"
   Start-Sleep -Milliseconds 500
   Refresh-Status
 } "仅 current host 可启动；流量从 VPS:25565 转发到本机 MC"
@@ -531,7 +573,7 @@ Add-Button "复制玩家连接地址" 642 160 {
   $addr = "VPS_PUBLIC_IP:25565 (请替换真实IP)"
   if ($script:LastStatus -and $script:LastStatus.publicEntryStatus -eq "configured") { $addr = "公网入口已配置，请查看 VPS IP" }
   [System.Windows.Forms.Clipboard]::SetText($addr)
-  Append-Log "玩家连接地址已复制: $addr （原版 MC 客户端直连）"
+  Write-GuiLogSafe "玩家连接地址已复制: $addr （原版 MC 客户端直连）"
 } "复制给玩家：原版客户端直连 VPS 入口"
 
 $resetButton = New-Object System.Windows.Forms.Button
@@ -592,7 +634,7 @@ $form.Add_Shown({
         Refresh-Status
         Refresh-Logs
     } catch {
-        Append-Log ("初始化刷新失败：" + $_.Exception.Message)
+        Write-GuiLogSafe ("初始化刷新失败：" + $_.Exception.Message)
     }
 })
 [void]$form.ShowDialog()
