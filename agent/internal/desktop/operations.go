@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,6 +29,8 @@ import (
 const (
 	daemonPIDFileName = "agent-daemon.pid"
 	daemonLogFileName = "agent-daemon.log"
+	mcServerPIDFileName = "mc-server.pid"
+	mcServerLogFileName = "minecraft-server.log"
 )
 
 type DaemonState struct {
@@ -96,6 +99,27 @@ type ManagedServerState struct {
 	Running bool   `json:"running"`
 	Stale   bool   `json:"stale"`
 	Reason  string `json:"reason,omitempty"`
+	PID     int    `json:"pid,omitempty"`
+}
+
+type StartServerResult struct {
+	OK               bool     `json:"ok"`
+	ErrorCode        string   `json:"errorCode,omitempty"`
+	Message          string   `json:"message,omitempty"`
+	ServerDir        string   `json:"serverDir,omitempty"`
+	WorkingDirectory string   `json:"workingDirectory,omitempty"`
+	LaunchCommand    string   `json:"launchCommand,omitempty"`
+	JavaPath         string   `json:"javaPath,omitempty"`
+	JarPath          string   `json:"jarPath,omitempty"`
+	LogFile          string   `json:"logFile,omitempty"`
+	Suggestion       string   `json:"suggestion,omitempty"`
+	PID              int      `json:"pid,omitempty"`
+	Warnings         []string `json:"warnings,omitempty"`
+}
+
+type StopServerResult struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
 	PID     int    `json:"pid,omitempty"`
 }
 
@@ -572,6 +596,14 @@ func daemonLogPath(opts Options) string {
 	return filepath.Join(opts.AppDataDir, "logs", daemonLogFileName)
 }
 
+func mcServerPIDPath(opts Options) string {
+	return filepath.Join(opts.AppDataDir, "run", mcServerPIDFileName)
+}
+
+func mcServerLogPath(opts Options) string {
+	return filepath.Join(opts.AppDataDir, "logs", mcServerLogFileName)
+}
+
 func configureBackgroundProcess(cmd *exec.Cmd) {
 	_ = cmd
 }
@@ -592,4 +624,240 @@ func processRunning(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+func isPortLikelyInUse(port string) bool {
+	if port == "" {
+		port = "25565"
+	}
+	addr := "127.0.0.1:" + port
+	conn, err := net.DialTimeout("tcp", addr, 150*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		return true
+	}
+	return false
+}
+
+// StartServer performs preflights then starts MC server using mcserver, records pid/log per spec.
+func StartServer(opts Options) (StartServerResult, error) {
+	opts = withDefaults(opts)
+	res := StartServerResult{OK: false, Warnings: []string{}}
+
+	cfg, err := loadDesktopConfig(opts)
+	if err != nil || cfg.Server.Dir == "" {
+		res.ErrorCode = "no_server_config"
+		res.Message = "请先导入 Minecraft 服务端目录。"
+		res.Suggestion = "请点击“导入 MC 服务端目录”或运行 desktop import-server --server-dir <dir>"
+		return res, nil
+	}
+
+	serverDir := filepath.Clean(cfg.Server.Dir)
+	res.ServerDir = serverDir
+	res.WorkingDirectory = serverDir
+
+	if serverDir == "" {
+		res.ErrorCode = "no_server_dir"
+		res.Message = "请先导入 Minecraft 服务端目录。"
+		return res, nil
+	}
+	if _, statErr := os.Stat(serverDir); statErr != nil {
+		res.ErrorCode = "server_dir_not_exist"
+		res.Message = fmt.Sprintf("Minecraft 服务端目录不存在：%s", serverDir)
+		res.Suggestion = "请确认目录存在并重新导入。"
+		return res, nil
+	}
+
+	// inspect for jar, eula, props
+	report, inspectErr := mcimport.Inspect(serverDir)
+	if inspectErr != nil {
+		res.ErrorCode = "inspect_failed"
+		res.Message = "服务端目录检测失败: " + inspectErr.Error()
+		return res, nil
+	}
+
+	jar := report.LaunchJar
+	if jar == "" {
+		res.ErrorCode = "missing_jar"
+		res.Message = "找不到服务端 jar：fabric-server-launch.jar。请重新导入 Minecraft 服务端目录。"
+		res.JarPath = filepath.Join(serverDir, "fabric-server-launch.jar")
+		res.Suggestion = "请确认选择的是 Minecraft 服务端根目录，并重新导入。"
+		return res, nil
+	}
+	res.JarPath = filepath.Join(serverDir, jar)
+
+	// java
+	javaPath, javaErr := exec.LookPath("java")
+	if javaErr != nil {
+		res.ErrorCode = "no_java"
+		res.Message = "未检测到 Java，请安装 Java 17 或 21。"
+		res.Suggestion = "安装 Java 17/21 (推荐 Eclipse Adoptium Temurin) 并确保 java.exe 在系统 PATH 中。"
+		return res, nil
+	}
+	res.JavaPath = javaPath
+
+	// eula checks (preflight 4,5)
+	if !report.HasEULA {
+		res.ErrorCode = "eula_missing"
+		res.Message = "Minecraft EULA 未确认。请在确认 EULA 后创建 eula.txt 并设置 eula=true。"
+		res.Suggestion = "在服务端目录创建 eula.txt 文件，内容为 eula=true"
+		return res, nil
+	}
+	if !report.EULAAccepted {
+		res.ErrorCode = "eula_false"
+		res.Message = "Minecraft EULA 未确认。请将 eula.txt 设置为 eula=true。"
+		res.Suggestion = "编辑 eula.txt 将 eula=false 改为 eula=true"
+		return res, nil
+	}
+
+	// launch command from config or default
+	launchCommand := cfg.Server.Command
+	if launchCommand == "" {
+		launchCommand = fmt.Sprintf("java -Xms2G -Xmx4G -jar %s nogui", jar)
+	}
+	res.LaunchCommand = launchCommand
+
+	// parse to ensure no shell concat issue (uses argv later in mcserver)
+	argv, parseErr := mcserver.ParseCommand(launchCommand)
+	if parseErr != nil {
+		res.ErrorCode = "bad_command"
+		res.Message = "启动命令解析失败: " + parseErr.Error()
+		return res, nil
+	}
+	_ = argv // will be used by mcserver.Start
+
+	// server.properties warn but not block (7)
+	if !report.HasProperties {
+		res.Warnings = append(res.Warnings, "server.properties 缺失，将使用 Minecraft 默认端口 25565。")
+	}
+
+	// port may occupied (8)
+	port := "25565"
+	if p, ok := report.Properties["server-port"]; ok && strings.TrimSpace(p) != "" {
+		port = strings.TrimSpace(p)
+	}
+	if isPortLikelyInUse(port) {
+		res.Warnings = append(res.Warnings, fmt.Sprintf("MC 服务端端口 %s 可能被占用，请检查 server.properties 中 server-port。", port))
+	}
+
+	// ensure dirs
+	if err := ensureRunAndLogDirs(opts); err != nil {
+		res.ErrorCode = "mkdir_failed"
+		res.Message = "无法创建 run/logs 目录: " + err.Error()
+		return res, nil
+	}
+
+	logFile := mcServerLogPath(opts)
+	res.LogFile = logFile
+
+	// prepare mcserver start opts , use runtime subdir for isolation
+	runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+	logDirForServer := filepath.Join(opts.AppDataDir, "logs", "minecraft")
+	// use config stop timeout or default
+	stopTimeout := 30 * time.Second
+	if cfg.Server.StopTimeout != "" {
+		if d, derr := time.ParseDuration(cfg.Server.StopTimeout); derr == nil {
+			stopTimeout = d
+		}
+	}
+
+	startOpts := mcserver.StartOptions{
+		ServerDir:   serverDir,
+		Command:     launchCommand,
+		LogDir:      logDirForServer,
+		RuntimeDir:  runtimeDir,
+		StopTimeout: stopTimeout,
+	}
+
+	// find exe for supervisor
+	exe := opts.ExecutablePath
+	if exe == "" {
+		exe, _ = os.Executable()
+	}
+
+	// call mcserver start (this will record its own state/pid in runtime, we also record simple pid)
+	state, startErr := mcserver.Start(context.Background(), exe, startOpts)
+	if startErr != nil {
+		res.ErrorCode = "start_failed"
+		res.Message = "MC 服务端启动失败: " + startErr.Error()
+		res.Suggestion = "请查看日志目录中的 minecraft 日志，或确认端口、Java 版本、EULA。"
+		return res, nil
+	}
+
+	res.PID = state.PID
+	res.OK = true
+	res.Message = "MC 服务端已启动。"
+
+	// record pid in run/ as required
+	_ = os.WriteFile(mcServerPIDPath(opts), []byte(strconv.Itoa(state.PID)+"\n"), 0o600)
+
+	// append note to the required log name (since mcserver uses server-*.log , we touch the named one for user)
+	_ = os.WriteFile(logFile, []byte(fmt.Sprintf("[%s] MC server start requested via ACBH desktop (pid supervisor ~%d, see minecraft/*.log)\n", time.Now().Format(time.RFC3339), state.PID)), 0o600)
+
+	return res, nil
+}
+
+func StopServer(opts Options) (StopServerResult, error) {
+	opts = withDefaults(opts)
+	res := StopServerResult{OK: false}
+
+	pidPath := mcServerPIDPath(opts)
+	raw, err := os.ReadFile(pidPath)
+	if errors.Is(err, os.ErrNotExist) {
+		// fallback to mcserver stop
+		runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+		st, stopped, serr := mcserver.Stop(runtimeDir)
+		if serr == nil && stopped {
+			res.OK = true
+			res.Message = "已通过 mcserver 停止。"
+			res.PID = st.PID
+			_ = os.Remove(pidPath)
+			return res, nil
+		}
+		res.Message = "没有记录的由 ACBH 启动的 MC 服务端进程。"
+		return res, nil
+	}
+	if err != nil {
+		res.Message = "读取 MC pid 文件失败: " + err.Error()
+		return res, nil
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if pid <= 0 {
+		res.Message = "MC pid 文件内容无效。"
+		return res, nil
+	}
+
+	// only kill if running and (optionally verify not other java, but per pid file trust)
+	if !processRunning(pid) {
+		_ = os.Remove(pidPath)
+		res.Message = "记录的 MC 服务端进程已不在运行。"
+		return res, nil
+	}
+
+	// use mcserver stop which is safe (via control not direct kill other)
+	runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+	st, stopped, serr := mcserver.Stop(runtimeDir)
+	if serr == nil && stopped {
+		res.OK = true
+		res.PID = st.PID
+		res.Message = "MC 服务端已停止。"
+		_ = os.Remove(pidPath)
+		return res, nil
+	}
+
+	// fallback direct kill the recorded pid (only our one)
+	proc, perr := os.FindProcess(pid)
+	if perr != nil {
+		res.Message = "查找进程失败: " + perr.Error()
+		return res, nil
+	}
+	if kerr := proc.Kill(); kerr != nil {
+		res.Message = "停止进程失败: " + kerr.Error()
+		return res, nil
+	}
+	_ = os.Remove(pidPath)
+	res.OK = true
+	res.PID = pid
+	res.Message = "MC 服务端进程已通过 pid 停止（仅停止 ACBH 记录的进程）。"
+	return res, nil
 }

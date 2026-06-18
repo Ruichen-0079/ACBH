@@ -75,11 +75,13 @@ function Invoke-AgentProcess {
     $stdout = $process.StandardOutput.ReadToEnd()
     $stderr = $process.StandardError.ReadToEnd()
     $process.WaitForExit()
-    $output = (($stdout, $stderr) -join [Environment]::NewLine).Trim()
+    $merged = (($stdout, $stderr) -join [Environment]::NewLine).Trim()
 
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
-        Output = Redact-Secrets $output
+        Output   = Redact-Secrets $merged
+        Stdout   = Redact-Secrets ($stdout.Trim())
+        Stderr   = Redact-Secrets ($stderr.Trim())
     }
 }
 
@@ -127,9 +129,39 @@ function Invoke-Agent {
     )
     $result = Invoke-AgentProcess -Args $Args -ExtraEnv $ExtraEnv
     if ($result.ExitCode -ne 0) {
-        throw $result.Output
+        # prefer stderr for error details, fallback to output
+        $errText = if (-not [string]::IsNullOrWhiteSpace($result.Stderr)) { $result.Stderr } else { $result.Output }
+        throw $errText
+    }
+    # prefer clean stdout for json or text return
+    if (-not [string]::IsNullOrWhiteSpace($result.Stdout)) {
+        return $result.Stdout
     }
     return $result.Output
+}
+
+function ConvertFrom-JsonSafe {
+    param(
+        [string]$Text,
+        [string]$ActionName
+    )
+
+    $trimmed = ($Text | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        throw "$ActionName 没有返回任何 JSON 输出。"
+    }
+
+    if (-not ($trimmed.StartsWith("{") -or $trimmed.StartsWith("["))) {
+        Add-GuiLog "$ActionName 没有返回 JSON，实际输出：$trimmed"
+        throw "$ActionName 没有返回 JSON。请检查 desktop status --json 是否输出纯 JSON。"
+    }
+
+    try {
+        return $trimmed | ConvertFrom-Json
+    } catch {
+        Add-GuiLog "$ActionName JSON 解析失败，原始输出：$trimmed"
+        throw "$ActionName JSON 解析失败：$($_.Exception.Message)"
+    }
 }
 
 function Invoke-AgentJson {
@@ -138,7 +170,7 @@ function Invoke-AgentJson {
         [hashtable]$ExtraEnv
     )
     $text = Invoke-Agent -Args $Args -ExtraEnv $ExtraEnv
-    return ($text | ConvertFrom-Json)
+    return ConvertFrom-JsonSafe -Text $text -ActionName ($Args -join ' ')
 }
 
 function Append-Log {
@@ -204,6 +236,11 @@ function Set-StatusText {
     $statusLabels[12].Text = "最近制品 Artifact ID：$(if ($Status.latestArtifactId) { $Status.latestArtifactKind + ' / ' + $Status.latestArtifactId } else { '-' })"
     $statusLabels[13].Text = "日志目录：$(if ($Status.logDir) { $Status.logDir } else { Join-Path $AppDataDir 'logs' })"
     $statusLabels[14].Text = "数据目录 / 便携模式 portable mode：$AppDataDir"
+    # public entry as info not error (hotfix3)
+    $peStatus = if ($Status.publicEntryStatus) { $Status.publicEntryStatus } else { "not_configured" }
+    $peMsg = if ($Status.publicEntryMessage) { $Status.publicEntryMessage } else { "私人模式默认仅本机/可信局域网使用；如需外网连接，请配置端口转发、VPS relay 或隧道。" }
+    $statusLabels[15].Text = "公网入口：未配置 public entry $peStatus"
+    $statusLabels[16].Text = "公网入口说明：$peMsg"
 }
 
 function Refresh-Status {
@@ -213,7 +250,12 @@ function Refresh-Status {
         Set-StatusText $status
         Append-Log "状态已刷新。"
     } catch {
-        Append-Log ("状态刷新失败：" + $_.Exception.Message)
+        $msg = $_.Exception.Message
+        Append-Log ("状态刷新失败：" + $msg)
+        if ($msg -match "没有返回 JSON|JSON 解析失败|无效的 JSON") {
+            Append-Log "状态命令没有返回 JSON。请检查 acbh-agent desktop status --json。"
+            Append-Log "实际输出已写入日志区。"
+        }
     }
 }
 
@@ -227,6 +269,53 @@ function Refresh-ServerConfig {
         }
     } catch {
         Append-Log ("读取本地配置失败：" + $_.Exception.Message)
+    }
+}
+
+function Start-MCServer {
+    try {
+        Append-Log "启动 MC 服务端 (使用 desktop start-server --json) ..."
+        $form.UseWaitCursor = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        $result = Invoke-AgentProcess -Args @("desktop", "start-server", "--app-data-dir", $AppDataDir, "--json")
+        $text = if ($result.Stdout) { $result.Stdout } else { $result.Output }
+        $jr = $null
+        try {
+            $jr = ConvertFrom-JsonSafe -Text $text -ActionName "启动 MC 服务端"
+        } catch {
+            Append-Log ("启动 MC 服务端 返回非 JSON 或解析失败。原始: " + $text)
+            Show-ChineseError "启动 MC 服务端失败：返回数据异常，请查看日志区。"
+            return $false
+        }
+        if ($jr.ok) {
+            Append-Log "MC 服务端启动成功。"
+            if ($jr.pid) { Append-Log "PID: $($jr.pid)" }
+            if ($jr.logFile) { Append-Log "logFile: $($jr.logFile)" }
+            if ($jr.launchCommand) { Append-Log "launchCommand: $($jr.launchCommand)" }
+            Refresh-Status
+            return $true
+        } else {
+            Append-Log ("启动 MC 服务端失败，errorCode=" + $jr.errorCode)
+            if ($jr.message) { Append-Log ("message: " + $jr.message) }
+            if ($jr.serverDir) { Append-Log ("serverDir: " + $jr.serverDir) }
+            if ($jr.workingDirectory) { Append-Log ("workingDirectory: " + $jr.workingDirectory) }
+            if ($jr.launchCommand) { Append-Log ("launchCommand: " + $jr.launchCommand) }
+            if ($jr.javaPath) { Append-Log ("javaPath: " + $jr.javaPath) }
+            if ($jr.jarPath) { Append-Log ("jarPath: " + $jr.jarPath) }
+            if ($jr.logFile) { Append-Log ("logFile: " + $jr.logFile) }
+            if ($jr.suggestion) { Append-Log ("suggestion: " + $jr.suggestion) }
+            if ($jr.warnings) { $jr.warnings | ForEach-Object { Append-Log ("warning: " + $_) } }
+            $shortMsg = if ($jr.message) { $jr.message } else { "未知原因 (exit " + $result.ExitCode + ")" }
+            Show-ChineseError ("MC 服务端启动失败：" + $shortMsg + "`n详细已写入日志区。建议: " + $jr.suggestion)
+            return $false
+        }
+    } catch {
+        $m = Redact-Secrets $_.Exception.Message
+        Append-Log ("启动 MC 服务端 异常：" + $m)
+        Show-ChineseError ("启动 MC 服务端异常：" + $m)
+        return $false
+    } finally {
+        $form.UseWaitCursor = $false
     }
 }
 
@@ -366,10 +455,10 @@ $statusPanel.BorderStyle = "FixedSingle"
 $form.Controls.Add($statusPanel)
 
 $statusLabels = @()
-foreach ($i in 0..14) {
+foreach ($i in 0..16) {
     $label = New-Object System.Windows.Forms.Label
-    $label.Location = New-Object System.Drawing.Point(16, (12 + $i * 20))
-    $label.Size = New-Object System.Drawing.Size(1036, 18)
+    $label.Location = New-Object System.Drawing.Point(16, (10 + $i * 18))
+    $label.Size = New-Object System.Drawing.Size(1036, 16)
     $statusPanel.Controls.Add($label)
     $statusLabels += $label
 }
@@ -387,8 +476,9 @@ Add-Button "打开日志目录" 856 0 { Open-LogDir } "打开 ACBH logs 日志�
 
 Add-Button "导入 MC 服务端目录" 0 40 { Choose-ServerDir } "选择 Minecraft 服务端根目录。"
 Add-Button "保存导入配置" 214 40 { Import-ServerDir } "保存 serverDir 和建议启动命令。"
-Add-Button "启动 MC 服务端" 428 40 { Invoke-AgentCommandSafe -ActionName "启动 MC 服务端" -Args @("server", "start") -Refresh } "使用导入时保存的 command 启动 MC 服务端。"
-Add-Button "停止 MC 服务端" 642 40 { Invoke-AgentCommandSafe -ActionName "停止 MC 服务端" -Args @("server", "stop") -Refresh } "仅停止由 ACBH 启动的 MC 服务端进程。"
+Add-Button "启动 MC 服务端" 428 40 { Start-MCServer } "使用 desktop start-server --json 启动 MC 服务端（带详细 preflight 错误）。"
+Add-Button "停止 MC 服务端" 642 40 { Invoke-AgentCommandSafe -ActionName "停止 MC 服务端" -Args @("desktop", "stop-server", "--json") -Refresh } "仅停止由 ACBH 启动的 MC 服务端进程（desktop stop-server）。"
+# also add open mc log dir button somewhere, but for now use existing open log + specific in error msgs
 Add-Button "发送心跳 heartbeat" 856 40 { Invoke-AgentCommandSafe -ActionName "发送心跳 heartbeat" -Args @("heartbeat") -Refresh } "heartbeat：告诉控制端这台电脑仍在线。"
 
 Add-Button "启动后台服务 daemon" 0 80 { Invoke-AgentCommandSafe -ActionName "启动后台服务 daemon" -Args @("desktop", "daemon", "start", "--app-data-dir", $AppDataDir) -Refresh } "后台心跳服务：持续向控制端上报本机状态。"
@@ -453,7 +543,7 @@ $form.Controls.Add($logBox)
 
 $form.Add_FormClosing({
     try {
-        $serverStatus = Invoke-AgentJson -Args @("server", "status")
+        $serverStatus = Invoke-AgentJson -Args @("server", "status", "--json")
         if ($serverStatus.running) {
             $answer = [System.Windows.Forms.MessageBox]::Show("检测到由 ACBH 启动的 MC 服务端仍在运行。是否现在停止？", "关闭前确认", "YesNo", "Warning")
             if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {

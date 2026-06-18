@@ -65,6 +65,21 @@ type Status struct {
 	IsCurrentHost         *bool  `json:"isCurrentHost,omitempty"`
 	CurrentHostGeneration int    `json:"currentHostGeneration,omitempty"`
 	LastError             string `json:"lastError,omitempty"`
+
+	// v0.3.1 hotfix3 required fields for desktop status --json
+	Mode                  string   `json:"mode"`
+	CoordinatorStatus     string   `json:"coordinatorStatus"`
+	AgentStatus           string   `json:"agentStatus"`
+	DaemonStatus          string   `json:"daemonStatus"`
+	MinecraftServerStatus string   `json:"minecraftServerStatus"`
+	JavaStatus            string   `json:"javaStatus"`
+	ServerDir             string   `json:"serverDir"`
+	ServerType            string   `json:"serverType"`
+	PublicEntryStatus     string   `json:"publicEntryStatus"`
+	PublicEntryMessage    string   `json:"publicEntryMessage"`
+	LatestManifest        string   `json:"latestManifest"`
+	DataDir               string   `json:"dataDir"`
+	Warnings              []string `json:"warnings"`
 }
 
 type processState struct {
@@ -254,6 +269,49 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 		status.CurrentHostID = canPush.CurrentHostID
 		v := canPush.CanPush
 		status.IsCurrentHost = &v
+	}
+
+	// populate hotfix3 required fields (keep old fields too for compat)
+	status.Mode = "private-desktop"
+	status.DataDir = opts.AppDataDir
+	status.PublicEntryStatus = "not_configured"
+	status.PublicEntryMessage = "私人模式默认仅本机/可信局域网使用；如需外网连接，请配置端口转发、VPS relay 或隧道。"
+	status.ServerDir = status.MCServerDir
+	status.ServerType = status.MCServerType
+	status.JavaStatus = status.Java
+	status.LatestManifest = status.LatestManifestPath
+
+	status.CoordinatorStatus = "stopped"
+	if status.CoordinatorPID > 0 {
+		if status.HealthOK {
+			status.CoordinatorStatus = "running"
+		} else {
+			status.CoordinatorStatus = "unhealthy"
+		}
+	}
+	status.AgentStatus = "not_logged_in"
+	if status.GroupID != "" && status.HostID != "" {
+		status.AgentStatus = "logged_in"
+	}
+	status.DaemonStatus = "stopped"
+	if status.DaemonRunning {
+		status.DaemonStatus = "running"
+	}
+	status.MinecraftServerStatus = "stopped"
+	if status.MCServerRunning {
+		status.MinecraftServerStatus = "running"
+	}
+	status.Warnings = []string{}
+	// collect warnings if server dir set
+	if status.ServerDir != "" {
+		if report, rerr := mcImportReport(status.ServerDir); rerr == nil {
+			status.Warnings = append(status.Warnings, report.Warnings...)
+		}
+	}
+	// ensure isCurrentHost not nil for json consumers
+	if status.IsCurrentHost == nil {
+		f := false
+		status.IsCurrentHost = &f
 	}
 	return status, nil
 }

@@ -80,6 +80,8 @@ func newDesktopCmd() *cobra.Command {
 		newDesktopStartCmd(),
 		newDesktopStopCmd(),
 		newDesktopStatusCmd(),
+		newDesktopStartServerCmd(),
+		newDesktopStopServerCmd(),
 		newDesktopDaemonCmd(),
 		newDesktopScanPackCmd(),
 		newDesktopSafeSyncWorldCmd(),
@@ -248,6 +250,84 @@ func newDesktopResetCmd() *cobra.Command {
 	}
 	addDesktopCommonFlags(cmd, &opts)
 	cmd.Flags().BoolVar(&yes, "yes", false, "确认删除本地私人模式配置")
+	return cmd
+}
+
+func newDesktopStartServerCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "start-server",
+		Short: "启动已导入的 Minecraft 服务端（带 preflight 详细错误）",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, startErr := desktop.StartServer(opts)
+			if startErr != nil {
+				return startErr
+			}
+			if jsonOutput {
+				_ = printJSON(cmd, result)
+				if !result.OK {
+					if result.Message != "" {
+						fmt.Fprintln(cmd.ErrOrStderr(), result.Message)
+					}
+					return fmt.Errorf("start-server failed: %s", result.ErrorCode)
+				}
+				return nil
+			}
+			// non json text
+			if result.OK {
+				fmt.Fprintln(cmd.OutOrStdout(), "MC 服务端启动成功。")
+				if result.PID > 0 {
+					fmt.Fprintf(cmd.OutOrStdout(), "PID: %d\n", result.PID)
+				}
+				if result.LogFile != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "日志: %s\n", result.LogFile)
+				}
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "启动失败: %s\n", result.Message)
+			if result.Suggestion != "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "建议: %s\n", result.Suggestion)
+			}
+			return fmt.Errorf("start-server: %s", result.ErrorCode)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出结构化 JSON（成功/失败均返回）")
+	return cmd
+}
+
+func newDesktopStopServerCmd() *cobra.Command {
+	var opts desktop.Options
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "stop-server",
+		Short: "停止由 ACBH desktop 启动的 MC 服务端（仅 pid file 记录的进程）",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, stopErr := desktop.StopServer(opts)
+			if stopErr != nil {
+				return stopErr
+			}
+			if jsonOutput {
+				_ = printJSON(cmd, result)
+				if !result.OK {
+					if result.Message != "" {
+						fmt.Fprintln(cmd.ErrOrStderr(), result.Message)
+					}
+					return fmt.Errorf("stop-server failed")
+				}
+				return nil
+			}
+			if result.OK {
+				fmt.Fprintln(cmd.OutOrStdout(), "MC 服务端已停止。")
+				return nil
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "停止操作: %s\n", result.Message)
+			return nil
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出结构化 JSON")
 	return cmd
 }
 
@@ -685,13 +765,33 @@ func newServerStopCmd() *cobra.Command {
 }
 
 func newServerStatusCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Report managed local server process status",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if jsonOutput {
+				runtimeDir, err := defaultServerRuntimeDir()
+				if err != nil {
+					return err
+				}
+				status, err := mcserver.GetStatus(runtimeDir)
+				if err != nil {
+					return err
+				}
+				return printJSON(cmd, map[string]any{
+					"running": status.Running,
+					"stale":   status.Stale,
+					"unknown": status.Unknown,
+					"pid":     status.State.PID,
+					"reason":  status.Reason,
+				})
+			}
 			return runServerStatus(cmd)
 		},
 	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
 }
 
 func newServerRepairStateCmd() *cobra.Command {

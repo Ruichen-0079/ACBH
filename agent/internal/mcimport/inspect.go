@@ -28,6 +28,7 @@ type Report struct {
 	HasWorld         bool              `json:"hasWorld"`
 	HasProperties    bool              `json:"hasProperties"`
 	HasEULA          bool              `json:"hasEula"`
+	EULAAccepted     bool              `json:"eulaAccepted"`
 	Properties       map[string]string `json:"properties,omitempty"`
 	RCON             RCONReport        `json:"rcon"`
 	Warnings         []string          `json:"warnings,omitempty"`
@@ -58,7 +59,6 @@ func Inspect(serverDir string) (Report, error) {
 	report.HasConfig = exists(filepath.Join(serverDir, "config"))
 	report.HasWorld = exists(filepath.Join(serverDir, "world"))
 	report.HasProperties = exists(filepath.Join(serverDir, "server.properties"))
-	report.HasEULA = exists(filepath.Join(serverDir, "eula.txt"))
 
 	report.ServerType, report.LaunchJar = detectType(serverDir)
 	if report.LaunchJar != "" {
@@ -67,8 +67,15 @@ func Inspect(serverDir string) (Report, error) {
 	if !report.HasProperties {
 		report.Warnings = append(report.Warnings, "未找到 server.properties，请确认选择的是服务端根目录。")
 	}
-	if !report.HasEULA {
+	eulaExists, eulaAccepted, eulaErr := checkEULA(serverDir)
+	report.HasEULA = eulaExists
+	report.EULAAccepted = eulaAccepted
+	if eulaErr != nil {
+		report.Warnings = append(report.Warnings, "读取 eula.txt 失败: "+eulaErr.Error())
+	} else if !eulaExists {
 		report.Warnings = append(report.Warnings, "未找到 eula.txt。必须确认 Minecraft EULA 后才能写入 eula=true。")
+	} else if !eulaAccepted {
+		report.Warnings = append(report.Warnings, "eula.txt 中的 eula 不是 true。请设置为 eula=true 后才能启动服务端。")
 	}
 	if report.HasProperties {
 		props, err := readProperties(filepath.Join(serverDir, "server.properties"))
@@ -149,4 +156,32 @@ func readProperties(path string) (map[string]string, error) {
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func checkEULA(serverDir string) (exists bool, accepted bool, err error) {
+	p := filepath.Join(serverDir, "eula.txt")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	exists = true
+	lower := strings.ToLower(string(data))
+	sc := bufio.NewScanner(strings.NewReader(lower))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Contains(line, "eula=true") {
+			accepted = true
+			return exists, accepted, nil
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return exists, accepted, err
+	}
+	return exists, accepted, nil
 }
