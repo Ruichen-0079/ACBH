@@ -67,28 +67,21 @@ try {
     foreach ($ForbiddenPattern in @(
         '\.DoWork\s*(\+)?\s*=',
         '\.RunWorkerCompleted\s*(\+)?\s*=',
-        '\.ProgressChanged\s*(\+)?\s*='
+        '\.ProgressChanged\s*(\+)?\s*=',
+        'Task\.Run',
+        'ThreadPool',
+        'New-Object\s+System\.ComponentModel\.BackgroundWorker',
+        '\[System\.Threading\.Thread\]',
+        '\.BeginInvoke\('
     )) {
         if ($GuiText -match $ForbiddenPattern) {
             throw "GUI event binding smoke failed; forbidden pattern: $ForbiddenPattern"
         }
     }
-    foreach ($RequiredText in @(".add_DoWork(", ".add_RunWorkerCompleted(")) {
+    foreach ($RequiredText in @("Invoke-AgentCommandSafe", "Redact-Secrets", "try", "catch", "[System.Diagnostics.ProcessStartInfo]::new()", ".ArgumentList.Add(")) {
         if (-not $GuiText.Contains($RequiredText)) {
-            throw "GUI event binding smoke failed; missing $RequiredText"
+            throw "GUI safe command smoke failed; missing $RequiredText"
         }
-    }
-    try {
-        $SmokeWorker = New-Object System.ComponentModel.BackgroundWorker
-        $SmokeWorker.add_DoWork({
-            param($Sender, $EventArgs)
-            $EventArgs.Result = "ok"
-        })
-        $SmokeWorker.add_RunWorkerCompleted({
-            param($Sender, $EventArgs)
-        })
-    } catch {
-        throw "BackgroundWorker event binding failed: $($_.Exception.Message)"
     }
     foreach ($Word in @("发送心跳", "后台服务", "扫描服务端包", "安全同步世界快照", "上传同步制品", "拉取同步制品", "接管演练", "控制端", "本地主机代理", "术语说明")) {
         if (-not $GuiText.Contains($Word)) {
@@ -96,7 +89,7 @@ try {
         }
     }
     $Redacted = $GuiText
-    if (-not $GuiText.Contains("Protect-Text") -or -not $GuiText.Contains("ak_[已隐藏]")) {
+    if (-not $GuiText.Contains("Redact-Secrets") -or -not $GuiText.Contains("ak_[已隐藏]")) {
         throw "GUI log redaction helper is missing"
     }
     Push-Location (Join-Path $BundleRoot "coordinator")

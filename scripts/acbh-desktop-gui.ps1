@@ -28,7 +28,7 @@ $script:ServerDir = ""
 $script:LastStatus = $null
 $script:ToolTip = New-Object System.Windows.Forms.ToolTip
 
-function Protect-Text {
+function Redact-Secrets {
     param([string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $safe = $Text
@@ -38,7 +38,12 @@ function Protect-Text {
     return $safe
 }
 
-function Invoke-Agent {
+function Protect-Text {
+    param([string]$Text)
+    return (Redact-Secrets $Text)
+}
+
+function Invoke-AgentProcess {
     param(
         [string[]]$Args,
         [hashtable]$ExtraEnv
@@ -46,28 +51,85 @@ function Invoke-Agent {
     if (-not (Test-Path $AgentPath)) {
         throw "找不到本地主机代理 Agent：$AgentPath"
     }
-    $oldAppData = $env:ACBH_APP_DATA_DIR
-    $oldExtra = @{}
-    try {
-        $env:ACBH_APP_DATA_DIR = $AppDataDir
-        if ($ExtraEnv) {
-            foreach ($key in $ExtraEnv.Keys) {
-                $oldExtra[$key] = [Environment]::GetEnvironmentVariable($key, "Process")
-                [Environment]::SetEnvironmentVariable($key, [string]$ExtraEnv[$key], "Process")
-            }
-        }
-        $output = & $AgentPath @Args 2>&1 | Out-String
-        $output = Protect-Text $output.Trim()
-        if ($LASTEXITCODE -ne 0) {
-            throw $output
-        }
-        return $output
-    } finally {
-        $env:ACBH_APP_DATA_DIR = $oldAppData
-        foreach ($key in $oldExtra.Keys) {
-            [Environment]::SetEnvironmentVariable($key, $oldExtra[$key], "Process")
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $AgentPath
+    foreach ($arg in $Args) {
+        [void]$psi.ArgumentList.Add($arg)
+    }
+    $psi.WorkingDirectory = Split-Path -Parent $AgentPath
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    if ($AppDataDir) {
+        $psi.Environment["ACBH_APP_DATA_DIR"] = $AppDataDir
+    }
+    if ($ExtraEnv) {
+        foreach ($key in $ExtraEnv.Keys) {
+            $psi.Environment[$key] = [string]$ExtraEnv[$key]
         }
     }
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $output = (($stdout, $stderr) -join [Environment]::NewLine).Trim()
+
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Output = Redact-Secrets $output
+    }
+}
+
+function Invoke-AgentCommandSafe {
+    param(
+        [string]$ActionName,
+        [string[]]$Args,
+        [hashtable]$ExtraEnv,
+        [switch]$Refresh
+    )
+    try {
+        Append-Log "$ActionName ..."
+        $form.UseWaitCursor = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        $result = Invoke-AgentProcess -Args $Args -ExtraEnv $ExtraEnv
+        if ($result.ExitCode -eq 0) {
+            if (-not [string]::IsNullOrWhiteSpace($result.Output)) {
+                Append-Log $result.Output
+            }
+            Append-Log "$ActionName 完成。"
+            if ($Refresh) { Refresh-Status }
+            return $true
+        }
+
+        Append-Log ("$ActionName 失败，退出码 " + $result.ExitCode)
+        if (-not [string]::IsNullOrWhiteSpace($result.Output)) {
+            Append-Log $result.Output
+        }
+        Show-ChineseError "$ActionName 失败。请查看 GUI 日志区。"
+        return $false
+    } catch {
+        $msg = Redact-Secrets $_.Exception.Message
+        Append-Log ("$ActionName 异常：" + $msg)
+        Show-ChineseError "$ActionName 异常：$msg"
+        return $false
+    } finally {
+        $form.UseWaitCursor = $false
+    }
+}
+
+function Invoke-Agent {
+    param(
+        [string[]]$Args,
+        [hashtable]$ExtraEnv
+    )
+    $result = Invoke-AgentProcess -Args $Args -ExtraEnv $ExtraEnv
+    if ($result.ExitCode -ne 0) {
+        throw $result.Output
+    }
+    return $result.Output
 }
 
 function Invoke-AgentJson {
@@ -146,7 +208,7 @@ function Set-StatusText {
 
 function Refresh-Status {
     try {
-        $status = Invoke-AgentJson @("desktop", "status", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port, "--json")
+        $status = Invoke-AgentJson -Args @("desktop", "status", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port, "--json")
         Refresh-ServerConfig
         Set-StatusText $status
         Append-Log "状态已刷新。"
@@ -168,55 +230,13 @@ function Refresh-ServerConfig {
     }
 }
 
-function Run-ActionAsync {
-    param(
-        [string]$Title,
-        [scriptblock]$Action,
-        [switch]$Refresh
-    )
-    try {
-        Append-Log "$Title ..."
-        $form.UseWaitCursor = $true
-        $worker = New-Object System.ComponentModel.BackgroundWorker
-        $actionToRun = $Action.GetNewClosure()
-        $refreshAfter = $Refresh.IsPresent
-        $worker.add_DoWork({
-            param($sender, $eventArgs)
-            try {
-                $eventArgs.Result = & $actionToRun
-            } catch {
-                $eventArgs.Result = $_
-            }
-        }.GetNewClosure())
-        $worker.add_RunWorkerCompleted({
-            param($sender, $eventArgs)
-            $form.UseWaitCursor = $false
-            if ($eventArgs.Result -is [System.Management.Automation.ErrorRecord]) {
-                Append-Log ("失败：" + $eventArgs.Result.Exception.Message)
-                Show-ChineseError $eventArgs.Result.Exception.Message
-            } elseif ($eventArgs.Error) {
-                Append-Log ("失败：" + $eventArgs.Error.Message)
-                Show-ChineseError $eventArgs.Error.Message
-            } else {
-                Append-Log ([string]$eventArgs.Result)
-                if ($refreshAfter) { Refresh-Status }
-            }
-        }.GetNewClosure())
-        $worker.RunWorkerAsync()
-    } catch {
-        $form.UseWaitCursor = $false
-        Append-Log ("按钮操作失败：" + $_.Exception.Message)
-        Show-ChineseError $_.Exception.Message
-    }
-}
-
 function Choose-ServerDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = "选择 Minecraft 服务端根目录"
     if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $script:ServerDir = $dialog.SelectedPath
         $statusLabels[8].Text = "MC 目录：$script:ServerDir"
-        Run-ActionAsync "检测服务端目录" { Invoke-Agent @("desktop", "inspect-server", "--server-dir", $script:ServerDir) }
+        Invoke-AgentCommandSafe -ActionName "检测服务端目录" -Args @("desktop", "inspect-server", "--server-dir", $script:ServerDir)
     }
 }
 
@@ -225,9 +245,7 @@ function Import-ServerDir {
         Choose-ServerDir
     }
     if (-not $script:ServerDir) { return }
-    Run-ActionAsync "保存导入配置" {
-        Invoke-Agent @("desktop", "import-server", "--app-data-dir", $AppDataDir, "--server-dir", $script:ServerDir)
-    } -Refresh
+    Invoke-AgentCommandSafe -ActionName "保存导入配置" -Args @("desktop", "import-server", "--app-data-dir", $AppDataDir, "--server-dir", $script:ServerDir) -Refresh
 }
 
 function Prompt-Secret {
@@ -361,38 +379,36 @@ $buttonPanel.Location = New-Object System.Drawing.Point(20, 430)
 $buttonPanel.Size = New-Object System.Drawing.Size(1070, 154)
 $form.Controls.Add($buttonPanel)
 
-Add-Button "一键初始化" 0 0 { Run-ActionAsync "一键初始化" { Invoke-Agent @("desktop", "start", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port) } -Refresh } "启动控制端 Coordinator 并注册本地主机 Agent。"
-Add-Button "一键启动" 214 0 { Run-ActionAsync "一键启动" { Invoke-Agent @("desktop", "start", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port) } -Refresh } "复用或启动私人本地控制端 Coordinator。"
-Add-Button "一键关闭" 428 0 { Run-ActionAsync "一键关闭" { Invoke-Agent @("desktop", "stop", "--app-data-dir", $AppDataDir, "--port", $Port) } -Refresh } "关闭由桌面版启动的控制端 Coordinator。"
+Add-Button "一键初始化" 0 0 { Invoke-AgentCommandSafe -ActionName "一键初始化" -Args @("desktop", "start", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port) -Refresh } "启动控制端 Coordinator 并注册本地主机 Agent。"
+Add-Button "一键启动" 214 0 { Invoke-AgentCommandSafe -ActionName "一键启动" -Args @("desktop", "start", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port) -Refresh } "复用或启动私人本地控制端 Coordinator。"
+Add-Button "一键关闭" 428 0 { Invoke-AgentCommandSafe -ActionName "一键关闭" -Args @("desktop", "stop", "--app-data-dir", $AppDataDir, "--port", $Port) -Refresh } "关闭由桌面版启动的控制端 Coordinator。"
 Add-Button "刷新状态" 642 0 { Refresh-Status } "刷新控制端、Agent、daemon、MC、RCON 和 manifest 状态。"
 Add-Button "打开日志目录" 856 0 { Open-LogDir } "打开 ACBH logs 日志目录。"
 
 Add-Button "导入 MC 服务端目录" 0 40 { Choose-ServerDir } "选择 Minecraft 服务端根目录。"
 Add-Button "保存导入配置" 214 40 { Import-ServerDir } "保存 serverDir 和建议启动命令。"
-Add-Button "启动 MC 服务端" 428 40 { Run-ActionAsync "启动 MC 服务端" { Invoke-Agent @("server", "start") } -Refresh } "使用导入时保存的 command 启动 MC 服务端。"
-Add-Button "停止 MC 服务端" 642 40 { Run-ActionAsync "停止 MC 服务端" { Invoke-Agent @("server", "stop") } -Refresh } "仅停止由 ACBH 启动的 MC 服务端进程。"
-Add-Button "发送心跳 heartbeat" 856 40 { Run-ActionAsync "发送心跳 heartbeat" { Invoke-Agent @("heartbeat") } -Refresh } "heartbeat：告诉控制端这台电脑仍在线。"
+Add-Button "启动 MC 服务端" 428 40 { Invoke-AgentCommandSafe -ActionName "启动 MC 服务端" -Args @("server", "start") -Refresh } "使用导入时保存的 command 启动 MC 服务端。"
+Add-Button "停止 MC 服务端" 642 40 { Invoke-AgentCommandSafe -ActionName "停止 MC 服务端" -Args @("server", "stop") -Refresh } "仅停止由 ACBH 启动的 MC 服务端进程。"
+Add-Button "发送心跳 heartbeat" 856 40 { Invoke-AgentCommandSafe -ActionName "发送心跳 heartbeat" -Args @("heartbeat") -Refresh } "heartbeat：告诉控制端这台电脑仍在线。"
 
-Add-Button "启动后台服务 daemon" 0 80 { Run-ActionAsync "启动后台服务 daemon" { Invoke-Agent @("desktop", "daemon", "start", "--app-data-dir", $AppDataDir) } -Refresh } "后台心跳服务：持续向控制端上报本机状态。"
-Add-Button "停止后台服务 daemon" 214 80 { Run-ActionAsync "停止后台服务 daemon" { Invoke-Agent @("desktop", "daemon", "stop", "--app-data-dir", $AppDataDir) } -Refresh } "停止由 ACBH desktop 启动的 daemon，不误杀其他进程。"
-Add-Button "扫描服务端包 scan" 428 80 { Run-ActionAsync "扫描服务端包 scan server-pack" { Invoke-Agent @("desktop", "scan-pack", "--app-data-dir", $AppDataDir) } -Refresh } "扫描服务端包：生成 mods/config/jar 等服务端文件清单。"
+Add-Button "启动后台服务 daemon" 0 80 { Invoke-AgentCommandSafe -ActionName "启动后台服务 daemon" -Args @("desktop", "daemon", "start", "--app-data-dir", $AppDataDir) -Refresh } "后台心跳服务：持续向控制端上报本机状态。"
+Add-Button "停止后台服务 daemon" 214 80 { Invoke-AgentCommandSafe -ActionName "停止后台服务 daemon" -Args @("desktop", "daemon", "stop", "--app-data-dir", $AppDataDir) -Refresh } "停止由 ACBH desktop 启动的 daemon，不误杀其他进程。"
+Add-Button "扫描服务端包 scan" 428 80 { Invoke-AgentCommandSafe -ActionName "扫描服务端包 scan server-pack" -Args @("desktop", "scan-pack", "--app-data-dir", $AppDataDir) -Refresh } "扫描服务端包：生成 mods/config/jar 等服务端文件清单。"
 Add-Button "安全同步世界快照" 642 80 {
     $password = Prompt-Secret "RCON 密码" "请输入 RCON password；不会显示、记录或作为命令行参数传递。"
     if ($null -eq $password) { return }
-    Run-ActionAsync "安全同步世界快照 safe-sync" {
-        Invoke-Agent -Args @("desktop", "safe-sync-world", "--app-data-dir", $AppDataDir) -ExtraEnv @{ ACBH_RCON_PASSWORD = $password }
-    } -Refresh
+    Invoke-AgentCommandSafe -ActionName "安全同步世界快照 safe-sync" -Args @("desktop", "safe-sync-world", "--app-data-dir", $AppDataDir) -ExtraEnv @{ ACBH_RCON_PASSWORD = $password } -Refresh
 } "安全同步世界快照：通过 RCON 保存世界后生成 world manifest。"
-Add-Button "上传同步制品 push" 856 80 { Run-ActionAsync "上传同步制品 push" { Invoke-Agent @("desktop", "push-latest", "--app-data-dir", $AppDataDir) } -Refresh } "上传同步制品：把最近生成的 manifest 对应文件上传到控制端。"
+Add-Button "上传同步制品 push" 856 80 { Invoke-AgentCommandSafe -ActionName "上传同步制品 push" -Args @("desktop", "push-latest", "--app-data-dir", $AppDataDir) -Refresh } "上传同步制品：把最近生成的 manifest 对应文件上传到控制端。"
 
 Add-Button "拉取同步制品 pull" 0 120 {
     $warning = "pull 可能覆盖本地服务端文件，请确认已备份。默认不应用删除。是否继续拉取最新 world-snapshot？"
     $answer = [System.Windows.Forms.MessageBox]::Show($warning, "确认 pull", "YesNo", "Warning")
     if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-    Run-ActionAsync "拉取同步制品 pull" { Invoke-Agent @("desktop", "pull-latest", "--app-data-dir", $AppDataDir, "--artifact-kind", "world-snapshot", "--artifact-id", "latest") } -Refresh
+    Invoke-AgentCommandSafe -ActionName "拉取同步制品 pull" -Args @("desktop", "pull-latest", "--app-data-dir", $AppDataDir, "--artifact-kind", "world-snapshot", "--artifact-id", "latest") -Refresh
 } "拉取同步制品：从控制端下载指定制品，可能覆盖本地文件。"
-Add-Button "接管演练 takeover" 214 120 { Run-ActionAsync "接管演练 takeover" { Invoke-Agent @("desktop", "takeover-status", "--app-data-dir", $AppDataDir) } -Refresh } "接管演练：检查当前主机是否可接管，不满足条件时不会执行危险操作。"
-Add-Button "检查远程控制 RCON" 428 120 { Run-ActionAsync "检查远程控制 RCON" { Invoke-Agent @("desktop", "rcon-status", "--app-data-dir", $AppDataDir) } -Refresh } "RCON 是 Minecraft 服务端远程控制接口，safe-sync 需要它执行 save-all flush。"
+Add-Button "接管演练 takeover" 214 120 { Invoke-AgentCommandSafe -ActionName "接管演练 takeover" -Args @("desktop", "takeover-status", "--app-data-dir", $AppDataDir) -Refresh } "接管演练：检查当前主机是否可接管，不满足条件时不会执行危险操作。"
+Add-Button "检查远程控制 RCON" 428 120 { Invoke-AgentCommandSafe -ActionName "检查远程控制 RCON" -Args @("desktop", "rcon-status", "--app-data-dir", $AppDataDir) -Refresh } "RCON 是 Minecraft 服务端远程控制接口，safe-sync 需要它执行 save-all flush。"
 Add-Button "刷新日志" 642 120 { Refresh-Logs } "读取 ACBH logs 目录内最新日志文件的最近 100 行。"
 Add-Button "清空 GUI 显示" 856 120 { $logBox.Clear(); Append-Log "已清空 GUI 日志显示；真实日志文件未删除。" } "只清空当前窗口显示，不删除真实日志文件。"
 
@@ -404,7 +420,7 @@ $script:ToolTip.SetToolTip($resetButton, "删除本地 groupId/accessKey/hostTok
 Add-SafeClick $resetButton {
     $answer = [System.Windows.Forms.MessageBox]::Show("重置会删除本地 Group ID、accessKey 和 hostToken，确定继续？", "确认重置", "YesNo", "Warning")
     if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-        Run-ActionAsync "重置本地配置" { Invoke-Agent @("desktop", "reset", "--app-data-dir", $AppDataDir, "--yes") } -Refresh
+        Invoke-AgentCommandSafe -ActionName "重置本地配置" -Args @("desktop", "reset", "--app-data-dir", $AppDataDir, "--yes") -Refresh
     }
 }
 $form.Controls.Add($resetButton)
@@ -437,11 +453,11 @@ $form.Controls.Add($logBox)
 
 $form.Add_FormClosing({
     try {
-        $serverStatus = Invoke-AgentJson @("server", "status")
+        $serverStatus = Invoke-AgentJson -Args @("server", "status")
         if ($serverStatus.running) {
             $answer = [System.Windows.Forms.MessageBox]::Show("检测到由 ACBH 启动的 MC 服务端仍在运行。是否现在停止？", "关闭前确认", "YesNo", "Warning")
             if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-                Invoke-Agent @("server", "stop") | Out-Null
+                Invoke-Agent -Args @("server", "stop") | Out-Null
             }
         }
     } catch {
@@ -449,5 +465,12 @@ $form.Add_FormClosing({
     }
 })
 
-$form.Add_Shown({ Refresh-Status; Refresh-Logs })
+$form.Add_Shown({
+    try {
+        Refresh-Status
+        Refresh-Logs
+    } catch {
+        Append-Log ("初始化刷新失败：" + $_.Exception.Message)
+    }
+})
 [void]$form.ShowDialog()
