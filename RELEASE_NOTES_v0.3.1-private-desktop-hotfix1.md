@@ -4,9 +4,11 @@
 
 ## 修复
 
-- 修复 WinForms GUI 按钮点击时 BackgroundWorker 事件绑定错误导致的崩溃。
-- GUI 按钮点击事件增加统一 try/catch，错误会显示中文弹窗并写入 GUI 日志区。
-- Windows bundle smoke 增加 GUI 事件绑定静态检查和最小 BackgroundWorker 绑定检查。
+- 修复点击“一键初始化”时出现“没有可用于运行脚本的运行空间 / DefaultRunspace”的问题。
+- 修复 GUI 按钮事件中错误使用 BackgroundWorker / DoWork 的问题。
+- GUI 命令调用改为安全的进程级执行封装，不在后台线程中执行 PowerShell ScriptBlock。
+- 增强 GUI 异常捕获，避免 WinForms JIT 未处理异常弹窗。
+- 不引入 Tauri。
 
 ## 校验
 
