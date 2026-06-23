@@ -82,6 +82,13 @@ function Join-ProcessArguments {
     return (($CommandArgs | ForEach-Object { Quote-ProcessArgument $_ }) -join " ")
 }
 
+function Set-ProcessUtf8OutputEncoding {
+    param([System.Diagnostics.ProcessStartInfo]$ProcessStartInfo)
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    try { $ProcessStartInfo.StandardOutputEncoding = $utf8 } catch { }
+    try { $ProcessStartInfo.StandardErrorEncoding = $utf8 } catch { }
+}
+
 function Invoke-AgentRaw {
     param([Parameter(Mandatory = $true)][Alias("Args")][string[]]$CommandArgs)
 
@@ -94,6 +101,7 @@ function Invoke-AgentRaw {
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    Set-ProcessUtf8OutputEncoding $psi
     $process = [System.Diagnostics.Process]::Start($psi)
     if ($null -eq $process) {
         throw "failed to start agent process"
@@ -251,6 +259,14 @@ try {
     if (-not (Test-Path $envReport.environmentReportPath)) {
         throw "desktop environment check did not write environment-report.json"
     }
+    $envReportRaw = Invoke-AgentRaw -Args @("desktop", "environment", "check", "--app-data-dir", $AppData, "--json")
+    $mojibakeMarkers = @([char]0x951B, [char]0x6D93, [char]0x6748, [char]0x9241, [char]0xFFFD)
+    foreach ($marker in $mojibakeMarkers) {
+        if ($envReportRaw.Stdout.Contains([string]$marker)) {
+            throw "desktop environment check JSON was decoded with mojibake"
+        }
+    }
+    $null = $envReportRaw.Stdout | ConvertFrom-Json
 
     $packagePath = Join-Path $TempRoot "acbh-runtime-base-windows-amd64.zip"
     New-TestEnvironmentPackage -Target $packagePath

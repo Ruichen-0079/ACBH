@@ -102,6 +102,13 @@ function Join-ProcessArguments {
     return (($CommandArgs | ForEach-Object { Quote-ProcessArgument $_ }) -join " ")
 }
 
+function Set-ProcessUtf8OutputEncoding {
+    param([System.Diagnostics.ProcessStartInfo]$ProcessStartInfo)
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    try { $ProcessStartInfo.StandardOutputEncoding = $utf8 } catch { }
+    try { $ProcessStartInfo.StandardErrorEncoding = $utf8 } catch { }
+}
+
 function Invoke-AgentProcess {
     param(
         [Alias("Args")][string[]]$CommandArgs,
@@ -118,6 +125,7 @@ function Invoke-AgentProcess {
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    Set-ProcessUtf8OutputEncoding $psi
     if ($AppDataDir) {
         $psi.Environment["ACBH_APP_DATA_DIR"] = $AppDataDir
     }
