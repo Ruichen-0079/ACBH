@@ -40,6 +40,21 @@ copy_private_node_runtime() {
   cp "$node_bin" "$target_dir/runtime/node/node.exe"
 }
 
+copy_powershell_utf8_bom() {
+  local source_file="$1"
+  local target_file="$2"
+  cp "$source_file" "$target_file"
+  if command -v powershell.exe >/dev/null 2>&1; then
+    local target_win
+    target_win="$(cygpath -w "$target_file")"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\$path='$target_win'; \$text=[System.IO.File]::ReadAllText(\$path, [System.Text.Encoding]::UTF8); \$utf8Bom=New-Object System.Text.UTF8Encoding \$true; [System.IO.File]::WriteAllText(\$path, \$text, \$utf8Bom)"
+  else
+    printf '\xEF\xBB\xBF' > "$target_file.bom"
+    cat "$target_file" >> "$target_file.bom"
+    mv "$target_file.bom" "$target_file"
+  fi
+}
+
 build_runtime_package() {
   local package_root="$1"
   local target_zip="$2"
@@ -161,9 +176,10 @@ if [ -f "$DIST_DIR/acbh-desktop-windows-amd64.exe" ]; then
   mkdir -p "$BUNDLE_ROOT/resources"
   cp "$DIST_DIR/acbh-desktop-windows-amd64.exe" "$BUNDLE_ROOT/"
   cp "$DIST_DIR/acbh-agent-windows-amd64.exe" "$BUNDLE_ROOT/"
-  cp "$REPO_ROOT/scripts/acbh-desktop-gui.ps1" "$BUNDLE_ROOT/scripts/"
+  copy_powershell_utf8_bom "$REPO_ROOT/scripts/acbh-desktop-gui.ps1" "$BUNDLE_ROOT/scripts/acbh-desktop-gui.ps1"
   cp -R "$REPO_ROOT/docs/zh-CN" "$BUNDLE_ROOT/docs/"
-  cp "$REPO_ROOT/RELEASE_NOTES_v0.3.3-simple-desktop-flow.md" "$BUNDLE_ROOT/" 2>/dev/null || true
+  cp "$REPO_ROOT/RELEASE_NOTES_${VERSION}.md" "$BUNDLE_ROOT/" 2>/dev/null || \
+    cp "$REPO_ROOT/RELEASE_NOTES_v0.3.3-simple-desktop-flow.md" "$BUNDLE_ROOT/" 2>/dev/null || true
   printf "ACBH runtime base package for %s\n" "$VERSION" > "$BUNDLE_ROOT/resources/runtime-base.README.txt"
   copy_private_node_runtime "$BUNDLE_ROOT"
   mkdir -p "$BUNDLE_ROOT/coordinator/dist"

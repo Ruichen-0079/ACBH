@@ -1,8 +1,9 @@
-param(
+﻿param(
     [string]$AgentPath,
     [string]$CoordinatorPath,
     [string]$AppDataDir,
-    [string]$Port = "6121"
+    [string]$Port = "6121",
+    [switch]$SelfTest
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +23,11 @@ if (-not $AppDataDir) {
     } else {
         $AppDataDir = Join-Path $env:APPDATA "ACBH"
     }
+}
+
+if ($SelfTest) {
+    Write-Output "ACBH desktop GUI self-test ok"
+    exit 0
 }
 
 $script:ToolTip = New-Object System.Windows.Forms.ToolTip

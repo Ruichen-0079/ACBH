@@ -39,6 +39,13 @@ function Write-Utf8NoBom {
     [System.IO.File]::WriteAllText($Path, $Text, $encoding)
 }
 
+function Copy-PowerShellUtf8Bom {
+    param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Target)
+    $text = [System.IO.File]::ReadAllText($Source, [System.Text.Encoding]::UTF8)
+    $encoding = [System.Text.UTF8Encoding]::new($true)
+    [System.IO.File]::WriteAllText($Target, $text, $encoding)
+}
+
 function Quote-ProcessArgument {
     param([string]$Arg)
     if ($null -eq $Arg) { return '""' }
@@ -167,7 +174,7 @@ try {
 
     Copy-Item -Recurse -Force (Join-Path $RepoRoot "apps\coordinator\dist\*") (Join-Path $BundleRoot "coordinator\dist")
     Copy-Item -Force (Join-Path $RepoRoot "apps\coordinator\package.json") (Join-Path $BundleRoot "coordinator\package.json")
-    Copy-Item -Force (Join-Path $RepoRoot "scripts\acbh-desktop-gui.ps1") (Join-Path $BundleRoot "scripts\acbh-desktop-gui.ps1")
+    Copy-PowerShellUtf8Bom -Source (Join-Path $RepoRoot "scripts\acbh-desktop-gui.ps1") -Target (Join-Path $BundleRoot "scripts\acbh-desktop-gui.ps1")
     Copy-Item -Recurse -Force (Join-Path $RepoRoot "docs\zh-CN") (Join-Path $BundleRoot "docs\zh-CN")
 
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
@@ -189,6 +196,14 @@ try {
     }
 
     $guiPath = Join-Path $BundleRoot "scripts\acbh-desktop-gui.ps1"
+    $guiBytes = [System.IO.File]::ReadAllBytes($guiPath)
+    if ($guiBytes.Length -lt 3 -or $guiBytes[0] -ne 0xEF -or $guiBytes[1] -ne 0xBB -or $guiBytes[2] -ne 0xBF) {
+        throw "GUI script in bundle must be UTF-8 with BOM for Windows PowerShell 5.1"
+    }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $guiPath -SelfTest | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "GUI script failed powershell.exe -File self-test"
+    }
     $guiText = Get-Content -Raw -Encoding UTF8 -Path $guiPath
     $parseErrors = $null
     $null = [System.Management.Automation.PSParser]::Tokenize($guiText, [ref]$parseErrors)
