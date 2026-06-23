@@ -576,11 +576,13 @@ func resolveNode(opts Options) (string, error) {
 	exeDir := filepath.Dir(opts.ExecutablePath)
 	if runtime.GOOS == "windows" {
 		candidates = append(candidates,
+			filepath.Join(exeDir, "runtime", "node", "node.exe"),
 			filepath.Join(exeDir, "tools", "node", "node.exe"),
 			filepath.Join(exeDir, "node", "node.exe"),
 		)
 	} else {
 		candidates = append(candidates,
+			filepath.Join(exeDir, "runtime", "node", "bin", "node"),
 			filepath.Join(exeDir, "tools", "node", "bin", "node"),
 			filepath.Join(exeDir, "node", "bin", "node"),
 		)

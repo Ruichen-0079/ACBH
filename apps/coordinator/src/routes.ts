@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -16,6 +19,27 @@ const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
 const manifestUploadBodyLimitBytes = 1024 * 1024;
 export const defaultMaxObjectBytes = 256 * 1024 * 1024;
 
+const bootstrapPackageDefinitions = [
+  {
+    id: "acbh-runtime-base-windows-amd64",
+    version: "0.3.3",
+    filename: "acbh-runtime-base-windows-amd64.zip",
+    requiredFor: ["desktop-bootstrap"],
+  },
+  {
+    id: "java-17-windows-amd64",
+    version: "17.x",
+    filename: "acbh-java-17-windows-amd64.zip",
+    requiredFor: ["minecraft-1.18+"],
+  },
+  {
+    id: "java-21-windows-amd64",
+    version: "21.x",
+    filename: "acbh-java-21-windows-amd64.zip",
+    requiredFor: ["minecraft-1.20.5+"],
+  },
+] as const;
+
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(120),
   ownerName: z.string().trim().min(1).max(80),
@@ -25,9 +49,32 @@ const joinGroupParamsSchema = z.object({
   groupId: z.string().min(1),
 });
 
+const bootstrapPackageParamsSchema = z.object({
+  filename: z.string().regex(/^[A-Za-z0-9._-]+\.zip$/),
+});
+
 const joinGroupSchema = z.object({
   accessKey: z.string().min(1),
   displayName: z.string().trim().min(1).max(80),
+});
+
+const createInviteSchema = z.object({
+  accessKey: z.string().min(1),
+  expiresInSeconds: z.number().int().positive().optional(),
+  oneTime: z.boolean().optional(),
+});
+
+const revokeInviteSchema = z.object({
+  accessKey: z.string().min(1),
+  inviteId: z.string().min(1),
+});
+
+const joinInviteSchema = z.object({
+  inviteCode: z.string().trim().min(1).max(80),
+  displayName: z.string().trim().min(1).max(80),
+  deviceName: z.string().trim().min(1).max(120),
+  platform: z.string().trim().min(1).max(40),
+  agentVersion: z.string().trim().min(1).max(40),
 });
 
 const registerHostSchema = z.object({
@@ -202,6 +249,42 @@ export async function registerRoutes(
       v1NonGoal: "hot-migration",
       persistence: "none",
     };
+  });
+
+  app.get("/v1/bootstrap/manifest", async (request) => {
+    const origin = `${request.protocol}://${request.hostname}`;
+    const packages = await Promise.all(bootstrapPackageDefinitions.map((definition) => describeBootstrapPackage(definition, origin)));
+    return {
+      version: 1,
+      packages,
+    };
+  });
+
+  app.get("/v1/bootstrap/packages/:filename", async (request, reply) => {
+    const params = parseParams(bootstrapPackageParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const definition = bootstrapPackageDefinitions.find((p) => p.filename === params.filename);
+    if (!definition) {
+      return reply.code(404).send({
+        error: "Not Found",
+        message: "Bootstrap package does not exist",
+      });
+    }
+    const filePath = path.join(bootstrapPackageDir(), definition.filename);
+    try {
+      const info = await stat(filePath);
+      if (!info.isFile()) {
+        throw new Error("not a file");
+      }
+    } catch {
+      return reply.code(404).send({
+        error: "Not Found",
+        message: "Bootstrap package is not installed on this Coordinator",
+      });
+    }
+    return reply.header("content-type", "application/zip").send(createReadStream(filePath));
   });
 
   app.get("/v1/storage/info", async () => {
@@ -674,6 +757,45 @@ export async function registerRoutes(
     );
   });
 
+  app.post("/v1/groups/:groupId/invites", async (request, reply) => {
+    const params = parseParams(joinGroupParamsSchema, request, reply);
+    const body = parseBody(createInviteSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () =>
+      store.createInvite({
+        groupId: params.groupId,
+        accessKey: body.accessKey,
+        expiresInSeconds: body.expiresInSeconds,
+        oneTime: body.oneTime,
+      }),
+    );
+  });
+
+  app.post("/v1/groups/:groupId/invites/revoke", async (request, reply) => {
+    const params = parseParams(joinGroupParamsSchema, request, reply);
+    const body = parseBody(revokeInviteSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () =>
+      store.revokeInvite({
+        groupId: params.groupId,
+        accessKey: body.accessKey,
+        inviteId: body.inviteId,
+      }),
+    );
+  });
+
+  app.post("/v1/invites/join", async (request, reply) => {
+    const body = parseBody(joinInviteSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => store.joinWithInvite(body));
+  });
+
   app.post("/v1/hosts/register", async (request, reply) => {
     const body = parseBody(registerHostSchema, request, reply);
     if (!body) {
@@ -1062,6 +1184,58 @@ function decodeBase64(value: string, reply: FastifyReply): Buffer | null {
   }
 
   return Buffer.from(value, "base64");
+}
+
+function bootstrapPackageDir(): string {
+  return process.env.ACBH_BOOTSTRAP_PACKAGE_DIR ?? path.join(process.cwd(), "packages");
+}
+
+async function describeBootstrapPackage(
+  definition: (typeof bootstrapPackageDefinitions)[number],
+  origin: string,
+): Promise<{
+  id: string;
+  version: string;
+  filename: string;
+  size: number;
+  sha256: string;
+  signature: string;
+  requiredFor: readonly string[];
+  available: boolean;
+  url: string | null;
+}> {
+  const filePath = path.join(bootstrapPackageDir(), definition.filename);
+  try {
+    const [info, data] = await Promise.all([stat(filePath), readFile(filePath)]);
+    if (!info.isFile()) {
+      throw new Error("not a file");
+    }
+    return {
+      ...definition,
+      size: info.size,
+      sha256: createHash("sha256").update(data).digest("hex"),
+      signature: await readBootstrapSignature(filePath),
+      available: true,
+      url: `${origin}/v1/bootstrap/packages/${definition.filename}`,
+    };
+  } catch {
+    return {
+      ...definition,
+      size: 0,
+      sha256: "",
+      signature: "",
+      available: false,
+      url: null,
+    };
+  }
+}
+
+async function readBootstrapSignature(filePath: string): Promise<string> {
+  try {
+    return (await readFile(`${filePath}.sig`, "utf8")).trim();
+  } catch {
+    return "unsigned-local-package";
+  }
 }
 
 function isStrictBase64(value: string): boolean {

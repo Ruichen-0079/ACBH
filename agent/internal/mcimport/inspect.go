@@ -5,24 +5,35 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 )
 
 type ServerType string
 
 const (
-	Fabric   ServerType = "Fabric"
-	Paper    ServerType = "Paper"
-	Vanilla  ServerType = "Vanilla"
-	Velocity ServerType = "Velocity"
-	Unknown  ServerType = "Unknown"
+	Fabric    ServerType = "Fabric"
+	Paper     ServerType = "Paper"
+	Purpur    ServerType = "Purpur"
+	Forge     ServerType = "Forge"
+	NeoForge  ServerType = "NeoForge"
+	Cleanroom ServerType = "Cleanroom"
+	Vanilla   ServerType = "Vanilla"
+	Velocity  ServerType = "Velocity"
+	Unknown   ServerType = "Unknown"
 )
 
 type Report struct {
 	ServerDir        string            `json:"serverDir"`
 	ServerType       ServerType        `json:"serverType"`
 	LaunchJar        string            `json:"launchJar,omitempty"`
+	LaunchEntry      string            `json:"launchEntry,omitempty"`
+	LaunchCandidates []string          `json:"launchCandidates,omitempty"`
 	SuggestedCommand string            `json:"suggestedCommand,omitempty"`
+	JavaRequirement  string            `json:"javaRequirement,omitempty"`
+	ServerPort       string            `json:"serverPort,omitempty"`
+	WorldDir         string            `json:"worldDir,omitempty"`
 	HasMods          bool              `json:"hasMods"`
 	HasConfig        bool              `json:"hasConfig"`
 	HasWorld         bool              `json:"hasWorld"`
@@ -60,9 +71,14 @@ func Inspect(serverDir string) (Report, error) {
 	report.HasWorld = exists(filepath.Join(serverDir, "world"))
 	report.HasProperties = exists(filepath.Join(serverDir, "server.properties"))
 
-	report.ServerType, report.LaunchJar = detectType(serverDir)
-	if report.LaunchJar != "" {
-		report.SuggestedCommand = fmt.Sprintf("java -Xms2G -Xmx4G -jar %s nogui", report.LaunchJar)
+	detection := detectType(serverDir)
+	report.ServerType = detection.kind
+	report.LaunchEntry = detection.entry
+	report.LaunchJar = detection.jar
+	report.LaunchCandidates = detection.candidates
+	report.JavaRequirement = javaRequirementFor(detection.kind)
+	if report.LaunchEntry != "" {
+		report.SuggestedCommand = suggestedCommand(report.LaunchEntry)
 	}
 	if !report.HasProperties {
 		report.Warnings = append(report.Warnings, "未找到 server.properties，请确认选择的是服务端根目录。")
@@ -84,27 +100,179 @@ func Inspect(serverDir string) (Report, error) {
 		}
 		report.Properties = props
 		report.RCON = inspectRCON(props)
+		if port := strings.TrimSpace(props["server-port"]); port != "" {
+			report.ServerPort = port
+		}
+		if levelName := strings.TrimSpace(props["level-name"]); levelName != "" {
+			report.WorldDir = filepath.Join(serverDir, filepath.Clean(levelName))
+		}
 	} else {
 		report.RCON.ChineseMessage = "未找到 server.properties，无法检测 RCON。"
+	}
+	if report.ServerPort == "" {
+		report.ServerPort = "25565"
+	}
+	if report.WorldDir == "" && report.HasWorld {
+		report.WorldDir = filepath.Join(serverDir, "world")
 	}
 	return report, nil
 }
 
-func detectType(serverDir string) (ServerType, string) {
-	for _, candidate := range []struct {
-		file string
-		kind ServerType
-	}{
-		{"fabric-server-launch.jar", Fabric},
-		{"paper.jar", Paper},
-		{"velocity.jar", Velocity},
-		{"server.jar", Vanilla},
-	} {
-		if exists(filepath.Join(serverDir, candidate.file)) {
-			return candidate.kind, candidate.file
+type launchDetection struct {
+	kind       ServerType
+	entry      string
+	jar        string
+	candidates []string
+}
+
+func detectType(serverDir string) launchDetection {
+	var candidates []string
+	for _, script := range []string{"run.bat", "start.bat"} {
+		if exists(filepath.Join(serverDir, script)) {
+			candidates = append(candidates, script)
 		}
 	}
-	return Unknown, ""
+	jarCandidates := detectJarCandidates(serverDir)
+	candidates = append(candidates, jarCandidates...)
+	if len(candidates) == 0 {
+		return launchDetection{kind: Unknown}
+	}
+
+	entry := candidates[0]
+	kind := kindForEntry(entry)
+	jar := ""
+	if strings.HasSuffix(strings.ToLower(entry), ".jar") {
+		jar = entry
+	}
+	if strings.HasSuffix(strings.ToLower(entry), ".bat") {
+		for _, candidate := range jarCandidates {
+			jar = candidate
+			break
+		}
+	}
+	return launchDetection{kind: kind, entry: entry, jar: jar, candidates: candidates}
+}
+
+func detectJarCandidates(serverDir string) []string {
+	entries, err := os.ReadDir(serverDir)
+	if err != nil {
+		return nil
+	}
+	var matches []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		lower := strings.ToLower(name)
+		if !strings.HasSuffix(lower, ".jar") || excludedJarName(lower) {
+			continue
+		}
+		switch {
+		case name == "fabric-server-launch.jar":
+			matches = append(matches, name)
+		case strings.HasPrefix(lower, "paper-"), lower == "paper.jar":
+			matches = append(matches, name)
+		case strings.HasPrefix(lower, "purpur-"), lower == "purpur.jar":
+			matches = append(matches, name)
+		case strings.HasPrefix(lower, "forge-"), lower == "forge.jar":
+			matches = append(matches, name)
+		case strings.HasPrefix(lower, "neoforge-"), lower == "neoforge.jar":
+			matches = append(matches, name)
+		case strings.HasPrefix(lower, "cleanroom-"), lower == "cleanroom.jar":
+			matches = append(matches, name)
+		case strings.HasPrefix(lower, "velocity-"), lower == "velocity.jar":
+			matches = append(matches, name)
+		case lower == "server.jar":
+			matches = append(matches, name)
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		return jarPriority(matches[i]) < jarPriority(matches[j])
+	})
+	return matches
+}
+
+func excludedJarName(lower string) bool {
+	excluded := []string{"installer", "sources", "javadoc", "client", "dev", "api", "shadow", "remapped", "mappings"}
+	for _, marker := range excluded {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func jarPriority(name string) int {
+	lower := strings.ToLower(name)
+	switch {
+	case lower == "fabric-server-launch.jar":
+		return 10
+	case strings.HasPrefix(lower, "paper-"), lower == "paper.jar":
+		return 20
+	case strings.HasPrefix(lower, "purpur-"), lower == "purpur.jar":
+		return 21
+	case strings.HasPrefix(lower, "velocity-"), lower == "velocity.jar":
+		return 30
+	case lower == "server.jar":
+		return 40
+	case strings.HasPrefix(lower, "forge-"), lower == "forge.jar":
+		return 50
+	case strings.HasPrefix(lower, "neoforge-"), lower == "neoforge.jar":
+		return 51
+	case strings.HasPrefix(lower, "cleanroom-"), lower == "cleanroom.jar":
+		return 52
+	default:
+		return 100
+	}
+}
+
+func kindForEntry(entry string) ServerType {
+	lower := strings.ToLower(entry)
+	switch {
+	case strings.HasSuffix(lower, ".bat"):
+		return Unknown
+	case lower == "fabric-server-launch.jar":
+		return Fabric
+	case strings.HasPrefix(lower, "paper-"), lower == "paper.jar":
+		return Paper
+	case strings.HasPrefix(lower, "purpur-"), lower == "purpur.jar":
+		return Purpur
+	case strings.HasPrefix(lower, "forge-"), lower == "forge.jar":
+		return Forge
+	case strings.HasPrefix(lower, "neoforge-"), lower == "neoforge.jar":
+		return NeoForge
+	case strings.HasPrefix(lower, "cleanroom-"), lower == "cleanroom.jar":
+		return Cleanroom
+	case strings.HasPrefix(lower, "velocity-"), lower == "velocity.jar":
+		return Velocity
+	case lower == "server.jar":
+		return Vanilla
+	default:
+		return Unknown
+	}
+}
+
+func suggestedCommand(entry string) string {
+	lower := strings.ToLower(entry)
+	if strings.HasSuffix(lower, ".bat") {
+		if runtime.GOOS == "windows" {
+			return "cmd /c " + entry
+		}
+		return entry
+	}
+	return fmt.Sprintf("java -Xms2G -Xmx4G -jar %s nogui", entry)
+}
+
+func javaRequirementFor(kind ServerType) string {
+	switch kind {
+	case Forge, Cleanroom:
+		return "17"
+	case Velocity:
+		return "17"
+	default:
+		return "17"
+	}
 }
 
 func inspectRCON(props map[string]string) RCONReport {

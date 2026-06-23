@@ -80,6 +80,9 @@ func newDesktopCmd() *cobra.Command {
 		newDesktopStartCmd(),
 		newDesktopStopCmd(),
 		newDesktopStatusCmd(),
+		newDesktopEnvironmentCmd(),
+		newDesktopSetupCmd(),
+		newDesktopServerAutoCmd(),
 		newDesktopStartServerCmd(),
 		newDesktopStopServerCmd(),
 		newDesktopRelayCmd(),
@@ -98,6 +101,323 @@ func newDesktopCmd() *cobra.Command {
 		newDesktopResetCmd(),
 	)
 	return cmd
+}
+
+func newDesktopEnvironmentCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "environment",
+		Short: "检查、修复和导入 ACBH 桌面运行环境",
+	}
+	cmd.AddCommand(
+		newDesktopEnvironmentCheckCmd(),
+		newDesktopEnvironmentRepairCmd(),
+		newDesktopEnvironmentStatusCmd(),
+		newDesktopEnvironmentVerifyPackageCmd(),
+		newDesktopEnvironmentImportPackCmd(),
+		newDesktopEnvironmentClearCacheCmd(),
+	)
+	return cmd
+}
+
+func newDesktopEnvironmentCheckCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "check",
+		Short: "执行基础环境检查并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			report, err := desktop.CheckEnvironment(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, report)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopEnvironmentRepairCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "repair",
+		Short: "执行幂等环境修复并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			report, err := desktop.RepairEnvironment(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, report)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopEnvironmentStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "读取环境状态并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			report, err := desktop.EnvironmentStatus(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, report)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopEnvironmentVerifyPackageCmd() *cobra.Command {
+	var file string
+	cmd := &cobra.Command{
+		Use:   "verify-package",
+		Short: "验证离线环境包并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.VerifyEnvironmentPackage(file)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	cmd.Flags().StringVar(&file, "file", "", "离线环境包路径")
+	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("file")
+	return cmd
+}
+
+func newDesktopEnvironmentImportPackCmd() *cobra.Command {
+	var opts desktop.Options
+	var file string
+	cmd := &cobra.Command{
+		Use:   "import-pack",
+		Short: "导入离线环境包并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.ImportEnvironmentPackage(opts, file)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&file, "file", "", "离线环境包路径")
+	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("file")
+	return cmd
+}
+
+func newDesktopEnvironmentClearCacheCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "clear-cache",
+		Short: "清理 ACBH 环境下载缓存并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.ClearEnvironmentCache(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopSetupCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "setup",
+		Short: "普通桌面用户四步配置向导使用的结构化命令",
+	}
+	cmd.AddCommand(
+		newDesktopSetupCreateGroupCmd(),
+		newDesktopSetupJoinGroupCmd(),
+		newDesktopSetupConfigureNetworkCmd(),
+		newDesktopSetupInspectServerCmd(),
+		newDesktopSetupCompleteCmd(),
+	)
+	return cmd
+}
+
+func newDesktopSetupCreateGroupCmd() *cobra.Command {
+	var opts desktop.Options
+	var groupName, displayName, coordinatorURL string
+	cmd := &cobra.Command{
+		Use:   "create-group",
+		Short: "创建 Group、注册本机并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.SetupCreateGroup(cmd.Context(), opts, groupName, displayName, coordinatorURL)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&groupName, "group-name", "ACBH Server", "Group 名称")
+	cmd.Flags().StringVar(&displayName, "display-name", "", "本机昵称")
+	cmd.Flags().StringVar(&coordinatorURL, "coordinator-url", "", "公网 Coordinator URL")
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopSetupJoinGroupCmd() *cobra.Command {
+	var opts desktop.Options
+	var inviteCode, displayName, coordinatorURL string
+	cmd := &cobra.Command{
+		Use:   "join-group",
+		Short: "使用邀请码加入 Group、注册本机并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.SetupJoinGroup(cmd.Context(), opts, inviteCode, displayName, coordinatorURL)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&inviteCode, "invite-code", "", "ACBH 邀请码")
+	cmd.Flags().StringVar(&displayName, "display-name", "", "本机昵称")
+	cmd.Flags().StringVar(&coordinatorURL, "coordinator-url", "", "公网 Coordinator URL")
+	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("invite-code")
+	return cmd
+}
+
+func newDesktopSetupConfigureNetworkCmd() *cobra.Command {
+	var opts desktop.Options
+	var host, coordinatorPort, publicGamePort string
+	cmd := &cobra.Command{
+		Use:   "configure-network",
+		Short: "配置公网服务器 IP/域名并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.ConfigureNetwork(opts, host, coordinatorPort, publicGamePort)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&host, "host-name", "", "公网服务器 IP 或域名")
+	cmd.Flags().StringVar(&coordinatorPort, "coordinator-port", "6121", "Coordinator 端口")
+	cmd.Flags().StringVar(&publicGamePort, "public-game-port", "25565", "玩家公网入口端口")
+	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("host-name")
+	return cmd
+}
+
+func newDesktopSetupInspectServerCmd() *cobra.Command {
+	var opts desktop.Options
+	var serverDir string
+	cmd := &cobra.Command{
+		Use:   "inspect-server",
+		Short: "检测 Minecraft 服务端目录并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.InspectServerForSetup(opts, serverDir)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&serverDir, "server-dir", "", "Minecraft 服务端目录")
+	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("server-dir")
+	return cmd
+}
+
+func newDesktopSetupCompleteCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "complete",
+		Short: "完成四步配置并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.CompleteSetup(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopServerAutoCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "server",
+		Short: "简化桌面主按钮使用的一键开服/停服命令",
+	}
+	cmd.AddCommand(newDesktopServerStartAutoCmd(), newDesktopServerStopAutoCmd(), newDesktopServerAutoStatusCmd())
+	return cmd
+}
+
+func newDesktopServerStartAutoCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "start-auto",
+		Short: "执行一键开服事务并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.StartAuto(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopServerStopAutoCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "stop-auto",
+		Short: "执行一键停服事务并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.StopAuto(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopServerAutoStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "查询简化桌面服务器状态并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.ServerAutoStatus(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func addIgnoredJSONFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("json", true, "输出 JSON（此命令始终输出 JSON）")
 }
 
 func newDesktopStartCmd() *cobra.Command {

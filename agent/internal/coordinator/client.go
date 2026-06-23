@@ -57,6 +57,35 @@ type RegisterHostResponse struct {
 	HostToken string `json:"hostToken"`
 }
 
+type CreateInviteRequest struct {
+	AccessKey        string `json:"accessKey"`
+	ExpiresInSeconds int    `json:"expiresInSeconds,omitempty"`
+	OneTime          bool   `json:"oneTime,omitempty"`
+}
+
+type CreateInviteResponse struct {
+	InviteID   string `json:"inviteId"`
+	InviteCode string `json:"inviteCode"`
+	GroupID    string `json:"groupId"`
+	ExpiresAt  string `json:"expiresAt"`
+	OneTime    bool   `json:"oneTime"`
+}
+
+type JoinInviteRequest struct {
+	InviteCode   string `json:"inviteCode"`
+	DisplayName  string `json:"displayName"`
+	DeviceName   string `json:"deviceName"`
+	Platform     string `json:"platform"`
+	AgentVersion string `json:"agentVersion"`
+}
+
+type JoinInviteResponse struct {
+	GroupID   string `json:"groupId"`
+	MemberID  string `json:"memberId"`
+	HostID    string `json:"hostId"`
+	HostToken string `json:"hostToken"`
+}
+
 type HeartbeatRequest struct {
 	GroupID               string            `json:"groupId"`
 	HostID                string            `json:"hostId"`
@@ -305,6 +334,18 @@ func (c *Client) JoinGroup(ctx context.Context, groupID string, req JoinGroupReq
 func (c *Client) RegisterHost(ctx context.Context, req RegisterHostRequest) (RegisterHostResponse, error) {
 	var out RegisterHostResponse
 	err := c.post(ctx, "/v1/hosts/register", req, &out)
+	return out, err
+}
+
+func (c *Client) CreateInvite(ctx context.Context, groupID string, req CreateInviteRequest) (CreateInviteResponse, error) {
+	var out CreateInviteResponse
+	err := c.post(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/invites", req, &out)
+	return out, err
+}
+
+func (c *Client) JoinInvite(ctx context.Context, req JoinInviteRequest) (JoinInviteResponse, error) {
+	var out JoinInviteResponse
+	err := c.post(ctx, "/v1/invites/join", req, &out)
 	return out, err
 }
 

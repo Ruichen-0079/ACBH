@@ -14,6 +14,10 @@ func TestInspectDetectsServerTypes(t *testing.T) {
 	}{
 		{"fabric", "fabric-server-launch.jar", Fabric},
 		{"paper", "paper.jar", Paper},
+		{"purpur", "purpur-1.20.1.jar", Purpur},
+		{"forge", "forge-1.20.1.jar", Forge},
+		{"neoforge", "neoforge-21.1.1.jar", NeoForge},
+		{"cleanroom", "cleanroom-0.2.4.jar", Cleanroom},
 		{"velocity", "velocity.jar", Velocity},
 		{"vanilla", "server.jar", Vanilla},
 	}
@@ -36,6 +40,31 @@ func TestInspectDetectsServerTypes(t *testing.T) {
 				t.Fatal("SuggestedCommand is empty")
 			}
 		})
+	}
+}
+
+func TestInspectPrefersStartScriptAndIgnoresInstallerJar(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "run.bat"), "java -jar forge.jar nogui")
+	writeFile(t, filepath.Join(dir, "forge-installer.jar"), "")
+	writeFile(t, filepath.Join(dir, "server.jar"), "")
+	writeFile(t, filepath.Join(dir, "server.properties"), "server-port=25566\n")
+	writeFile(t, filepath.Join(dir, "eula.txt"), "eula=true\n")
+
+	report, err := Inspect(dir)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if report.LaunchEntry != "run.bat" {
+		t.Fatalf("LaunchEntry = %q, want run.bat", report.LaunchEntry)
+	}
+	if report.ServerPort != "25566" {
+		t.Fatalf("ServerPort = %q, want 25566", report.ServerPort)
+	}
+	for _, candidate := range report.LaunchCandidates {
+		if candidate == "forge-installer.jar" {
+			t.Fatal("installer jar should not be a launch candidate")
+		}
 	}
 }
 

@@ -28,8 +28,8 @@ import (
 )
 
 const (
-	daemonPIDFileName = "agent-daemon.pid"
-	daemonLogFileName = "agent-daemon.log"
+	daemonPIDFileName   = "agent-daemon.pid"
+	daemonLogFileName   = "agent-daemon.log"
 	mcServerPIDFileName = "mc-server.pid"
 	mcServerLogFileName = "minecraft-server.log"
 )
@@ -125,6 +125,10 @@ type StopServerResult struct {
 }
 
 func StartDaemon(opts Options) (DaemonState, error) {
+	return startDaemon(opts, "standby")
+}
+
+func startDaemon(opts Options, status string) (DaemonState, error) {
 	opts = withDefaults(opts)
 	state, err := DaemonStatus(opts)
 	if err == nil && state.Running {
@@ -147,7 +151,10 @@ func StartDaemon(opts Options) (DaemonState, error) {
 			return DaemonState{}, fmt.Errorf("定位 acbh-agent 可执行文件失败: %w", err)
 		}
 	}
-	cmd := exec.Command(exe, "daemon", "--status", "standby", "--interval", "10s")
+	if status == "" {
+		status = "standby"
+	}
+	cmd := exec.Command(exe, "daemon", "--status", status, "--interval", "10s")
 	cmd.Env = append(os.Environ(), "ACBH_APP_DATA_DIR="+opts.AppDataDir)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -835,14 +842,15 @@ func StartServer(opts Options) (StartServerResult, error) {
 	}
 
 	jar := report.LaunchJar
-	if jar == "" {
-		res.ErrorCode = "missing_jar"
-		res.Message = "找不到服务端 jar：fabric-server-launch.jar。请重新导入 Minecraft 服务端目录。"
-		res.JarPath = filepath.Join(serverDir, "fabric-server-launch.jar")
-		res.Suggestion = "请确认选择的是 Minecraft 服务端根目录，并重新导入。"
+	if report.LaunchEntry == "" {
+		res.ErrorCode = "missing_launch_entry"
+		res.Message = "找不到服务端启动入口。请重新导入 Minecraft 服务端目录。"
+		res.Suggestion = "请确认根目录中存在 run.bat、start.bat 或受支持的服务端 jar。"
 		return res, nil
 	}
-	res.JarPath = filepath.Join(serverDir, jar)
+	if jar != "" {
+		res.JarPath = filepath.Join(serverDir, jar)
+	}
 
 	// java
 	javaPath, javaErr := exec.LookPath("java")
@@ -871,7 +879,7 @@ func StartServer(opts Options) (StartServerResult, error) {
 	// launch command from config or default
 	launchCommand := cfg.Server.Command
 	if launchCommand == "" {
-		launchCommand = fmt.Sprintf("java -Xms2G -Xmx4G -jar %s nogui", jar)
+		launchCommand = report.SuggestedCommand
 	}
 	res.LaunchCommand = launchCommand
 

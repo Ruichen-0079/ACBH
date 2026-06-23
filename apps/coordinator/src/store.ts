@@ -155,6 +155,17 @@ export type GroupState = {
   }>;
 };
 
+export type InviteRecord = {
+  inviteId: string;
+  groupId: string;
+  inviteCodeHash: string;
+  expiresAt: string;
+  oneTime: boolean;
+  usedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+};
+
 export type DeletedArtifact = {
   groupId: string;
   artifactKind: ArtifactKind;
@@ -231,6 +242,7 @@ type GroupRecord = {
   takeoverAssignments: Map<string, TakeoverAssignmentRecord>;
   playerSessions: Map<string, PlayerSessionRecord>;
   tunnelSessions: Map<string, TunnelSession>;
+  invites: Map<string, InviteRecord>;
 };
 
 type PlayerSessionRecord = PlayerSession & {
@@ -277,6 +289,7 @@ export type GroupSnapshot = {
   lastElection: ElectionResult | null;
   activeTakeoverAssignmentId: string | null;
   takeoverAssignments: TakeoverAssignmentRecord[];
+  invites?: InviteRecord[];
 };
 
 export type StoreSnapshot = {
@@ -402,6 +415,7 @@ export class InMemoryCoordinatorStore {
         lastElection: group.lastElection,
         activeTakeoverAssignmentId: group.activeTakeoverAssignmentId,
         takeoverAssignments: Array.from(group.takeoverAssignments.values()),
+        invites: Array.from(group.invites.values()),
       });
     }
     return { groups };
@@ -435,6 +449,7 @@ export class InMemoryCoordinatorStore {
         takeoverAssignments: new Map(g.takeoverAssignments.map((a) => [a.assignmentId, a])),
         playerSessions: new Map(),
         tunnelSessions: new Map(),
+        invites: new Map((g.invites ?? []).map((i) => [i.inviteId, i])),
       };
       store.groups.set(g.groupId, group);
     }
@@ -483,6 +498,7 @@ export class InMemoryCoordinatorStore {
       takeoverAssignments: new Map(),
       playerSessions: new Map(),
       tunnelSessions: new Map(),
+      invites: new Map(),
     });
 
     this.triggerMutation();
@@ -553,6 +569,97 @@ export class InMemoryCoordinatorStore {
 
     this.triggerMutation();
     return { hostId, hostToken };
+  }
+
+  createInvite(input: {
+    groupId: string;
+    accessKey: string;
+    expiresInSeconds?: number;
+    oneTime?: boolean;
+  }): { inviteId: string; inviteCode: string; groupId: string; expiresAt: string; oneTime: boolean } {
+    const group = this.requireGroup(input.groupId);
+    this.verifyAccessKey(group, input.accessKey);
+    const ttlSeconds = Math.max(60, Math.min(input.expiresInSeconds ?? 7 * 24 * 3600, 30 * 24 * 3600));
+    const now = this.now();
+    const inviteId = createId("inv");
+    const inviteCode = createInviteCode();
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
+    group.invites.set(inviteId, {
+      inviteId,
+      groupId: input.groupId,
+      inviteCodeHash: hashSecret(inviteCode),
+      expiresAt,
+      oneTime: input.oneTime ?? true,
+      usedAt: null,
+      revokedAt: null,
+      createdAt: now.toISOString(),
+    });
+    group.updatedAt = now.toISOString();
+    this.triggerMutation();
+    return { inviteId, inviteCode, groupId: input.groupId, expiresAt, oneTime: input.oneTime ?? true };
+  }
+
+  revokeInvite(input: { groupId: string; accessKey: string; inviteId: string }): { ok: true; inviteId: string } {
+    const group = this.requireGroup(input.groupId);
+    this.verifyAccessKey(group, input.accessKey);
+    const invite = group.invites.get(input.inviteId);
+    if (!invite) {
+      throw new StoreError(404, "Invite does not exist");
+    }
+    invite.revokedAt = this.nowIso();
+    group.updatedAt = invite.revokedAt;
+    this.triggerMutation();
+    return { ok: true, inviteId: input.inviteId };
+  }
+
+  joinWithInvite(input: {
+    inviteCode: string;
+    displayName: string;
+    deviceName: string;
+    platform: string;
+    agentVersion: string;
+  }): { groupId: string; memberId: string; hostId: string; hostToken: string } {
+    const found = this.findInvite(input.inviteCode);
+    if (found === null) {
+      throw new StoreError(401, "Invalid or expired invite code");
+    }
+    const { group, invite } = found;
+    const now = this.nowIso();
+    const memberId = createId("mem");
+    group.members.set(memberId, {
+      memberId,
+      displayName: input.displayName,
+      role: "member",
+      createdAt: now,
+    });
+    const hostId = createId("host");
+    const hostToken = createSecret("ht");
+    group.hosts.set(hostId, {
+      hostId,
+      memberId,
+      deviceName: input.deviceName,
+      platform: input.platform,
+      agentVersion: input.agentVersion,
+      status: "standby",
+      hostTokenHash: hashSecret(hostToken),
+      latestLocalSnapshotId: null,
+      latestLocalArtifacts: {},
+      hostScoreHints: {},
+      connection: null,
+      computedHostScore: 0,
+      recentFailureCount: 0,
+      manualPriority: 0,
+      lastElectionCandidateAt: null,
+      createdAt: now,
+      updatedAt: now,
+      lastHeartbeatAt: now,
+    });
+    if (invite.oneTime) {
+      invite.usedAt = now;
+    }
+    group.updatedAt = now;
+    this.triggerMutation();
+    return { groupId: group.groupId, memberId, hostId, hostToken };
   }
 
   verifyGroupAccessKey(groupId: string, accessKey: string): void {
@@ -1399,6 +1506,19 @@ export class InMemoryCoordinatorStore {
     return host;
   }
 
+  private findInvite(inviteCode: string): { group: GroupRecord; invite: InviteRecord } | null {
+    for (const group of this.groups.values()) {
+      for (const invite of group.invites.values()) {
+        if (invite.revokedAt !== null || invite.usedAt !== null) continue;
+        if (Date.parse(invite.expiresAt) <= this.now().getTime()) continue;
+        if (verifySecret(inviteCode, invite.inviteCodeHash)) {
+          return { group, invite };
+        }
+      }
+    }
+    return null;
+  }
+
   private verifyHostToken(host: HostRecord, hostToken: string): void {
     if (!verifySecret(hostToken, host.hostTokenHash)) {
       throw new StoreError(401, "Invalid host token");
@@ -1570,6 +1690,10 @@ function createId(prefix: string): string {
 
 function createSecret(prefix: string): string {
   return `${prefix}_${randomBytes(24).toString("base64url")}`;
+}
+
+function createInviteCode(): string {
+  return `ACBH-${randomBytes(3).toString("hex").toUpperCase()}-${randomBytes(3).toString("hex").toUpperCase()}`;
 }
 
 function hashSecret(secret: string): string {
