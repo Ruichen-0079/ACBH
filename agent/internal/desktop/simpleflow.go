@@ -1550,11 +1550,15 @@ func StopAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 	}
 	res.State = "SyncingWorld"
 	res.Steps = append(res.Steps, "正在创建世界差量快照", "正在上传变化的世界对象")
-	if backup, err := CreateStoppedWorldSnapshot(ctx, opts); err != nil {
-		res.Warnings = append(res.Warnings, "发布 world snapshot 失败："+err.Error())
-	} else {
-		res.Steps = append(res.Steps, "世界快照已发布："+backup.SnapshotID)
+	backup, err := CreateStoppedWorldSnapshot(ctx, opts)
+	if err != nil {
+		res.State = StateError
+		res.OK = false
+		res.Message = "发布 world snapshot 失败：" + err.Error()
+		res.ErrorCode = "world_backup_failed"
+		return res, nil
 	}
+	res.Steps = append(res.Steps, "世界快照已发布："+backup.SnapshotID)
 	res.State = "StoppingRelay"
 	res.Steps = append(res.Steps, "正在停止公网中转")
 	if _, err := StopRelayHost(opts); err != nil {

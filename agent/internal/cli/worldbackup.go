@@ -241,7 +241,14 @@ func runWorldBackupCreate(ctx context.Context, cmd *cobra.Command, opts worldBac
 		return errors.New("not_current_host: only the current host may publish world snapshots")
 	}
 	generation := status.CurrentHostGeneration
+	snapshotID := opts.snapshotID
+	if snapshotID == "" {
+		snapshotID = "ws_" + time.Now().UTC().Format("20060102_150405")
+	}
 	consistent := true
+	scanServerDir := serverDir
+	ignoreRulesDir := serverDir
+	var cleanupTxn func()
 	if opts.online {
 		rconPassword := strings.TrimSpace(opts.rconPassword)
 		if rconPassword == "" {
@@ -254,19 +261,20 @@ func runWorldBackupCreate(ctx context.Context, cmd *cobra.Command, opts worldBac
 			consistent = false
 		} else {
 			rconCfg := rcon.Config{Host: opts.rconHost, Port: opts.rconPort, Password: rconPassword, Timeout: opts.rconTimeout}
-			saveOn := false
-			defer func() {
-				if saveOn {
-					_, _ = rcon.Execute(context.Background(), rconCfg, "save-on")
-				}
-			}()
-			if _, err := rcon.Execute(ctx, rconCfg, "save-off"); err != nil {
-				return fmt.Errorf("RCON save-off failed: %w", err)
+			session, err := worldbackup.PrepareOnlineConsistentBackup(ctx, worldbackup.OnlineStagingOptions{
+				ServerDir:     serverDir,
+				AppDataDir:    appDataDir,
+				WorldRoots:    opts.worldRoots,
+				TransactionID: snapshotID,
+				RCON:          rconConfigRunner{cfg: rconCfg},
+			})
+			if err != nil {
+				return err
 			}
-			saveOn = true
-			if _, err := rcon.Execute(ctx, rconCfg, "save-all flush"); err != nil {
-				return fmt.Errorf("RCON save-all flush failed: %w", err)
-			}
+			scanServerDir = session.StagingDir
+			ignoreRulesDir = serverDir
+			cleanupTxn = func() { _ = worldbackup.RemoveTransactionDir(appDataDir, session.TransactionID) }
+			defer cleanupTxn()
 		}
 	}
 
@@ -274,13 +282,10 @@ func runWorldBackupCreate(ctx context.Context, cmd *cobra.Command, opts worldBac
 	if latest, err := client.GetLatestWorldBackup(ctx, auth, false); err == nil {
 		parent = &latest.Manifest
 	}
-	snapshotID := opts.snapshotID
-	if snapshotID == "" {
-		snapshotID = "ws_" + time.Now().UTC().Format("20060102_150405")
-	}
 	snapshot, err := worldbackup.BuildSnapshot(worldbackup.ScanOptions{
-		ServerDir:      serverDir,
+		ServerDir:      scanServerDir,
 		AppDataDir:     appDataDir,
+		IgnoreRulesDir: ignoreRulesDir,
 		WorldRoots:     opts.worldRoots,
 		SnapshotID:     snapshotID,
 		GroupID:        cfg.GroupID,
@@ -450,3 +455,13 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+type rconConfigRunner struct {
+	cfg rcon.Config
+}
+
+func (r rconConfigRunner) Execute(ctx context.Context, command string) (string, error) {
+	return rcon.Execute(ctx, r.cfg, command)
+}
+
+

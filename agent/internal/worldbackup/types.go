@@ -86,6 +86,7 @@ type PlannedObject struct {
 type ScanOptions struct {
 	ServerDir      string
 	AppDataDir     string
+	IgnoreRulesDir string
 	WorldRoots     []string
 	SnapshotID     string
 	GroupID        string
