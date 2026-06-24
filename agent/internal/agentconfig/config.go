@@ -11,7 +11,7 @@ import (
 const (
 	DirName      = "ACBH"
 	FileName     = "config.yaml"
-	AgentVersion = "0.1.0"
+	AgentVersion = "v0.3.5-hotfix1"
 )
 
 type Config struct {

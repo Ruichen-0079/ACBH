@@ -155,6 +155,8 @@ export type GroupState = {
   }>;
 };
 
+export type PublicGroupState = GroupState;
+
 export type InviteRecord = {
   inviteId: string;
   groupId: string;
@@ -776,6 +778,10 @@ export class InMemoryCoordinatorStore {
         lastHeartbeatAt: host.lastHeartbeatAt,
       })),
     };
+  }
+
+  listGroups(): PublicGroupState[] {
+    return Array.from(this.groups.keys()).map((groupId) => this.getGroupState(groupId));
   }
 
   evaluateCandidates(groupId: string): ElectionCandidate[] {

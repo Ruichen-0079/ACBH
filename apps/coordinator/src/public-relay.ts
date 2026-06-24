@@ -1,6 +1,6 @@
 import { WebSocket } from "ws";
 import * as net from "net";
-import type { InMemoryCoordinatorStore } from "./store.js";
+import type { InMemoryCoordinatorStore, PublicGroupState } from "./store.js";
 import type { RelayManager } from "./relay.js";
 
 export interface PublicRelayOptions {
@@ -13,6 +13,38 @@ export interface PublicRelayOptions {
 }
 
 const defaultBufferSize = 32 * 1024;
+
+export function selectPublicRelayGroup(
+  groups: PublicGroupState[],
+  now = new Date(),
+  heartbeatTimeoutMs = 30_000,
+): PublicGroupState | null {
+  const candidates = groups
+    .map((group) => {
+      const currentHost = group.currentHostId === null
+        ? undefined
+        : group.hosts.find((host) => host.hostId === group.currentHostId);
+      const heartbeatMs = currentHost?.lastHeartbeatAt === null || currentHost?.lastHeartbeatAt === undefined
+        ? Number.NaN
+        : Date.parse(currentHost.lastHeartbeatAt);
+      const fresh = Number.isFinite(heartbeatMs) && now.getTime() - heartbeatMs <= heartbeatTimeoutMs;
+      const statusRank = currentHost?.status === "hosting" ? 3 : currentHost?.status === "online" ? 2 : currentHost?.status === "standby" ? 1 : 0;
+      return { group, currentHost, heartbeatMs, fresh, statusRank };
+    })
+    .filter((candidate) => candidate.currentHost !== undefined && candidate.fresh);
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  candidates.sort((a, b) => (
+    b.statusRank - a.statusRank ||
+    b.group.currentHostGeneration - a.group.currentHostGeneration ||
+    b.heartbeatMs - a.heartbeatMs ||
+    a.group.groupId.localeCompare(b.group.groupId)
+  ));
+  return candidates[0].group;
+}
 
 export class PublicRelayIngress {
   private server: net.Server | null = null;
@@ -52,20 +84,18 @@ export class PublicRelayIngress {
   }
 
   private async handleIncoming(tcpConn: net.Socket): Promise<void> {
-    // For v0.3.2 simplicity, use the first group. In real deployment the VPS typically serves one primary group.
-    const groups = (this.opts.store as any).listGroups?.() || [];
+    const groups = this.opts.store.listGroups();
     if (groups.length === 0) {
       tcpConn.end("No groups configured\n");
       return;
     }
-    const groupId = groups[0].groupId;
 
-    // Check current host exists
-    const group = (this.opts.store as any).groups?.get?.(groupId) || (this.opts.store as any).requireGroup?.(groupId);
-    if (!group || !group.currentHostId) {
+    const group = selectPublicRelayGroup(groups, new Date(), this.opts.store.heartbeatTimeoutMs);
+    if (group === null) {
       tcpConn.end("No current host available for relay\n");
       return;
     }
+    const groupId = group.groupId;
 
     // Create player session (unauthenticated creation is supported)
     let playerSess: any;

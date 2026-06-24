@@ -163,7 +163,7 @@ test("error response contains code/requestId, not raw secret", async () => {
       url: "/v1/hosts/register",
       payload: {
         groupId: "grp_nonexistent",
-        accessKey: "ak_secret_12345",
+        accessKey: "redacted-access-key-12345",
         memberId: "mem_fake",
         deviceName: "test",
         platform: "linux",
@@ -172,7 +172,7 @@ test("error response contains code/requestId, not raw secret", async () => {
     });
     assert.equal(res.statusCode, 404);
     const body = res.body;
-    assert.equal(body.includes("ak_secret_12345"), false, "must not leak access key");
+    assert.equal(body.includes("redacted-access-key-12345"), false, "must not leak access key");
     assert.ok(body.includes("Group does not exist") || body.includes("Not Found"), "must have clear error");
   } finally {
     await app.close();

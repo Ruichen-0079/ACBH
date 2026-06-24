@@ -76,6 +76,56 @@ func TestPortableAppDataDir(t *testing.T) {
 	}
 }
 
+func TestBaseStatusUsesConfiguredPublicCoordinatorURL(t *testing.T) {
+	appData := t.TempDir()
+	if err := agentconfig.Save(filepath.Join(appData, agentconfig.FileName), agentconfig.Config{
+		CoordinatorURL: "http://121.40.101.224:6121",
+		GroupID:        "grp_1",
+		MemberID:       "mem_1",
+		HostID:         "host_1",
+		HostToken:      "test-host-token",
+		DisplayName:    "owner",
+		DeviceName:     "pc",
+		Platform:       runtime.GOOS,
+		AgentVersion:   agentconfig.AgentVersion,
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	status, err := baseStatus(withDefaults(Options{AppDataDir: appData}))
+	if err != nil {
+		t.Fatalf("baseStatus() error = %v", err)
+	}
+	if status.CoordinatorURL != "http://121.40.101.224:6121" {
+		t.Fatalf("CoordinatorURL = %q, want configured public URL", status.CoordinatorURL)
+	}
+}
+
+func TestBaseStatusExplicitHostPortOverridesConfig(t *testing.T) {
+	appData := t.TempDir()
+	if err := agentconfig.Save(filepath.Join(appData, agentconfig.FileName), agentconfig.Config{
+		CoordinatorURL: "http://121.40.101.224:6121",
+		GroupID:        "grp_1",
+		MemberID:       "mem_1",
+		HostID:         "host_1",
+		HostToken:      "test-host-token",
+		DisplayName:    "owner",
+		DeviceName:     "pc",
+		Platform:       runtime.GOOS,
+		AgentVersion:   agentconfig.AgentVersion,
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	status, err := baseStatus(withDefaults(Options{AppDataDir: appData, Host: "0.0.0.0", Port: "7000"}))
+	if err != nil {
+		t.Fatalf("baseStatus() error = %v", err)
+	}
+	if status.CoordinatorURL != "http://0.0.0.0:7000" {
+		t.Fatalf("CoordinatorURL = %q, want explicit override", status.CoordinatorURL)
+	}
+}
+
 func TestResolveNodeDoesNotUseCorepack(t *testing.T) {
 	tempDir := t.TempDir()
 	nodePath := filepath.Join(tempDir, "node.exe")
@@ -294,6 +344,29 @@ func TestBuildPowerShellLaunchArgvRejectsOutsidePath(t *testing.T) {
 	}
 	if info.ErrorCode != "launch_script_outside_server_dir" {
 		t.Fatalf("info = %+v", info)
+	}
+}
+
+func TestResolveLaunchScriptInsideNormalizesWindowsSeparators(t *testing.T) {
+	serverDir := t.TempDir()
+	nestedDir := filepath.Join(serverDir, "scripts")
+	if err := os.MkdirAll(nestedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "run.ps1"), []byte("Write-Host ok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := resolveLaunchScriptInside(serverDir, `scripts\run.ps1`)
+	if err != nil {
+		t.Fatalf("resolveLaunchScriptInside() error = %v", err)
+	}
+	if resolved != filepath.Join(nestedDir, "run.ps1") {
+		t.Fatalf("resolved = %q, want nested script", resolved)
+	}
+
+	if _, err := resolveLaunchScriptInside(serverDir, `..\outside.ps1`); err == nil {
+		t.Fatal("resolveLaunchScriptInside() accepted Windows-style parent traversal")
 	}
 }
 
