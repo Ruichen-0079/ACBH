@@ -9,10 +9,12 @@ import type { ArtifactKind } from "./domain/artifacts.js";
 import type { CoordinatorStorage } from "./storage/index.js";
 import { StorageError, StorageObjectTooLargeError } from "./storage/index.js";
 import type { ArtifactManifest } from "./storage/index.js";
-import type { InMemoryCoordinatorStore, GcBackend } from "./store.js";
+import type { WorldSnapshotManifest } from "./storage/index.js";
+import type { ArtifactMetadata, InMemoryCoordinatorStore, GcBackend } from "./store.js";
 import { GcBlockedError, StoreError } from "./store.js";
 import type { TunnelSession, PlayerSession } from "./network.js";
 import type { RelayManager } from "./relay.js";
+import { coordinatorVersion } from "./version.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
@@ -23,7 +25,7 @@ export const defaultMaxObjectBytes = 256 * 1024 * 1024;
 const bootstrapPackageDefinitions = [
   {
     id: "acbh-runtime-base-windows-amd64",
-    version: "0.3.5-hotfix1",
+    version: "0.3.3",
     filename: "acbh-runtime-base-windows-amd64.zip",
     requiredFor: ["desktop-bootstrap"],
   },
@@ -216,6 +218,74 @@ const objectParamsSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
 });
 
+const worldGroupParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const worldSnapshotParamsSchema = z.object({
+  groupId: z.string().min(1),
+  snapshotId: z.string().min(1),
+});
+
+const worldLatestQuerySchema = z.object({
+  consistentOnly: z.coerce.boolean().optional().default(false),
+});
+
+const worldObjectParamsSchema = z.object({
+  groupId: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+const worldBackupPlanSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  hostGeneration: z.number().int().nonnegative(),
+  parentSnapshotId: z.string().optional(),
+  objects: z.array(z.object({
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    size: z.number().int().nonnegative(),
+    path: z.string().optional(),
+  })).max(100_000),
+});
+
+const worldSnapshotFileSchema = z.object({
+  path: z.string().min(1).max(4096),
+  size: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  objectId: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+});
+
+const worldSnapshotManifestSchema = z.object({
+  schemaVersion: z.literal(1),
+  snapshotId: z.string().min(1).max(128),
+  groupId: z.string().min(1).max(128),
+  sourceHostId: z.string().min(1).max(128),
+  hostGeneration: z.number().int().nonnegative(),
+  parentSnapshotId: z.string().optional(),
+  createdAt: z.string().datetime(),
+  consistent: z.boolean(),
+  logicalSize: z.number().int().nonnegative(),
+  uploadedSize: z.number().int().nonnegative(),
+  fileCount: z.number().int().nonnegative(),
+  changedFileCount: z.number().int().nonnegative(),
+  deletedFileCount: z.number().int().nonnegative(),
+  files: z.array(worldSnapshotFileSchema).max(250_000),
+  deletedPaths: z.array(z.string().min(1).max(4096)).optional(),
+});
+
+const worldBackupCommitSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  hostGeneration: z.number().int().nonnegative(),
+  manifest: worldSnapshotManifestSchema,
+});
+
+const worldBackupPinSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  pinned: z.boolean().optional().default(true),
+});
+
 const streamingObjectParamsSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
 });
@@ -243,7 +313,7 @@ export async function registerRoutes(
     return {
       ok: true,
       service: "acbh-coordinator",
-      version: "0.3.5-hotfix1",
+      version: coordinatorVersion(),
     };
   });
 
@@ -452,12 +522,6 @@ export async function registerRoutes(
         return reply.code(400).send({
           error: "Bad Request",
           message: "Manifest IDs must match upload request",
-        });
-      }
-      if (body.artifactKind === "world-snapshot" && !body.manifest.serverPackVersion) {
-        return reply.code(400).send({
-          error: "Bad Request",
-          message: "serverPackVersion is required for world-snapshot artifacts",
         });
       }
       const metadata = {
@@ -1033,6 +1097,277 @@ export async function registerRoutes(
       });
     });
   });
+
+  app.post("/v1/groups/:groupId/world-backups/plan", async (request, reply) => {
+    const params = parseParams(worldGroupParamsSchema, request, reply);
+    const body = parseBody(worldBackupPlanSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, async () => {
+      store.authorizeWorldSnapshotPublish({
+        groupId: params.groupId,
+        sourceHostId: body.hostId,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        hostGeneration: body.hostGeneration,
+        parentSnapshotId: body.parentSnapshotId,
+      });
+      return handleStorageCall(reply, async () => {
+        const missingObjects = [];
+        let existingCount = 0;
+        for (const object of dedupePlanObjects(body.objects)) {
+          const exists = await storage.objectExists({ groupId: params.groupId, sha256: object.sha256 });
+          if (exists) {
+            existingCount++;
+          } else {
+            missingObjects.push(object);
+          }
+        }
+        return {
+          ok: true,
+          missingObjects,
+          existingCount,
+        };
+      });
+    });
+  });
+
+  app.put("/v1/groups/:groupId/world-objects/:sha256", async (request, reply) => {
+    const params = parseParams(worldObjectParamsSchema, request, reply);
+    const authResult = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!params) {
+      return reply;
+    }
+    if (!authResult.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        message: "Host authentication headers are required",
+        issues: authResult.error.issues,
+      });
+    }
+    const bodyStream = request.body;
+    if (!(bodyStream instanceof Readable)) {
+      return reply.code(400).send({
+        error: "Bad Request",
+        message: "Request body must be application/octet-stream",
+      });
+    }
+    const declaredLength = parseContentLength(request.headers["content-length"]);
+    if (declaredLength !== null && declaredLength > maxObjectBytes) {
+      bodyStream.resume();
+      return reply.code(413).send({
+        error: "Payload Too Large",
+        message: `Object upload exceeds configured limit of ${maxObjectBytes} bytes`,
+      });
+    }
+    return handleStoreCall(reply, () => {
+      store.verifyHost({ groupId: params.groupId, ...authResult.data });
+      return handleStorageCall(reply, async () => {
+        const exists = await storage.objectExists({ groupId: params.groupId, sha256: params.sha256 });
+        if (exists) {
+          bodyStream.resume();
+          const existing = await storage.createObjectReadStream({ groupId: params.groupId, sha256: params.sha256 });
+          existing.stream.destroy();
+          return { ok: true, sha256: params.sha256, exists: true, size: existing.size };
+        }
+        const saved = await storage.saveObjectFromStream({
+          groupId: params.groupId,
+          sha256: params.sha256,
+          stream: bodyStream,
+          maxBytes: maxObjectBytes,
+        });
+        return { ok: true, sha256: params.sha256, exists: false, size: saved.size };
+      });
+    });
+  });
+
+  app.post("/v1/groups/:groupId/world-backups/commit", { bodyLimit: manifestUploadBodyLimitBytes * 8 }, async (request, reply) => {
+    const params = parseParams(worldGroupParamsSchema, request, reply);
+    const body = parseBody(worldBackupCommitSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    const manifest = body.manifest as WorldSnapshotManifest;
+    if (manifest.groupId !== params.groupId) {
+      return reply.code(400).send({ error: "Bad Request", message: "manifest groupId must match route groupId" });
+    }
+    if (manifest.sourceHostId !== body.hostId || manifest.hostGeneration !== body.hostGeneration) {
+      return reply.code(400).send({ error: "Bad Request", message: "manifest source host and generation must match request" });
+    }
+    const manifestValidation = validateWorldSnapshotRequest(manifest);
+    if (manifestValidation) {
+      return reply.code(400).send({ error: "Bad Request", message: manifestValidation });
+    }
+
+    return handleStoreCall(reply, async () => {
+      const publishAuth = {
+        groupId: params.groupId,
+        sourceHostId: manifest.sourceHostId,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        hostGeneration: body.hostGeneration,
+        parentSnapshotId: manifest.parentSnapshotId,
+      };
+      store.authorizeWorldSnapshotPublish(publishAuth);
+      return handleStorageCall(reply, async () => {
+        for (const file of manifest.files) {
+          const sha = file.objectId.slice("sha256:".length);
+          const exists = await storage.objectExists({ groupId: params.groupId, sha256: sha });
+          if (!exists) {
+            return reply.code(400).send({
+              error: "Bad Request",
+              code: "missing_world_object",
+              message: `Missing world object ${sha} for ${file.path}`,
+            });
+          }
+        }
+        await storage.saveWorldSnapshotManifest({
+          groupId: params.groupId,
+          snapshotId: manifest.snapshotId,
+          manifest,
+          beforeCommit: () => store.authorizeWorldSnapshotPublish(publishAuth),
+        });
+        const recorded = store.recordArtifact({
+          groupId: params.groupId,
+          artifactKind: "world-snapshot",
+          artifactId: manifest.snapshotId,
+          parentArtifactId: manifest.parentSnapshotId ?? null,
+          serverPackVersion: null,
+          creatorHostId: manifest.sourceHostId,
+          createdAt: manifest.createdAt,
+          status: "available",
+          manifestSha256: sha256(Buffer.from(JSON.stringify(manifest), "utf8")),
+          manifestObjectPath: `groups/${params.groupId}/world-backups/${manifest.snapshotId}/manifest.json`,
+          fileCount: manifest.fileCount,
+          totalBytes: manifest.logicalSize,
+          consistent: manifest.consistent,
+          pinned: false,
+          sourceHostId: manifest.sourceHostId,
+          hostGeneration: manifest.hostGeneration,
+          uploadedSize: manifest.uploadedSize,
+          changedFileCount: manifest.changedFileCount,
+          deletedFileCount: manifest.deletedFileCount,
+        });
+        return { ok: true, snapshotId: recorded.artifactId, status: recorded.status };
+      });
+    });
+  });
+
+  app.get("/v1/groups/:groupId/world-backups/latest", async (request, reply) => {
+    const params = parseParams(worldGroupParamsSchema, request, reply);
+    const query = parseQuery(worldLatestQuerySchema, request, reply);
+    if (!params || !query) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      const latest = store.getLatestArtifact(params.groupId, "world-snapshot");
+      if (query.consistentOnly && latest.consistent === false) {
+        return reply.code(409).send({
+          error: "Conflict",
+          code: "inconsistent_world_snapshot",
+          message: "Latest world snapshot is marked inconsistent",
+        });
+      }
+      return handleStorageCall(reply, async () => ({
+        metadata: worldMetadata(latest),
+        manifest: await storage.readWorldSnapshotManifest({ groupId: params.groupId, snapshotId: latest.artifactId }),
+      }));
+    });
+  });
+
+  app.get("/v1/groups/:groupId/world-backups", async (request, reply) => {
+    const params = parseParams(worldGroupParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      return {
+        snapshots: store.listArtifacts(params.groupId, "world-snapshot").map(worldMetadata),
+      };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/world-backups/:snapshotId", async (request, reply) => {
+    const params = parseParams(worldSnapshotParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      const metadata = store.getArtifact(params.groupId, "world-snapshot", params.snapshotId);
+      return handleStorageCall(reply, async () => ({
+        metadata: worldMetadata(metadata),
+        manifest: await storage.readWorldSnapshotManifest({ groupId: params.groupId, snapshotId: params.snapshotId }),
+      }));
+    });
+  });
+
+  app.delete("/v1/groups/:groupId/world-backups/:snapshotId", async (request, reply) => {
+    const params = parseParams(worldSnapshotParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const hostId = singleHeader(request.headers["x-acbh-host-id"]);
+    const hostToken = singleHeader(request.headers["x-acbh-host-token"]);
+    if (!hostId || !hostToken) {
+      return reply.code(401).send({ error: "Unauthorized", message: "Host authentication headers are required" });
+    }
+    return handleStoreCall(reply, () => {
+      const deleted = store.deleteWorldSnapshot({ groupId: params.groupId, snapshotId: params.snapshotId, hostId, hostToken });
+      return handleStorageCall(reply, async () => {
+        await storage.deleteWorldSnapshotManifest({ groupId: params.groupId, snapshotId: params.snapshotId });
+        return { ok: true, snapshotId: deleted.artifactId };
+      });
+    });
+  });
+
+  app.post("/v1/groups/:groupId/world-backups/:snapshotId/pin", async (request, reply) => {
+    const params = parseParams(worldSnapshotParamsSchema, request, reply);
+    const body = parseBody(worldBackupPinSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      const pinned = store.pinWorldSnapshot({
+        groupId: params.groupId,
+        snapshotId: params.snapshotId,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        pinned: body.pinned,
+      });
+      return { ok: true, snapshotId: pinned.artifactId, pinned: pinned.pinned === true };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/world-objects/:sha256", async (request, reply) => {
+    const params = parseParams(worldObjectParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      return handleStorageCall(reply, async () => {
+        const object = await storage.createObjectReadStream({ groupId: params.groupId, sha256: params.sha256 });
+        reply.type("application/octet-stream");
+        reply.header("content-length", object.size);
+        return reply.send(object.stream);
+      });
+    });
+  });
 }
 
 function parseBody<T extends z.ZodTypeAny>(
@@ -1107,9 +1442,22 @@ function parseQuery<T extends z.ZodTypeAny>(
   return result.data;
 }
 
-function handleStoreCall<T>(reply: FastifyReply, call: () => T): T | FastifyReply {
+function handleStoreCall<T>(reply: FastifyReply, call: () => T | Promise<T>): T | Promise<T | FastifyReply> | FastifyReply {
   try {
-    return call();
+    const result = call();
+    if (result instanceof Promise) {
+      return result.catch((error: unknown) => {
+        if (error instanceof StoreError) {
+          return reply.code(error.statusCode).send({
+            error: statusText(error.statusCode),
+            message: error.message,
+            ...(error.code ? { code: error.code } : {}),
+          });
+        }
+        throw error;
+      });
+    }
+    return result;
   } catch (error) {
     if (error instanceof StoreError) {
       return reply.code(error.statusCode).send({
@@ -1400,4 +1748,103 @@ function totalManifestBytes(manifest: { files?: Array<{ deleted?: boolean; size?
 
 function manifestStorageKey(groupId: string, artifactKind: ArtifactKind, artifactId: string): string {
   return `groups/${groupId}/${artifactKind}/${artifactId}/manifest.json`;
+}
+
+function dedupePlanObjects(
+  objects: Array<{ sha256: string; size: number; path?: string }>,
+): Array<{ sha256: string; size: number; path?: string }> {
+  const bySha = new Map<string, { sha256: string; size: number; path?: string }>();
+  for (const object of objects) {
+    const existing = bySha.get(object.sha256);
+    if (existing && existing.size !== object.size) {
+      throw new StoreError(400, `world object ${object.sha256} has conflicting sizes`);
+    }
+    if (!existing) {
+      bySha.set(object.sha256, object);
+    }
+  }
+  return [...bySha.values()].sort((a, b) => a.sha256.localeCompare(b.sha256));
+}
+
+function validateWorldSnapshotRequest(manifest: WorldSnapshotManifest): string | null {
+  if (manifest.fileCount !== manifest.files.length) {
+    return "fileCount must match files length";
+  }
+  const deletedPaths = manifest.deletedPaths ?? [];
+  if (manifest.deletedFileCount !== deletedPaths.length) {
+    return "deletedFileCount must match deletedPaths length";
+  }
+  let lastPath = "";
+  let logicalSize = 0;
+  for (const file of manifest.files) {
+    if (file.path <= lastPath) {
+      return "files must be sorted by path with no duplicates";
+    }
+    lastPath = file.path;
+    if (file.objectId !== `sha256:${file.sha256}`) {
+      return "file objectId must match sha256";
+    }
+    try {
+      validateManifestPathForRequest(file.path);
+    } catch (error) {
+      return error instanceof Error ? error.message : "invalid manifest file path";
+    }
+    logicalSize += file.size;
+  }
+  if (logicalSize !== manifest.logicalSize) {
+    return "logicalSize must match files total size";
+  }
+  let lastDeleted = "";
+  for (const deletedPath of deletedPaths) {
+    if (deletedPath <= lastDeleted) {
+      return "deletedPaths must be sorted by path with no duplicates";
+    }
+    lastDeleted = deletedPath;
+    try {
+      validateManifestPathForRequest(deletedPath);
+    } catch (error) {
+      return error instanceof Error ? error.message : "invalid deleted path";
+    }
+  }
+  return null;
+}
+
+function validateManifestPathForRequest(value: string): void {
+  if (value.length === 0 || value.includes("\\") || path.posix.isAbsolute(value)) {
+    throw new Error("manifest path must be a relative POSIX path");
+  }
+  const normalized = path.posix.normalize(value);
+  if (normalized !== value || normalized === "." || normalized.startsWith("../") || normalized.includes("/../")) {
+    throw new Error("manifest path must be normalized and must not traverse directories");
+  }
+}
+
+function worldMetadata(artifact: ArtifactMetadata): {
+  snapshotId: string;
+  groupId: string;
+  sourceHostId: string;
+  hostGeneration: number;
+  createdAt: string;
+  consistent: boolean;
+  pinned: boolean;
+  logicalSize: number;
+  uploadedSize: number;
+  fileCount: number;
+  changedFileCount: number;
+  deletedFileCount: number;
+} {
+  return {
+    snapshotId: artifact.artifactId,
+    groupId: artifact.groupId,
+    sourceHostId: artifact.sourceHostId ?? artifact.creatorHostId,
+    hostGeneration: artifact.hostGeneration ?? 0,
+    createdAt: artifact.createdAt,
+    consistent: artifact.consistent !== false,
+    pinned: artifact.pinned === true,
+    logicalSize: artifact.totalBytes,
+    uploadedSize: artifact.uploadedSize ?? 0,
+    fileCount: artifact.fileCount,
+    changedFileCount: artifact.changedFileCount ?? 0,
+    deletedFileCount: artifact.deletedFileCount ?? 0,
+  };
 }

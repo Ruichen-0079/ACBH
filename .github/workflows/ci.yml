@@ -31,4 +31,29 @@ jobs:
       - working-directory: agent
         run: go mod tidy
       - working-directory: agent
-        run: go test ./...
+        run: go test ./... -count=1
+      - working-directory: agent
+        run: go test ./... -count=10
+      - working-directory: agent
+        run: go vet ./...
+
+  vps-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: VPS upgrade integration tests
+        run: bash scripts/test/acbh-vps-upgrade.test.sh
+      - name: shellcheck VPS scripts
+        working-directory: scripts
+        run: |
+          shellcheck -x -e SC2015 \
+            acbh-vps-lib.sh \
+            install-acbh-vps.sh \
+            acbh-vps-upgrade.sh \
+            acbh-vps-rollback.sh \
+            acbh-vps-status.sh

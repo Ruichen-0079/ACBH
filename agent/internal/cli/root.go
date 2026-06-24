@@ -56,6 +56,7 @@ func newRootCmd() *cobra.Command {
 		newDaemonCmd(),
 		newScanCmd(),
 		newSafeSyncCmd(),
+		newWorldBackupCmd(),
 		newPushCmd(),
 		newPullCmd(),
 		newManifestCmd(),
@@ -96,6 +97,7 @@ func newDesktopCmd() *cobra.Command {
 		newDesktopLatestManifestCmd(),
 		newDesktopCanPushCmd(),
 		newDesktopTakeoverStatusCmd(),
+		newDesktopWorldBackupCmd(),
 		newDesktopInspectServerCmd(),
 		newDesktopImportServerCmd(),
 		newDesktopResetCmd(),
@@ -1258,6 +1260,186 @@ func newDesktopTakeoverStatusCmd() *cobra.Command {
 	}
 	addDesktopCommonFlags(cmd, &opts)
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "输出 JSON")
+	return cmd
+}
+
+func newDesktopWorldBackupCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "world-backup",
+		Short: "世界差量备份管理",
+	}
+	cmd.AddCommand(
+		newDesktopWorldBackupStatusCmd(),
+		newDesktopWorldBackupCreateCmd(),
+		newDesktopWorldBackupListCmd(),
+		newDesktopWorldBackupShowCmd(),
+		newDesktopWorldBackupRestoreCmd(),
+		newDesktopWorldBackupPinCmd(),
+		newDesktopWorldBackupDeleteCmd(),
+		newDesktopWorldBackupResumeCmd(),
+	)
+	return cmd
+}
+
+func newDesktopWorldBackupStatusCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "查看世界差量备份状态",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.WorldBackupStatus(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopWorldBackupCreateCmd() *cobra.Command {
+	var opts desktop.Options
+	var wb desktop.WorldBackupOptions
+	var online bool
+	var rconPassword string
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "创建并发布世界差量快照",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.WorldBackupCreate(cmd.Context(), opts, wb, online, rconPassword)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&online, "online", false, "使用 RCON save-off/save-all flush/save-on 进行在线安全备份")
+	cmd.Flags().StringVar(&rconPassword, "rcon-password", "", "Minecraft RCON 密码；建议使用 ACBH_RCON_PASSWORD 环境变量")
+	cmd.Flags().StringVar(&wb.RCONHost, "rcon-host", "127.0.0.1", "Minecraft RCON 地址")
+	cmd.Flags().IntVar(&wb.RCONPort, "rcon-port", 25575, "Minecraft RCON 端口")
+	cmd.Flags().DurationVar(&wb.RCONTimeout, "rcon-timeout", defaultRCONTimeout, "RCON 超时")
+	cmd.Flags().BoolVar(&wb.AllowInconsistent, "allow-inconsistent", false, "在线一致性无法保证时允许创建不一致快照")
+	cmd.Flags().StringArrayVar(&wb.WorldRoots, "world-root", nil, "额外世界根目录（相对 server-dir）；可重复")
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopWorldBackupListCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "列出远程世界快照",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.WorldBackupList(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopWorldBackupShowCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "show <snapshot-id>",
+		Short: "查看世界快照 manifest",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.WorldBackupShow(cmd.Context(), opts, args[0])
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopWorldBackupRestoreCmd() *cobra.Command {
+	var opts desktop.Options
+	var wb desktop.WorldBackupOptions
+	cmd := &cobra.Command{
+		Use:   "restore <latest|snapshot-id>",
+		Short: "恢复世界快照",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.WorldBackupRestore(cmd.Context(), opts, wb, args[0])
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().BoolVar(&wb.ConsistentOnly, "consistent-only", true, "拒绝恢复不一致快照")
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopWorldBackupPinCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "pin <snapshot-id>",
+		Short: "固定世界快照以便保留",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.WorldBackupPin(cmd.Context(), opts, args[0])
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopWorldBackupDeleteCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "delete <snapshot-id>",
+		Short: "删除未固定且非最新的世界快照",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.WorldBackupDelete(cmd.Context(), opts, args[0])
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopWorldBackupResumeCmd() *cobra.Command {
+	var opts desktop.Options
+	var wb desktop.WorldBackupOptions
+	cmd := &cobra.Command{
+		Use:   "resume",
+		Short: "继续未完成的世界差量备份",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.WorldBackupResume(cmd.Context(), opts, wb)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringArrayVar(&wb.WorldRoots, "world-root", nil, "额外世界根目录（相对 server-dir）；可重复")
+	addIgnoredJSONFlag(cmd)
 	return cmd
 }
 
