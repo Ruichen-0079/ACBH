@@ -8,3 +8,5 @@ dist/
 coverage/
 world-backup/transactions/
 world-backup/index.json
+mcps/
+agent-tools/

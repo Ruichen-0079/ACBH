@@ -10,6 +10,8 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+
+
 if (-not $AgentPath) {
     $AgentPath = Join-Path $PSScriptRoot "..\acbh-agent-windows-amd64.exe"
 }
@@ -25,17 +27,363 @@ if (-not $AppDataDir) {
     }
 }
 
-if ($SelfTest) {
-    Write-Output "ACBH desktop GUI self-test ok"
-    exit 0
-}
-
 $script:ToolTip = New-Object System.Windows.Forms.ToolTip
 $script:LastStatus = $null
 $script:LastInspectResult = $null
 $script:LastWorldBackupStatus = $null
 $script:Running = $false
 $script:CurrentState = "Unconfigured"
+$script:GuiOperationState = "Idle"
+$script:GuiOperationName = ""
+$script:GuiOperationGeneration = 0
+$script:GuiActiveOperationId = $null
+$script:GuiActiveThreadJob = $null
+$script:GuiLogBuffer = New-Object System.Collections.Generic.List[string]
+$script:GuiLogFlushScheduled = $false
+$script:GuiMutexOperations = @("server", "backup", "restore")
+$script:GuiActiveMutex = $null
+$script:GuiOperationButtons = New-Object System.Collections.Generic.List[System.Windows.Forms.Button]
+$script:GuiCancelSource = $null
+$script:GuiSelfTestFailures = 0
+
+function Initialize-GuiAsyncHost {
+    if (-not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) {
+        throw "PowerShell 7+ Start-ThreadJob is required for ACBH desktop GUI async operations."
+    }
+}
+
+function Invoke-OnUiThread {
+    param([scriptblock]$Action)
+    if ($null -eq $form) {
+        & $Action
+        return
+    }
+    if ($form.InvokeRequired) {
+        [void]$form.BeginInvoke($Action)
+    } else {
+        & $Action
+    }
+}
+
+function Register-GuiOperationButton {
+    param([System.Windows.Forms.Button]$Button)
+    if ($Button -and -not $script:GuiOperationButtons.Contains($Button)) {
+        [void]$script:GuiOperationButtons.Add($Button)
+    }
+}
+
+function Set-GuiBusyState {
+    param(
+        [bool]$Busy,
+        [string]$Text = "",
+        [string]$State = "Idle"
+    )
+    Invoke-OnUiThread {
+        $script:Running = $Busy
+        $script:GuiOperationState = $State
+        if ($form -ne $null) { $form.UseWaitCursor = $Busy }
+        if ($lblBusy -ne $null) { $lblBusy.Text = $Text }
+        if ($progressBusy -ne $null) {
+            $progressBusy.Visible = $Busy
+            $progressBusy.Style = "Marquee"
+        }
+        foreach ($btn in $script:GuiOperationButtons) {
+            if ($null -ne $btn) { $btn.Enabled = -not $Busy }
+        }
+        if (-not $Busy) {
+            if ($btnMain -ne $null) { $btnMain.Enabled = $true }
+            if ($btnRefreshStatus -ne $null) { $btnRefreshStatus.Enabled = $true }
+        }
+    }
+}
+
+function Add-GuiLogThrottled {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    $safe = Redact-Secrets $Text
+    [void]$script:GuiLogBuffer.Add("[" + (Get-Date -Format "HH:mm:ss") + "] " + $safe)
+    if ($script:GuiLogFlushScheduled) { return }
+    $script:GuiLogFlushScheduled = $true
+    Invoke-OnUiThread {
+        $script:GuiLogFlushScheduled = $false
+        if ($script:LogBox -eq $null) { return }
+        foreach ($line in $script:GuiLogBuffer) {
+            $script:LogBox.AppendText($line + [Environment]::NewLine)
+        }
+        $script:GuiLogBuffer.Clear()
+        $script:LogBox.SelectionStart = $script:LogBox.TextLength
+        $script:LogBox.ScrollToCaret()
+    }
+}
+
+function Test-AgentBusinessResult {
+    param($JsonResult)
+    if ($null -eq $JsonResult) { return $true }
+    if ($JsonResult.PSObject.Properties.Name -contains "ok") {
+        return [bool]$JsonResult.ok
+    }
+    return $true
+}
+
+function Format-AgentFailureMessage {
+    param($JsonResult, [string]$ActionName)
+    $parts = @("$ActionName 失败")
+    if ($null -ne $JsonResult) {
+        if ($JsonResult.PSObject.Properties.Name -contains "message" -and $JsonResult.message) {
+            $parts += $JsonResult.message
+        }
+        if ($JsonResult.PSObject.Properties.Name -contains "errorCode" -and $JsonResult.errorCode) {
+            $parts += ("errorCode=" + $JsonResult.errorCode)
+        }
+        if ($JsonResult.PSObject.Properties.Name -contains "partialFailure" -and $JsonResult.partialFailure) {
+            $pf = $JsonResult.partialFailure
+            $parts += ("部分完成：MC已停=" + $pf.minecraftStopped + " 快照=" + $pf.worldSnapshotPublished + " Relay=" + $pf.relayStopped + " 心跳=" + $pf.heartbeatStopped)
+        }
+    }
+    return ($parts -join "；")
+}
+
+function Invoke-AgentCommandAsync {
+    param(
+        [string[]]$CommandArgs,
+        [hashtable]$ExtraEnv,
+        [int]$TimeoutSeconds = 0,
+        [System.Threading.CancellationTokenSource]$CancelSource
+    )
+    Initialize-GuiAsyncHost
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $AgentPath
+    $psi.Arguments = Join-ProcessArguments $CommandArgs
+    $psi.WorkingDirectory = Split-Path -Parent $AgentPath
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    Set-ProcessUtf8OutputEncoding $psi
+    if ($AppDataDir) { $psi.Environment["ACBH_APP_DATA_DIR"] = $AppDataDir }
+    if ($ExtraEnv) {
+        foreach ($key in $ExtraEnv.Keys) { $psi.Environment[$key] = [string]$ExtraEnv[$key] }
+    }
+
+    $process = [System.Diagnostics.Process]::Start($psi)
+    $stdoutBuilder = New-Object System.Text.StringBuilder
+    $stderrBuilder = New-Object System.Text.StringBuilder
+    $stdoutDone = $false
+    $stderrDone = $false
+    $readStdout = {
+        if (-not $stdoutDone) {
+            $chunk = $process.StandardOutput.ReadLine()
+            if ($null -eq $chunk) { $script:stdoutDone = $true } else { [void]$stdoutBuilder.AppendLine($chunk) }
+        }
+    }
+    $readStderr = {
+        if (-not $stderrDone) {
+            $chunk = $process.StandardError.ReadLine()
+            if ($null -eq $chunk) { $script:stderrDone = $true } else { [void]$stderrBuilder.AppendLine($chunk) }
+        }
+    }
+
+    $deadline = if ($TimeoutSeconds -gt 0) { [datetime]::UtcNow.AddSeconds($TimeoutSeconds) } else { [datetime]::MaxValue }
+    while (-not $process.HasExited -or -not $stdoutDone -or -not $stderrDone) {
+        if ($CancelSource -and $CancelSource.IsCancellationRequested) {
+            try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+            throw "操作已取消"
+        }
+        if ([datetime]::UtcNow -gt $deadline) {
+            try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+            throw "操作超时"
+        }
+        if (-not $stdoutDone) {
+            while ($process.StandardOutput.Peek() -ge 0) {
+                $line = $process.StandardOutput.ReadLine()
+                if ($null -eq $line) { $stdoutDone = $true; break }
+                [void]$stdoutBuilder.AppendLine($line)
+                Add-GuiLogThrottled $line
+            }
+            if ($process.HasExited) { $stdoutDone = $true }
+        }
+        if (-not $stderrDone) {
+            while ($process.StandardError.Peek() -ge 0) {
+                $line = $process.StandardError.ReadLine()
+                if ($null -eq $line) { $stderrDone = $true; break }
+                [void]$stderrBuilder.AppendLine($line)
+                Add-GuiLogThrottled $line
+            }
+            if ($process.HasExited) { $stderrDone = $true }
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    if (-not $process.HasExited) { $process.WaitForExit() }
+    $stdout = Redact-Secrets ($stdoutBuilder.ToString().Trim())
+    $stderr = Redact-Secrets ($stderrBuilder.ToString().Trim())
+    $parsedJson = $null
+    if ($stdout -match '^\s*[\{\[]') {
+        try { $parsedJson = $stdout | ConvertFrom-Json } catch { }
+    }
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Stdout = $stdout
+        Stderr = $stderr
+        Output = Redact-Secrets ((@($stdout, $stderr) | Where-Object { $_ }) -join [Environment]::NewLine).Trim()
+        ParsedJson = $parsedJson
+    }
+}
+
+function Start-GuiOperation {
+    param(
+        [string]$Name,
+        [string]$MutexClass = "",
+        [scriptblock]$Work,
+        [scriptblock]$OnComplete,
+        [switch]$Cancellable,
+        [switch]$AllowWhileIdleOnly
+    )
+    if ($script:GuiOperationState -eq "Running") {
+        Add-GuiLog "$Name 已忽略：已有任务正在运行（$($script:GuiOperationName)）。"
+        return
+    }
+    if ($MutexClass -and $script:GuiActiveMutex -and $script:GuiActiveMutex -ne $MutexClass) {
+        Add-GuiLog "$Name 已忽略：与当前互斥任务冲突。"
+        return
+    }
+    Initialize-GuiAsyncHost
+    $operationId = [guid]::NewGuid().ToString()
+    $script:GuiActiveOperationId = $operationId
+    $script:GuiOperationName = $Name
+    $script:GuiOperationGeneration++
+    $generation = $script:GuiOperationGeneration
+    if ($MutexClass) { $script:GuiActiveMutex = $MutexClass }
+    $cancelSource = $null
+    if ($Cancellable) { $cancelSource = New-Object System.Threading.CancellationTokenSource }
+    $script:GuiCancelSource = $cancelSource
+    Set-GuiBusyState -Busy $true -Text ("处理中：" + $Name) -State "Running"
+
+    $payload = @{
+        Name = $Name
+        MutexClass = $MutexClass
+        OnComplete = $OnComplete
+        Generation = $generation
+        OperationId = $operationId
+    }
+    $threadJob = Start-ThreadJob -ScriptBlock $Work
+    $script:GuiActiveThreadJob = $threadJob
+    $pollTimer = New-Object System.Timers.Timer
+    $pollTimer.Interval = 100
+    $pollTimer.AutoReset = $true
+    $pollTimer.add_Elapsed({
+        if ($threadJob.State -eq "Running") { return }
+        $pollTimer.Stop()
+        $pollTimer.Dispose()
+        $complete = {
+            $job = $payload
+            if ($script:GuiActiveOperationId -ne $job.OperationId) { return }
+            $result = $null
+            $errorText = $null
+            try {
+                $result = Receive-Job -Job $threadJob -ErrorAction Stop
+            } catch {
+                $errorText = $_.Exception.Message
+            }
+            Remove-Job -Job $threadJob -Force -ErrorAction SilentlyContinue
+            $script:GuiActiveThreadJob = $null
+            Complete-GuiOperation -Name $job.Name -MutexClass $job.MutexClass -Result $result -ErrorText $errorText -OnComplete $job.OnComplete -Generation $job.Generation
+        }
+        if ($null -ne $form) {
+            [void]$form.BeginInvoke([System.Action]$complete)
+        } else {
+            & $complete
+        }
+    }.GetNewClosure())
+    $pollTimer.Start()
+}
+
+function Complete-GuiOperation {
+    param(
+        [string]$Name,
+        [string]$MutexClass,
+        $Result,
+        [string]$ErrorText,
+        [scriptblock]$OnComplete,
+        [int]$Generation
+    )
+    try {
+        if ($Generation -ne $script:GuiOperationGeneration) { return }
+        if ($ErrorText) {
+            Set-GuiBusyState -Busy $false -Text "" -State "Failed"
+            Show-GuiError "$Name 异常：$ErrorText"
+            return
+        }
+        if ($OnComplete) {
+            Invoke-OnUiThread { & $OnComplete $Result }
+        }
+        Set-GuiBusyState -Busy $false -Text "" -State "Succeeded"
+    } finally {
+        if ($MutexClass -and $script:GuiActiveMutex -eq $MutexClass) { $script:GuiActiveMutex = $null }
+        $script:GuiActiveOperationId = $null
+        $script:GuiCancelSource = $null
+        $script:GuiOperationName = ""
+        if ($Generation -eq $script:GuiOperationGeneration) { $script:GuiOperationState = "Idle" }
+    }
+}
+
+function Cancel-GuiOperation {
+    if ($script:GuiCancelSource) { $script:GuiCancelSource.Cancel() }
+    if ($script:GuiActiveThreadJob) {
+        Stop-Job -Job $script:GuiActiveThreadJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $script:GuiActiveThreadJob -Force -ErrorAction SilentlyContinue
+        $script:GuiActiveThreadJob = $null
+    }
+    Set-GuiBusyState -Busy $false -Text "正在取消..." -State "Cancelling"
+}
+
+function Run-GuiSelfTests {
+    [Console]::Out.WriteLine("GUI self-test starting")
+    $script:GuiSelfTestFailures = 0
+    function Assert-Test([string]$Name, [bool]$Condition) {
+        if ($Condition) { [Console]::Out.WriteLine("PASS: $Name") } else { [Console]::Out.WriteLine("FAIL: $Name"); $script:GuiSelfTestFailures++ }
+    }
+    Initialize-GuiAsyncHost
+    $hidden = New-Object System.Windows.Forms.Form
+    $hidden.ShowInTaskbar = $false
+    $hidden.Opacity = 0
+    $hidden.Size = New-Object System.Drawing.Size(1, 1)
+    $script:form = $hidden
+    $script:LogBox = New-Object System.Windows.Forms.TextBox
+    $script:lblBusy = New-Object System.Windows.Forms.Label
+    $script:progressBusy = New-Object System.Windows.Forms.ProgressBar
+    $hidden.Controls.Add($script:LogBox) | Out-Null
+    $hidden.Controls.Add($script:lblBusy) | Out-Null
+    $hidden.Controls.Add($script:progressBusy) | Out-Null
+    $hidden.Show() | Out-Null
+
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $noop = Start-GuiOperation -Name "selftest-delay" -Work { Start-Sleep -Milliseconds 50; return "ok" }
+    Start-Sleep -Milliseconds 200
+    Assert-Test "callback returns within 200ms" ($sw.ElapsedMilliseconds -lt 400)
+    Assert-Test "Start-ThreadJob available" ($null -ne (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue))
+
+    $script:GuiOperationState = "Idle"
+    $duplicateBlocked = $false
+    Start-GuiOperation -Name "first" -MutexClass "backup" -Work { Start-Sleep -Milliseconds 300; return "ok" }
+    Start-GuiOperation -Name "second" -MutexClass "backup" -Work { return "should-not-run" }
+    if ($script:GuiOperationName -eq "first") { $duplicateBlocked = $true }
+    $deadline = [datetime]::UtcNow.AddSeconds(3)
+    while ($script:GuiOperationState -eq "Running" -and [datetime]::UtcNow -lt $deadline) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 50
+    }
+    Assert-Test "duplicate mutex operation suppressed" $duplicateBlocked
+
+    $biz = [pscustomobject]@{ ok = $false; message = "failed"; errorCode = "test_code" }
+    Assert-Test "business failure detected" (-not (Test-AgentBusinessResult $biz))
+    $msg = Format-AgentFailureMessage $biz "测试操作"
+    Assert-Test "failure message includes errorCode" ($msg -match "test_code")
+
+    $hidden.Close()
+    $script:GuiActiveThreadJob = $null
+    [Console]::Out.WriteLine("GUI self-test failures: " + $script:GuiSelfTestFailures)
+    return $script:GuiSelfTestFailures
+}
 
 function Redact-Secrets {
     param([string]$Text)
@@ -183,36 +531,37 @@ function Invoke-AgentCommandSafe {
         [Alias("Args")][string[]]$CommandArgs,
         [hashtable]$ExtraEnv,
         [switch]$Json,
-        [switch]$Refresh
+        [switch]$Refresh,
+        [string]$MutexClass = "",
+        [switch]$Cancellable,
+        [scriptblock]$OnComplete
     )
-    try {
-        Set-Busy $true "$ActionName ..."
-        $result = Invoke-AgentProcess -CommandArgs $CommandArgs -ExtraEnv $ExtraEnv
-        if ($result.Output -and -not $Json) { Add-GuiLog $result.Output }
-        if ($result.ExitCode -ne 0) {
-            Show-GuiError "$ActionName 失败。请查看日志区。"
-            return $null
+    Start-GuiOperation -Name $ActionName -MutexClass $MutexClass -Cancellable:$Cancellable -Work {
+        Invoke-AgentCommandAsync -CommandArgs $CommandArgs -ExtraEnv $ExtraEnv -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        if ($agentResult.Output -and -not $Json) { Add-GuiLogThrottled $agentResult.Output }
+        $parsed = $agentResult.ParsedJson
+        if ($Json -and -not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName $ActionName } catch {
+                Show-GuiError $_.Exception.Message
+                return
+            }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Set-GuiBusyState -Busy $false -Text "" -State "Failed"
+            Show-GuiError (Format-AgentFailureMessage $parsed $ActionName)
+            return
         }
         Add-GuiLog "$ActionName 完成。"
+        if ($OnComplete) { & $OnComplete $parsed $agentResult }
         if ($Refresh) { Refresh-Status }
-        if ($Json) {
-            return ConvertFrom-JsonSafe -Text $result.Stdout -ActionName $ActionName
-        }
-        return $true
-    } catch {
-        Show-GuiError "$ActionName 异常：$($_.Exception.Message)"
-        return $null
-    } finally {
-        Set-Busy $false ""
     }
 }
 
 function Set-Busy {
     param([bool]$Busy, [string]$Text)
-    $script:Running = $Busy
-    if ($form -ne $null) { $form.UseWaitCursor = $Busy }
-    if ($lblBusy -ne $null) { $lblBusy.Text = $Text }
-    [System.Windows.Forms.Application]::DoEvents()
+    Set-GuiBusyState -Busy $Busy -Text $Text -State $(if ($Busy) { "Running" } else { "Idle" })
 }
 
 function Add-SafeClick {
@@ -257,11 +606,14 @@ function Set-Checklist {
 }
 
 function Run-EnvironmentCheck {
-    $report = Invoke-AgentCommandSafe -ActionName "环境检查" -Args @("desktop", "environment", "check", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port) -Json
-    if ($null -ne $report) {
+    Invoke-AgentCommandSafe -ActionName "环境检查" -Args @("desktop", "environment", "check", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port) -Json -OnComplete {
+        param($report)
+        if ($null -eq $report) { return }
         $script:CurrentState = $report.state
-        Set-Checklist $report
-        $lblState.Text = "状态：" + $report.state
+        Invoke-OnUiThread {
+            Set-Checklist $report
+            $lblState.Text = "状态：" + $report.state
+        }
         if (-not $report.ok -and $report.requiredPackages.Count -gt 0) {
             Show-GuiError "当前缺少必要运行环境，并且无法连接环境下载源。请在其他设备下载 ACBH 离线环境包后导入。"
         }
@@ -274,64 +626,77 @@ function Configure-Network {
         Show-GuiError "请输入公网服务器 IP 或域名。"
         return
     }
-    $result = Invoke-AgentCommandSafe -ActionName "公网服务器检查" -Args @("desktop", "setup", "configure-network", "--app-data-dir", $AppDataDir, "--host-name", $hostText, "--coordinator-port", "6121", "--public-game-port", "25565") -Json
-    if ($null -ne $result) {
-        $txtCoordinator.Text = $result.coordinatorUrl
-        $txtPlayerAddress.Text = $result.playerAddress
-        $checkLabels[6].Text = "✓ 公网服务器：" + $result.coordinatorUrl
-        $checkLabels[6].ForeColor = [System.Drawing.Color]::DarkGreen
+    Invoke-AgentCommandSafe -ActionName "公网服务器检查" -Args @("desktop", "setup", "configure-network", "--app-data-dir", $AppDataDir, "--host-name", $hostText, "--coordinator-port", "6121", "--public-game-port", "25565") -Json -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
+        Invoke-OnUiThread {
+            $txtCoordinator.Text = $result.coordinatorUrl
+            $txtPlayerAddress.Text = $result.playerAddress
+            $checkLabels[6].Text = "✓ 公网服务器：" + $result.coordinatorUrl
+            $checkLabels[6].ForeColor = [System.Drawing.Color]::DarkGreen
+        }
         if ($result.warnings) { $result.warnings | ForEach-Object { Add-GuiLog $_ } }
     }
 }
 
 function Load-DesktopConfig {
-    $cfg = Invoke-AgentCommandSafe -ActionName "加载桌面配置" -Args @("desktop", "setup", "config", "--app-data-dir", $AppDataDir) -Json
-    if ($null -eq $cfg) { return }
-    if ($cfg.coordinatorUrl) {
-        $txtCoordinator.Text = $cfg.coordinatorUrl
-        try {
-            $uri = [System.Uri]$cfg.coordinatorUrl
-            $txtHost.Text = $uri.Host
-        } catch { }
+    Invoke-AgentCommandSafe -ActionName "加载桌面配置" -Args @("desktop", "setup", "config", "--app-data-dir", $AppDataDir) -Json -OnComplete {
+        param($cfg)
+        if ($null -eq $cfg) { return }
+        Invoke-OnUiThread {
+            if ($cfg.coordinatorUrl) {
+                $txtCoordinator.Text = $cfg.coordinatorUrl
+                try {
+                    $uri = [System.Uri]$cfg.coordinatorUrl
+                    $txtHost.Text = $uri.Host
+                } catch { }
+            }
+            if ($cfg.publicEntry) { $txtPlayerAddress.Text = $cfg.publicEntry }
+            if ($cfg.lastServerDir) {
+                $txtServerDir.Text = $cfg.lastServerDir
+                $entry = $(if ($cfg.launchProfile.path) { $cfg.launchProfile.path } else { "已选择目录" })
+                $txtServerSummary.Text = @(
+                    "目录：" + $cfg.lastServerDir,
+                    "启动方式：" + $entry,
+                    "Java：" + $(if ($cfg.javaPath) { $cfg.javaPath } else { "未检测" }),
+                    "状态：已恢复上次配置"
+                ) -join [Environment]::NewLine
+            }
+            if ($cfg.group -and $cfg.group.groupId) {
+                $lblGroupResult.Text = "服务器组：已加入 / 本机身份：已注册"
+                $checkLabels[7].Text = $(if ($cfg.lastServerDir) { "✓ Minecraft 服务端：已选择" } else { $checkLabels[7].Text })
+            }
+            if ($cfg.ui -and $cfg.ui.advancedPanelExpanded) {
+                $advancedPanel.Visible = $true
+            }
+        }
+        Add-GuiLog "桌面配置已恢复。"
     }
-    if ($cfg.publicEntry) { $txtPlayerAddress.Text = $cfg.publicEntry }
-    if ($cfg.lastServerDir) {
-        $txtServerDir.Text = $cfg.lastServerDir
-        $entry = $(if ($cfg.launchProfile.path) { $cfg.launchProfile.path } else { "已选择目录" })
-        $txtServerSummary.Text = @(
-            "目录：" + $cfg.lastServerDir,
-            "启动方式：" + $entry,
-            "Java：" + $(if ($cfg.javaPath) { $cfg.javaPath } else { "未检测" }),
-            "状态：已恢复上次配置"
-        ) -join [Environment]::NewLine
-    }
-    if ($cfg.group -and $cfg.group.groupId) {
-        $lblGroupResult.Text = "服务器组：已加入 / 本机身份：已注册"
-        $checkLabels[7].Text = $(if ($cfg.lastServerDir) { "✓ Minecraft 服务端：已选择" } else { $checkLabels[7].Text })
-    }
-    if ($cfg.ui -and $cfg.ui.advancedPanelExpanded) {
-        $advancedPanel.Visible = $true
-    }
-    Add-GuiLog "桌面配置已恢复。"
 }
 
 function Forget-DesktopConfig {
-    $result = Invoke-AgentCommandSafe -ActionName "忘记此电脑配置" -Args @("desktop", "setup", "forget-config", "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result -and $result.ok) {
-        $txtCoordinator.Text = ""
-        $txtPlayerAddress.Text = ""
-        $txtServerDir.Text = ""
-        $txtServerSummary.Text = ""
-        $lblGroupResult.Text = ""
+    Invoke-AgentCommandSafe -ActionName "忘记此电脑配置" -Args @("desktop", "setup", "forget-config", "--app-data-dir", $AppDataDir) -Json -OnComplete {
+        param($result)
+        if ($null -eq $result -or -not $result.ok) { return }
+        Invoke-OnUiThread {
+            $txtCoordinator.Text = ""
+            $txtPlayerAddress.Text = ""
+            $txtServerDir.Text = ""
+            $txtServerSummary.Text = ""
+            $lblGroupResult.Text = ""
+        }
         Add-GuiLog "此电脑配置已忘记。"
     }
 }
 
 function Reset-Wizard {
-    $result = Invoke-AgentCommandSafe -ActionName "重置向导" -Args @("desktop", "setup", "reset-wizard", "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result) {
-        $txtServerDir.Text = ""
-        $txtServerSummary.Text = ""
+    Invoke-AgentCommandSafe -ActionName "重置向导" -Args @("desktop", "setup", "reset-wizard", "--app-data-dir", $AppDataDir) -Json -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
+        Invoke-OnUiThread {
+            $txtServerDir.Text = ""
+            $txtServerSummary.Text = ""
+        }
         Add-GuiLog "四步向导已重置。"
     }
 }
@@ -344,9 +709,12 @@ function Create-Group {
     }
     if (-not $coord) { return }
     $args = @("desktop", "setup", "create-group", "--app-data-dir", $AppDataDir, "--group-name", $txtGroupName.Text, "--display-name", $txtDisplayName.Text, "--coordinator-url", $coord)
-    $result = Invoke-AgentCommandSafe -ActionName "创建 Group" -Args $args -Json
-    if ($null -ne $result) {
-        $lblGroupResult.Text = "Group 已创建，本机已注册。邀请码：" + $(if ($result.inviteCode) { $result.inviteCode } else { "当前 Coordinator 不支持" })
+    Invoke-AgentCommandSafe -ActionName "创建 Group" -Args $args -Json -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
+        Invoke-OnUiThread {
+            $lblGroupResult.Text = "Group 已创建，本机已注册。邀请码：" + $(if ($result.inviteCode) { $result.inviteCode } else { "当前 Coordinator 不支持" })
+        }
         Add-GuiLog "Group 已创建。本机 Host ID: $($result.hostId)"
     }
 }
@@ -363,37 +731,43 @@ function Join-Group {
         return
     }
     $args = @("desktop", "setup", "join-group", "--app-data-dir", $AppDataDir, "--invite-code", $code, "--display-name", $txtDisplayName.Text, "--coordinator-url", $coord)
-    $result = Invoke-AgentCommandSafe -ActionName "加入 Group" -Args $args -Json
-    if ($null -ne $result) {
-        $lblGroupResult.Text = "已加入 Group，本机已注册。"
+    Invoke-AgentCommandSafe -ActionName "加入 Group" -Args $args -Json -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
+        Invoke-OnUiThread { $lblGroupResult.Text = "已加入 Group，本机已注册。" }
     }
 }
 
 function Create-Invite {
-    $result = Invoke-AgentCommandSafe -ActionName "生成邀请码" -Args @("desktop", "setup", "create-invite", "--app-data-dir", $AppDataDir, "--expires-seconds", "1800", "--one-time") -Json
-    if ($null -ne $result -and $result.inviteCode) {
-        $lblGroupResult.Text = "邀请码：" + $result.inviteCode
-        [System.Windows.Forms.Clipboard]::SetText($result.inviteCode)
-        Add-GuiLog "邀请码已生成并复制，仅显示一次。"
-    } elseif ($null -ne $result) {
-        Show-GuiError $result.message
+    Invoke-AgentCommandSafe -ActionName "生成邀请码" -Args @("desktop", "setup", "create-invite", "--app-data-dir", $AppDataDir, "--expires-seconds", "1800", "--one-time") -Json -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
+        if ($result.inviteCode) {
+            Invoke-OnUiThread { $lblGroupResult.Text = "邀请码：" + $result.inviteCode }
+            [System.Windows.Forms.Clipboard]::SetText($result.inviteCode)
+            Add-GuiLog "邀请码已生成并复制，仅显示一次。"
+        } else {
+            Show-GuiError $result.message
+        }
     }
 }
 
 function List-Invites {
-    $result = Invoke-AgentCommandSafe -ActionName "查看邀请码列表" -Args @("desktop", "setup", "list-invites", "--app-data-dir", $AppDataDir) -Json
-    if ($null -eq $result) { return }
-    if (-not $result.ok) {
-        Show-GuiError $result.message
-        return
+    Invoke-AgentCommandSafe -ActionName "查看邀请码列表" -Args @("desktop", "setup", "list-invites", "--app-data-dir", $AppDataDir) -Json -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
+        if (-not $result.ok) {
+            Show-GuiError $result.message
+            return
+        }
+        $lines = @()
+        foreach ($invite in $result.invites) {
+            $used = $(if ($invite.usedAt) { "已使用" } elseif ($invite.revokedAt) { "已撤销" } else { "未使用" })
+            $lines += ($invite.inviteId + "  过期：" + $invite.expiresAt + "  " + $used)
+        }
+        if ($lines.Count -eq 0) { $lines = @("暂无邀请码。") }
+        [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "邀请码列表", "OK", "Information") | Out-Null
     }
-    $lines = @()
-    foreach ($invite in $result.invites) {
-        $used = $(if ($invite.usedAt) { "已使用" } elseif ($invite.revokedAt) { "已撤销" } else { "未使用" })
-        $lines += ($invite.inviteId + "  过期：" + $invite.expiresAt + "  " + $used)
-    }
-    if ($lines.Count -eq 0) { $lines = @("暂无邀请码。") }
-    [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "邀请码列表", "OK", "Information") | Out-Null
 }
 
 function Choose-ServerDir {
@@ -401,9 +775,10 @@ function Choose-ServerDir {
     $dialog.Description = "选择 Minecraft 服务端根目录"
     if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
     $txtServerDir.Text = $dialog.SelectedPath
-    $result = Invoke-AgentCommandSafe -ActionName "检测 Minecraft 服务端" -Args @("desktop", "setup", "inspect-server", "--app-data-dir", $AppDataDir, "--server-dir", $dialog.SelectedPath) -Json
-    if ($null -ne $result) {
-        Update-ServerSummary $result
+    Invoke-AgentCommandSafe -ActionName "检测 Minecraft 服务端" -Args @("desktop", "setup", "inspect-server", "--app-data-dir", $AppDataDir, "--server-dir", $dialog.SelectedPath) -Json -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
+        Invoke-OnUiThread { Update-ServerSummary $result }
         if (-not $result.launchReady) {
             Show-GuiError "已检测到 Minecraft 服务端，但无法确定启动文件。请选择 run.bat、run.ps1、start.bat、start.ps1 或服务端核心 JAR。"
         }
@@ -465,8 +840,10 @@ function Select-LaunchFile {
     $dialog.InitialDirectory = $serverDir
     $dialog.Filter = $Filter
     if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
-    $result = Invoke-AgentCommandSafe -ActionName "选择启动文件" -Args @("desktop", "server", "select-launch", "--app-data-dir", $AppDataDir, "--path", $dialog.FileName) -Json
-    if ($null -ne $result) { Update-ServerSummary $result }
+    Invoke-AgentCommandSafe -ActionName "选择启动文件" -Args @("desktop", "server", "select-launch", "--app-data-dir", $AppDataDir, "--path", $dialog.FileName) -Json -OnComplete {
+        param($result)
+        if ($null -ne $result) { Invoke-OnUiThread { Update-ServerSummary $result } }
+    }
 }
 
 function Use-RecommendedLaunch {
@@ -480,8 +857,10 @@ function Use-RecommendedLaunch {
         Show-GuiError "当前没有可用的自动推荐。"
         return
     }
-    $result = Invoke-AgentCommandSafe -ActionName "使用自动推荐" -Args @("desktop", "server", "select-launch", "--app-data-dir", $AppDataDir, "--path", $path) -Json
-    if ($null -ne $result) { Update-ServerSummary $result }
+    Invoke-AgentCommandSafe -ActionName "使用自动推荐" -Args @("desktop", "server", "select-launch", "--app-data-dir", $AppDataDir, "--path", $path) -Json -OnComplete {
+        param($result)
+        if ($null -ne $result) { Invoke-OnUiThread { Update-ServerSummary $result } }
+    }
 }
 
 function Open-ServerDir {
@@ -580,17 +959,33 @@ function Update-WorldBackupPanel {
 }
 
 function Refresh-WorldBackupStatus {
-    $status = Invoke-AgentCommandSafe -ActionName "世界差量备份状态" -Args @("desktop", "world-backup", "status", "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $status) {
-        $script:LastWorldBackupStatus = $status
-        Update-WorldBackupPanel $status
+    Start-GuiOperation -Name "世界差量备份状态" -MutexClass "refresh" -Cancellable -Work {
+        Invoke-AgentCommandAsync -CommandArgs @("desktop", "world-backup", "status", "--app-data-dir", $AppDataDir) -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        if ($agentResult.ExitCode -ne 0) { return }
+        try {
+            $status = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "世界差量备份状态"
+            $script:LastWorldBackupStatus = $status
+            Invoke-OnUiThread { Update-WorldBackupPanel $status }
+        } catch { }
     }
 }
 
 function Backup-WorldStopped {
-    $result = Invoke-AgentCommandSafe -ActionName "立即备份世界" -Args @("desktop", "world-backup", "create", "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result) {
-        Add-GuiLog "世界快照已发布：$($result.snapshotId)（上传 $(Format-ByteSize $result.uploadedSize)）"
+    Start-GuiOperation -Name "立即备份世界" -MutexClass "backup" -Work {
+        Invoke-AgentCommandAsync -CommandArgs @("desktop", "world-backup", "create", "--app-data-dir", $AppDataDir) -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "立即备份世界" } catch { }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-AgentFailureMessage $parsed "立即备份世界")
+            return
+        }
+        Add-GuiLog "世界快照已发布：$($parsed.snapshotId)（上传 $(Format-ByteSize $parsed.uploadedSize)）"
         Refresh-WorldBackupStatus
     }
 }
@@ -605,40 +1000,63 @@ function Backup-WorldOnline {
         }
         $extraEnv["ACBH_RCON_PASSWORD"] = $password
     }
-    $result = Invoke-AgentCommandSafe -ActionName "在线安全备份" -Args @("desktop", "world-backup", "create", "--app-data-dir", $AppDataDir, "--online") -ExtraEnv $extraEnv -Json
-    if ($null -ne $result) {
+    Invoke-AgentCommandSafe -ActionName "在线安全备份" -Args @("desktop", "world-backup", "create", "--app-data-dir", $AppDataDir, "--online") -ExtraEnv $extraEnv -Json -MutexClass "backup" -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
         Add-GuiLog "在线世界快照已发布：$($result.snapshotId)"
         Refresh-WorldBackupStatus
     }
 }
 
 function Restore-LatestWorld {
-    $result = Invoke-AgentCommandSafe -ActionName "拉取最新世界" -Args @("desktop", "world-backup", "restore", "latest", "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result) {
-        Add-GuiLog "世界已恢复：$($result.snapshotId)（下载 $($result.downloadedFiles) 个文件）"
+    Start-GuiOperation -Name "拉取最新世界" -MutexClass "restore" -Work {
+        Invoke-AgentCommandAsync -CommandArgs @("desktop", "world-backup", "restore", "latest", "--app-data-dir", $AppDataDir) -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "拉取最新世界" } catch { }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-AgentFailureMessage $parsed "拉取最新世界")
+            return
+        }
+        Add-GuiLog "世界已恢复：$($parsed.snapshotId)（下载 $($parsed.downloadedFiles) 个文件）"
         Refresh-WorldBackupStatus
     }
 }
 
 function Show-WorldBackupHistory {
-    $result = Invoke-AgentCommandSafe -ActionName "查看历史快照" -Args @("desktop", "world-backup", "list", "--app-data-dir", $AppDataDir) -Json
-    if ($null -eq $result) { return }
-    $lines = @()
-    foreach ($snap in ($result.snapshots | Sort-Object createdAt -Descending)) {
-        $pin = if ($snap.pinned) { " [固定]" } else { "" }
-        $cons = if ($snap.consistent) { "一致" } else { "不一致" }
-        $lines += "$($snap.snapshotId)  $($snap.createdAt)  host=$($snap.sourceHostId)  gen=$($snap.hostGeneration)  $cons$pin"
+    Invoke-AgentCommandSafe -ActionName "查看历史快照" -Args @("desktop", "world-backup", "list", "--app-data-dir", $AppDataDir) -Json -OnComplete {
+        param($result)
+        if ($null -eq $result) { return }
+        $lines = @()
+        foreach ($snap in ($result.snapshots | Sort-Object createdAt -Descending)) {
+            $pin = if ($snap.pinned) { " [固定]" } else { "" }
+            $cons = if ($snap.consistent) { "一致" } else { "不一致" }
+            $lines += "$($snap.snapshotId)  $($snap.createdAt)  host=$($snap.sourceHostId)  gen=$($snap.hostGeneration)  $cons$pin"
+        }
+        if ($lines.Count -eq 0) { $lines = @("暂无历史世界快照。") }
+        [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "历史世界快照", "OK", "Information") | Out-Null
     }
-    if ($lines.Count -eq 0) { $lines = @("暂无历史世界快照。") }
-    [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "历史世界快照", "OK", "Information") | Out-Null
 }
 
 function Restore-WorldBackupSnapshot {
     $snapshotId = Prompt-Text -Title "恢复快照" -Prompt "输入快照 ID（留空取消）：" -Default "latest"
     if ([string]::IsNullOrWhiteSpace($snapshotId)) { return }
-    $result = Invoke-AgentCommandSafe -ActionName "恢复快照" -Args @("desktop", "world-backup", "restore", $snapshotId, "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result) {
-        Add-GuiLog "快照已恢复：$($result.snapshotId)"
+    Start-GuiOperation -Name "恢复快照" -MutexClass "restore" -Work {
+        Invoke-AgentCommandAsync -CommandArgs @("desktop", "world-backup", "restore", $snapshotId, "--app-data-dir", $AppDataDir) -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "恢复快照" } catch { }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-AgentFailureMessage $parsed "恢复快照")
+            return
+        }
+        Add-GuiLog "快照已恢复：$($parsed.snapshotId)"
         Refresh-WorldBackupStatus
     }
 }
@@ -646,10 +1064,12 @@ function Restore-WorldBackupSnapshot {
 function Pin-WorldBackupSnapshot {
     $snapshotId = Prompt-Text -Title "固定快照" -Prompt "输入要固定的快照 ID："
     if ([string]::IsNullOrWhiteSpace($snapshotId)) { return }
-    $result = Invoke-AgentCommandSafe -ActionName "固定快照" -Args @("desktop", "world-backup", "pin", $snapshotId, "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result -and $result.ok) {
-        Add-GuiLog "快照已固定：$($result.snapshotId)"
-        Refresh-WorldBackupStatus
+    Invoke-AgentCommandSafe -ActionName "固定快照" -Args @("desktop", "world-backup", "pin", $snapshotId, "--app-data-dir", $AppDataDir) -Json -OnComplete {
+        param($result)
+        if ($null -ne $result -and $result.ok) {
+            Add-GuiLog "快照已固定：$($result.snapshotId)"
+            Refresh-WorldBackupStatus
+        }
     }
 }
 
@@ -658,64 +1078,107 @@ function Delete-WorldBackupSnapshot {
     if ([string]::IsNullOrWhiteSpace($snapshotId)) { return }
     $confirm = [System.Windows.Forms.MessageBox]::Show("确认删除快照 $snapshotId ？", "删除快照", "YesNo", "Warning")
     if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
-    $result = Invoke-AgentCommandSafe -ActionName "删除快照" -Args @("desktop", "world-backup", "delete", $snapshotId, "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result -and $result.ok) {
-        Add-GuiLog "快照已删除：$($result.snapshotId)"
-        Refresh-WorldBackupStatus
+    Invoke-AgentCommandSafe -ActionName "删除快照" -Args @("desktop", "world-backup", "delete", $snapshotId, "--app-data-dir", $AppDataDir) -Json -OnComplete {
+        param($result)
+        if ($null -ne $result -and $result.ok) {
+            Add-GuiLog "快照已删除：$($result.snapshotId)"
+            Refresh-WorldBackupStatus
+        }
     }
 }
 
 function Resume-WorldBackup {
-    $result = Invoke-AgentCommandSafe -ActionName "继续未完成备份" -Args @("desktop", "world-backup", "resume", "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result) {
-        Add-GuiLog "备份已继续：$($result.snapshotId)"
+    Start-GuiOperation -Name "继续未完成备份" -MutexClass "backup" -Cancellable -Work {
+        Invoke-AgentCommandAsync -CommandArgs @("desktop", "world-backup", "resume", "--app-data-dir", $AppDataDir) -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "继续未完成备份" } catch { }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-AgentFailureMessage $parsed "继续未完成备份")
+            return
+        }
+        Add-GuiLog "备份已继续：$($parsed.snapshotId)"
         Refresh-WorldBackupStatus
     }
 }
 
 function Complete-Setup {
-    $result = Invoke-AgentCommandSafe -ActionName "完成配置" -Args @("desktop", "setup", "complete", "--app-data-dir", $AppDataDir) -Json
-    if ($null -ne $result -and $result.ok) {
-        $script:CurrentState = "Ready"
-        $lblState.Text = "状态：Ready"
-        Refresh-Status
-    } elseif ($null -ne $result) {
-        Show-GuiError $result.message
+    Invoke-AgentCommandSafe -ActionName "完成配置" -Args @("desktop", "setup", "complete", "--app-data-dir", $AppDataDir) -Json -OnComplete {
+        param($result)
+        if ($null -ne $result -and $result.ok) {
+            $script:CurrentState = "Ready"
+            Invoke-OnUiThread { $lblState.Text = "状态：Ready" }
+            Refresh-Status
+        } elseif ($null -ne $result) {
+            Show-GuiError $result.message
+        }
+    }
+}
+
+function Apply-StatusPanel {
+    param($status)
+    if ($null -eq $status) { return }
+    $script:LastStatus = $status
+    if ($status.state -eq "Running") {
+        $lblServerStatus.Text = "服务器正在此电脑运行"
+        $btnMain.Text = "停止服务器"
+    } else {
+        $lblServerStatus.Text = "当前无人运行服务器"
+        $btnMain.Text = "在此电脑启动"
+    }
+    if ($status.status) {
+        $txtPlayerAddress.Text = $(if ($status.status.publicEntryMessage) { $status.status.publicEntryMessage } else { $txtPlayerAddress.Text })
+        $stateText = "状态：" + $status.state
+        if ($status.startTimeout) { $stateText += "（启动等待 " + $status.startTimeout + "）" }
+        $lblState.Text = $stateText
     }
 }
 
 function Refresh-Status {
-    try {
-        $status = Invoke-AgentJson -Args @("desktop", "server", "status", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port)
-        $script:LastStatus = $status
-        if ($status.state -eq "Running") {
-            $lblServerStatus.Text = "服务器正在此电脑运行"
-            $btnMain.Text = "停止服务器"
-        } else {
-            $lblServerStatus.Text = "当前无人运行服务器"
-            $btnMain.Text = "在此电脑启动"
+    Start-GuiOperation -Name "刷新状态" -MutexClass "refresh" -Cancellable -Work {
+        Invoke-AgentCommandAsync -CommandArgs @("desktop", "server", "status", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port) -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        try {
+            if ($agentResult.ExitCode -ne 0) { throw $agentResult.Stderr }
+            $status = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "刷新状态"
+            Invoke-OnUiThread { Apply-StatusPanel $status }
+            Add-GuiLog "状态已刷新。"
+            Refresh-WorldBackupStatus
+        } catch {
+            Add-GuiLog "状态刷新失败：" + $_.Exception.Message
         }
-        if ($status.status) {
-            $txtPlayerAddress.Text = $(if ($status.status.publicEntryMessage) { $status.status.publicEntryMessage } else { $txtPlayerAddress.Text })
-            $lblState.Text = "状态：" + $status.state
-        }
-        Add-GuiLog "状态已刷新。"
-        Refresh-WorldBackupStatus
-    } catch {
-        Add-GuiLog "状态刷新失败：" + $_.Exception.Message
     }
 }
 
 function Invoke-MainAction {
-    if ($btnMain.Text -eq "停止服务器") {
-        $result = Invoke-AgentCommandSafe -ActionName "停止服务器" -Args @("desktop", "server", "stop-auto", "--app-data-dir", $AppDataDir) -Json
+    $isStop = ($btnMain.Text -eq "停止服务器")
+    $actionName = if ($isStop) { "停止服务器" } else { "在此电脑启动" }
+    $args = if ($isStop) {
+        @("desktop", "server", "stop-auto", "--app-data-dir", $AppDataDir)
     } else {
-        $result = Invoke-AgentCommandSafe -ActionName "在此电脑启动" -Args @("desktop", "server", "start-auto", "--app-data-dir", $AppDataDir) -Json
+        @("desktop", "server", "start-auto", "--app-data-dir", $AppDataDir)
     }
-    if ($null -ne $result) {
-        if ($result.steps) { $result.steps | ForEach-Object { Add-GuiLog $_ } }
-        if ($result.warnings) { $result.warnings | ForEach-Object { Add-GuiLog "提示：" + $_ } }
-        if (-not $result.ok) { Show-GuiError $result.message }
+    Start-GuiOperation -Name $actionName -MutexClass "server" -Work {
+        Invoke-AgentCommandAsync -CommandArgs $args -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName $actionName } catch { }
+        }
+        if ($parsed) {
+            if ($parsed.steps) { $parsed.steps | ForEach-Object { Add-GuiLog $_ } }
+            if ($parsed.warnings) { $parsed.warnings | ForEach-Object { Add-GuiLog "提示：" + $_ } }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-AgentFailureMessage $parsed $actionName)
+            return
+        }
+        Add-GuiLog "$actionName 完成。"
         Refresh-Status
     }
 }
@@ -724,12 +1187,14 @@ function Import-OfflinePack {
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
     $dialog.Filter = "ACBH 环境包 (*.zip)|*.zip|All files (*.*)|*.*"
     if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
-    $result = Invoke-AgentCommandSafe -ActionName "导入离线环境包" -Args @("desktop", "environment", "import-pack", "--app-data-dir", $AppDataDir, "--file", $dialog.FileName) -Json
-    if ($null -ne $result -and $result.ok) {
-        Add-GuiLog "离线环境包已导入：" + $result.package.packageId
-        Run-EnvironmentCheck
-    } elseif ($null -ne $result) {
-        Show-GuiError $result.message
+    Invoke-AgentCommandSafe -ActionName "导入离线环境包" -Args @("desktop", "environment", "import-pack", "--app-data-dir", $AppDataDir, "--file", $dialog.FileName) -Json -OnComplete {
+        param($result)
+        if ($null -ne $result -and $result.ok) {
+            Add-GuiLog "离线环境包已导入：" + $result.package.packageId
+            Run-EnvironmentCheck
+        } elseif ($null -ne $result) {
+            Show-GuiError $result.message
+        }
     }
 }
 
@@ -749,6 +1214,19 @@ function Add-Button {
     if ($Tip) { $script:ToolTip.SetToolTip($button, $Tip) }
     $Parent.Controls.Add($button)
     return $button
+}
+
+if ($SelfTest) {
+    try {
+        $failed = Run-GuiSelfTests
+        if ($failed -gt 0) { exit 1 }
+        Write-Output "ACBH desktop GUI self-test ok"
+        exit 0
+    } catch {
+        Write-Output ("GUI self-test error: " + $_.Exception.Message)
+        Write-Output $_.ScriptStackTrace
+        exit 1
+    }
 }
 
 $form = New-Object System.Windows.Forms.Form
@@ -773,8 +1251,16 @@ $form.Controls.Add($lblState)
 
 $lblBusy = New-Object System.Windows.Forms.Label
 $lblBusy.Location = New-Object System.Drawing.Point(550, 28)
-$lblBusy.Size = New-Object System.Drawing.Size(420, 24)
+$lblBusy.Size = New-Object System.Drawing.Size(300, 24)
 $form.Controls.Add($lblBusy)
+
+$progressBusy = New-Object System.Windows.Forms.ProgressBar
+$progressBusy.Location = New-Object System.Drawing.Point(860, 28)
+$progressBusy.Size = New-Object System.Drawing.Size(120, 18)
+$progressBusy.Style = "Marquee"
+$progressBusy.MarqueeAnimationSpeed = 25
+$progressBusy.Visible = $false
+$form.Controls.Add($progressBusy)
 
 $bootstrapPanel = New-Object System.Windows.Forms.GroupBox
 $bootstrapPanel.Text = "正在准备 ACBH"
@@ -886,6 +1372,9 @@ $txtPlayerAddress.ReadOnly = $true
 $mainPanel.Controls.Add($txtPlayerAddress)
 
 $btnMain = Add-Button $mainPanel "在此电脑启动" 20 104 { Invoke-MainAction } "自动申请主机资格、同步、启动 MC 和公网中转。"
+Register-GuiOperationButton $btnMain
+$btnRefreshStatus = Add-Button $mainPanel "刷新状态" 330 140 { Refresh-Status } "刷新服务器与世界备份状态。"
+Register-GuiOperationButton $btnRefreshStatus
 Add-Button $mainPanel "完成并进入 ACBH" 204 104 { Complete-Setup } "保存 setupComplete=true。"
 Add-Button $mainPanel "复制玩家地址" 20 140 { if ($txtPlayerAddress.Text) { [System.Windows.Forms.Clipboard]::SetText($txtPlayerAddress.Text); Add-GuiLog "玩家地址已复制。" } } ""
 Add-Button $mainPanel "打开日志" 204 140 { Open-LogDir } ""
@@ -952,8 +1441,31 @@ $script:LogBox.ReadOnly = $true
 $script:LogBox.Font = New-Object System.Drawing.Font("Consolas", 9)
 $form.Controls.Add($script:LogBox)
 
+$form.Add_FormClosing({
+    param($sender, $e)
+    if ($script:GuiOperationState -eq "Running") {
+        $answer = [System.Windows.Forms.MessageBox]::Show(
+            "后台任务仍在运行（$($script:GuiOperationName)）。确定要关闭窗口吗？",
+            "ACBH",
+            "YesNo",
+            "Warning"
+        )
+        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+            $e.Cancel = $true
+            return
+        }
+        Cancel-GuiOperation
+    }
+    if ($script:GuiActiveThreadJob) {
+        Stop-Job -Job $script:GuiActiveThreadJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $script:GuiActiveThreadJob -Force -ErrorAction SilentlyContinue
+        $script:GuiActiveThreadJob = $null
+    }
+})
+
 $form.Add_Shown({
     try {
+        Initialize-GuiAsyncHost
         Run-EnvironmentCheck
         Load-DesktopConfig
         Refresh-Status

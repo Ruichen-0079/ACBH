@@ -502,11 +502,13 @@ func (c *Client) UploadObjectStream(
 	content io.Reader,
 	size int64,
 ) (UploadObjectResponse, error) {
+	// UploadObjectStream does not take ownership of content. io.NopCloser prevents the
+	// HTTP transport from closing the caller's reader (for example *os.File).
 	httpReq, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPut,
 		c.baseURL+"/v1/artifacts/objects/"+url.PathEscape(sha256),
-		content,
+		io.NopCloser(content),
 	)
 	if err != nil {
 		return UploadObjectResponse{}, fmt.Errorf("create request: %w", err)
@@ -584,6 +586,9 @@ func (c *Client) PlanWorldBackup(ctx context.Context, groupID string, req WorldB
 	return out, err
 }
 
+// UploadWorldObjectStream streams a world CAS object to the Coordinator.
+// The caller retains ownership of content and is responsible for closing any *os.File.
+// This method never closes the provided reader.
 func (c *Client) UploadWorldObjectStream(
 	ctx context.Context,
 	auth ArtifactAuth,
@@ -595,7 +600,7 @@ func (c *Client) UploadWorldObjectStream(
 		ctx,
 		http.MethodPut,
 		c.baseURL+"/v1/groups/"+url.PathEscape(auth.GroupID)+"/world-objects/"+url.PathEscape(sha256),
-		content,
+		io.NopCloser(content),
 	)
 	if err != nil {
 		return UploadObjectResponse{}, fmt.Errorf("create request: %w", err)

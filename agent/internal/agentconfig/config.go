@@ -6,12 +6,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 const (
 	DirName      = "ACBH"
 	FileName     = "config.yaml"
-	AgentVersion = "v0.3.5-hotfix1"
+	AgentVersion = "v0.4.0-alpha2"
+
+	DefaultServerStartTimeout = 120 * time.Second
+	MinServerStartTimeout     = 10 * time.Second
 )
 
 type Config struct {
@@ -28,10 +33,26 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Dir         string `json:"dir,omitempty"`
-	Command     string `json:"command,omitempty"`
-	LogDir      string `json:"logDir,omitempty"`
-	StopTimeout string `json:"stopTimeout,omitempty"`
+	Dir          string `json:"dir,omitempty"`
+	Command      string `json:"command,omitempty"`
+	LogDir       string `json:"logDir,omitempty"`
+	StopTimeout  string `json:"stopTimeout,omitempty"`
+	StartTimeout string `json:"startTimeout,omitempty"`
+}
+
+func (s ServerConfig) ResolvedStartTimeout() (time.Duration, error) {
+	raw := strings.TrimSpace(s.StartTimeout)
+	if raw == "" {
+		return DefaultServerStartTimeout, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.startTimeout %q: %w", s.StartTimeout, err)
+	}
+	if parsed < MinServerStartTimeout {
+		return 0, fmt.Errorf("server.startTimeout must be at least %s", MinServerStartTimeout)
+	}
+	return parsed, nil
 }
 
 func DefaultPath() (string, error) {

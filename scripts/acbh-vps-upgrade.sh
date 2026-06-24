@@ -143,8 +143,8 @@ acbh_vps_service_stop
 acbh_vps_switch_current_symlink "$RELEASE_DIR"
 acbh_vps_service_start
 
-if ! acbh_vps_check_health "$VERSION"; then
-  ACBH_VPS_UPGRADE_REPORT_ERROR="health check failed after upgrade"
+if ! acbh_vps_wait_for_health "$VERSION"; then
+  ACBH_VPS_UPGRADE_REPORT_ERROR="health check failed after upgrade (attempts=${ACBH_VPS_HEALTH_WAIT_ATTEMPTS:-0}, elapsed=${ACBH_VPS_HEALTH_WAIT_ELAPSED:-0}s, last=${ACBH_VPS_HEALTH_WAIT_LAST_ERROR:-unknown})"
   acbh_vps_die "$ACBH_VPS_UPGRADE_REPORT_ERROR"
 fi
 if ! acbh_vps_check_ports; then
