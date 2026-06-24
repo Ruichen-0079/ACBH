@@ -52,17 +52,21 @@ export class PublicRelayIngress {
   }
 
   private async handleIncoming(tcpConn: net.Socket): Promise<void> {
-    // For v0.3.2 simplicity, use the first group. In real deployment the VPS typically serves one primary group.
-    const groups = (this.opts.store as any).listGroups?.() || [];
+    const store = this.opts.store as any;
+    const listed = typeof store.listGroups === "function" ? store.listGroups() : [];
+    const groups = listed.length > 0
+      ? listed
+      : Array.from(store.groups?.values?.() ?? []);
     if (groups.length === 0) {
       tcpConn.end("No groups configured\n");
       return;
     }
-    const groupId = groups[0].groupId;
 
-    // Check current host exists
-    const group = (this.opts.store as any).groups?.get?.(groupId) || (this.opts.store as any).requireGroup?.(groupId);
-    if (!group || !group.currentHostId) {
+    const activeGroup = groups.find((candidate: any) => Boolean(candidate.currentHostId));
+    const group = activeGroup ?? groups[0];
+    const groupId = group.groupId;
+
+    if (!group.currentHostId) {
       tcpConn.end("No current host available for relay\n");
       return;
     }
