@@ -15,7 +15,8 @@ ACBH_CURL_CMD="${ACBH_CURL_CMD:-curl}"
 ACBH_SS_CMD="${ACBH_SS_CMD:-ss}"
 ACBH_SKIP_ROOT="${ACBH_SKIP_ROOT:-0}"
 
-ACBH_VPS_UPGRADE_REPORT_STATUS=""
+# Set by acbh-vps-upgrade.sh on failure; consumed by cleanup trap and upgrade reports.
+# shellcheck disable=SC2034
 ACBH_VPS_UPGRADE_REPORT_ERROR=""
 ACBH_VPS_UPGRADE_DRY_RUN="false"
 ACBH_VPS_UPGRADE_LOCK_FD=""

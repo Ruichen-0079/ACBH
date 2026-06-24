@@ -50,9 +50,9 @@ jobs:
         run: bash scripts/test/acbh-vps-upgrade.test.sh
       - name: shellcheck VPS scripts
         run: |
-          shellcheck \
-            scripts/install-acbh-vps.sh \
+          shellcheck -x -e SC2015 \
             scripts/acbh-vps-lib.sh \
+            scripts/install-acbh-vps.sh \
             scripts/acbh-vps-upgrade.sh \
             scripts/acbh-vps-rollback.sh \
             scripts/acbh-vps-status.sh

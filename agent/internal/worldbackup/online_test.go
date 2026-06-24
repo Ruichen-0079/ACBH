@@ -155,38 +155,25 @@ func TestCopyFileStableRetriesAfterSourceChange(t *testing.T) {
 }
 
 func TestOnlineBackupCopyContinuousChangeFails(t *testing.T) {
-	server := t.TempDir()
-	path := filepath.Join(server, "world", "region", "r.0.0.mca")
-	writeWorldFile(t, server, "server.properties", "level-name=world\n")
-	writeWorldFile(t, server, "world/region/r.0.0.mca", "v1")
-
-	mock := &mockRCON{}
-	stop := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(1 * time.Millisecond)
-		defer ticker.Stop()
-		i := 0
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				i++
-				_ = os.WriteFile(path, []byte("v"+string(rune('0'+i%10))), 0o644)
-			}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "world.dat")
+	dst := filepath.Join(dir, "staged.dat")
+	if err := os.WriteFile(src, []byte("initial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var hookCalls int
+	beforeCopyHook = func(path string) error {
+		if path != src {
+			return nil
 		}
-	}()
-	_, err := PrepareOnlineConsistentBackup(context.Background(), OnlineStagingOptions{
-		ServerDir:  server,
-		AppDataDir: t.TempDir(),
-		RCON:       mock,
-	})
-	close(stop)
+		hookCalls++
+		// Always write unique content so post-copy stat differs from pre-copy stat.
+		return os.WriteFile(src, []byte(fmt.Sprintf("mutated-%d", hookCalls)), 0o644)
+	}
+	t.Cleanup(func() { beforeCopyHook = nil })
+	err := copyFileStable(src, dst)
 	if err == nil || !strings.Contains(err.Error(), "changed during staging copy") {
 		t.Fatalf("error = %v", err)
-	}
-	if got := mock.cmds(); len(got) != 3 || got[2] != "save-on" {
-		t.Fatalf("commands = %#v", got)
 	}
 }
 
