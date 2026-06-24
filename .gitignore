@@ -6,3 +6,5 @@ dist/
 .DS_Store
 *.log
 coverage/
+world-backup/transactions/
+world-backup/index.json
