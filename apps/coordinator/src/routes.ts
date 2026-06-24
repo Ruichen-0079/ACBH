@@ -14,6 +14,7 @@ import type { ArtifactMetadata, InMemoryCoordinatorStore, GcBackend } from "./st
 import { GcBlockedError, StoreError } from "./store.js";
 import type { TunnelSession, PlayerSession } from "./network.js";
 import type { RelayManager } from "./relay.js";
+import { coordinatorVersion } from "./version.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
@@ -312,7 +313,7 @@ export async function registerRoutes(
     return {
       ok: true,
       service: "acbh-coordinator",
-      version: "0.1.0",
+      version: coordinatorVersion(),
     };
   });
 
