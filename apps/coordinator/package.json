@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "test": "node --test --import tsx test/api.test.ts test/election.test.ts test/storage.test.ts test/gc.test.ts test/persistence.test.ts test/tunnel.test.ts test/relay.test.ts test/public-relay.test.ts test/dashboard.test.ts test/auth.test.ts test/fixture.test.ts test/contract.test.ts test/package-json.test.ts",
+    "test": "node --test --import tsx test/api.test.ts test/election.test.ts test/storage.test.ts test/world-backups.test.ts test/gc.test.ts test/persistence.test.ts test/tunnel.test.ts test/relay.test.ts test/public-relay.test.ts test/dashboard.test.ts test/auth.test.ts test/fixture.test.ts test/contract.test.ts test/package-json.test.ts",
     "start": "node dist/index.js"
   },
   "dependencies": {

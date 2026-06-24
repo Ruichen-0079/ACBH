@@ -44,6 +44,13 @@ export type ArtifactMetadata = {
   manifestObjectPath: string;
   fileCount: number;
   totalBytes: number;
+  consistent?: boolean;
+  pinned?: boolean;
+  sourceHostId?: string;
+  hostGeneration?: number;
+  uploadedSize?: number;
+  changedFileCount?: number;
+  deletedFileCount?: number;
 };
 
 export type ElectionCandidate = {
@@ -809,6 +816,9 @@ export class InMemoryCoordinatorStore {
       if (!hasLatestWorld) {
         reasons.push("missing-latest-world-snapshot");
       }
+      if (latestWorld !== undefined && latestWorld.consistent === false) {
+        reasons.push("latest-world-snapshot-inconsistent");
+      }
       if (host.hostScoreHints.javaAvailable === false) {
         reasons.push("java-unavailable");
       }
@@ -1071,10 +1081,6 @@ export class InMemoryCoordinatorStore {
   recordArtifact(metadata: Omit<ArtifactMetadata, "updatedAt">): ArtifactMetadata {
     const group = this.requireGroup(metadata.groupId);
 
-    if (metadata.status === "available" && metadata.artifactKind === "world-snapshot" && !metadata.serverPackVersion) {
-      throw new StoreError(400, "serverPackVersion is required for world-snapshot artifacts");
-    }
-
     const now = this.nowIso();
     const artifact = {
       ...metadata,
@@ -1137,6 +1143,83 @@ export class InMemoryCoordinatorStore {
     }
   }
 
+  authorizeWorldSnapshotPublish(input: {
+    groupId: string;
+    sourceHostId: string;
+    hostId: string;
+    hostToken: string;
+    hostGeneration?: number;
+    parentSnapshotId?: string;
+  }): void {
+    const group = this.requireGroup(input.groupId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+    if (input.sourceHostId !== input.hostId) {
+      throw new StoreError(403, "Snapshot sourceHostId must match the authenticated host", "not_current_host");
+    }
+    if (group.currentHostId !== input.hostId) {
+      throw new StoreError(403, "Only the current host may publish world snapshots", "not_current_host");
+    }
+    if (input.hostGeneration === undefined || input.hostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Host generation is stale; current host may have changed", "stale_host_generation");
+    }
+    if (!isFresh(host.lastHeartbeatAt, this.now(), this.heartbeatTimeoutMs)) {
+      throw new StoreError(403, "Host lease has expired", "host_lease_expired");
+    }
+    const latest = this.findLatestArtifact(group, "world-snapshot");
+    const parent = input.parentSnapshotId ?? "";
+    if (latest !== undefined && parent !== latest.artifactId) {
+      throw new StoreError(409, "Snapshot parent does not match latest world snapshot", "snapshot_parent_conflict");
+    }
+    if (latest === undefined && parent !== "") {
+      throw new StoreError(409, "Snapshot parent was provided but no latest world snapshot exists", "snapshot_parent_conflict");
+    }
+  }
+
+  pinWorldSnapshot(input: {
+    groupId: string;
+    snapshotId: string;
+    hostId: string;
+    hostToken: string;
+    pinned: boolean;
+  }): ArtifactMetadata {
+    this.verifyHost({ groupId: input.groupId, hostId: input.hostId, hostToken: input.hostToken });
+    const group = this.requireGroup(input.groupId);
+    const artifact = group.artifacts.get("world-snapshot")?.get(input.snapshotId);
+    if (!artifact) {
+      throw new StoreError(404, "World snapshot does not exist");
+    }
+    artifact.pinned = input.pinned;
+    artifact.updatedAt = this.nowIso();
+    group.updatedAt = artifact.updatedAt;
+    this.triggerMutation();
+    return artifact;
+  }
+
+  deleteWorldSnapshot(input: {
+    groupId: string;
+    snapshotId: string;
+    hostId: string;
+    hostToken: string;
+  }): ArtifactMetadata {
+    this.verifyHost({ groupId: input.groupId, hostId: input.hostId, hostToken: input.hostToken });
+    const group = this.requireGroup(input.groupId);
+    const artifact = group.artifacts.get("world-snapshot")?.get(input.snapshotId);
+    if (!artifact) {
+      throw new StoreError(404, "World snapshot does not exist");
+    }
+    if (group.latestArtifacts.get("world-snapshot") === input.snapshotId || group.latestSnapshotId === input.snapshotId) {
+      throw new StoreError(409, "Latest world snapshot cannot be deleted");
+    }
+    if (artifact.pinned === true) {
+      throw new StoreError(409, "Pinned world snapshot cannot be deleted");
+    }
+    group.artifacts.get("world-snapshot")?.delete(input.snapshotId);
+    group.updatedAt = this.nowIso();
+    this.triggerMutation();
+    return artifact;
+  }
+
   async gcArtifacts(input: {
     groupId: string;
     dryRun: boolean;
@@ -1174,6 +1257,12 @@ export class InMemoryCoordinatorStore {
     for (const [kind, artifactId] of group.latestArtifacts) {
       protectedIds.add(artifactId);
       protectedLog.push(`${artifactId} (latest ${kind})`);
+    }
+    for (const artifact of (group.artifacts.get("world-snapshot")?.values() ?? [])) {
+      if (artifact.pinned === true) {
+        protectedIds.add(artifact.artifactId);
+        protectedLog.push(`${artifact.artifactId} (pinned world-snapshot)`);
+      }
     }
 
     if (group.activeTakeoverAssignmentId !== null) {

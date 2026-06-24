@@ -32,6 +32,31 @@ export type ArtifactManifest = {
   summary?: ArtifactManifestSummary;
 };
 
+export type WorldSnapshotManifestFile = {
+  path: string;
+  size: number;
+  sha256: string;
+  objectId: string;
+};
+
+export type WorldSnapshotManifest = {
+  schemaVersion: 1;
+  snapshotId: string;
+  groupId: string;
+  sourceHostId: string;
+  hostGeneration: number;
+  parentSnapshotId?: string;
+  createdAt: string;
+  consistent: boolean;
+  logicalSize: number;
+  uploadedSize: number;
+  fileCount: number;
+  changedFileCount: number;
+  deletedFileCount: number;
+  files: WorldSnapshotManifestFile[];
+  deletedPaths?: string[];
+};
+
 export type SaveObjectParams = {
   groupId: string;
   sha256: string;
@@ -91,6 +116,27 @@ export type DeleteManifestParams = {
   artifactId: string;
 };
 
+export type SaveWorldSnapshotManifestParams = {
+  groupId: string;
+  snapshotId: string;
+  manifest: WorldSnapshotManifest;
+  beforeCommit?: () => void;
+};
+
+export type ReadWorldSnapshotManifestParams = {
+  groupId: string;
+  snapshotId: string;
+};
+
+export type DeleteWorldSnapshotManifestParams = {
+  groupId: string;
+  snapshotId: string;
+};
+
+export type ListWorldSnapshotManifestParams = {
+  groupId: string;
+};
+
 export type ListObjectsParams = {
   groupId: string;
 };
@@ -106,6 +152,10 @@ export interface CoordinatorStorage {
   deleteObject(params: DeleteObjectParams): Promise<void>;
   deleteManifest(params: DeleteManifestParams): Promise<void>;
   listObjectSha256s(params: ListObjectsParams): Promise<string[]>;
+  saveWorldSnapshotManifest(params: SaveWorldSnapshotManifestParams): Promise<void>;
+  readWorldSnapshotManifest(params: ReadWorldSnapshotManifestParams): Promise<WorldSnapshotManifest>;
+  deleteWorldSnapshotManifest(params: DeleteWorldSnapshotManifestParams): Promise<void>;
+  listWorldSnapshotManifestIds(params: ListWorldSnapshotManifestParams): Promise<string[]>;
   info(): StorageInfo;
 }
 

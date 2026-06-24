@@ -56,6 +56,7 @@ func newRootCmd() *cobra.Command {
 		newDaemonCmd(),
 		newScanCmd(),
 		newSafeSyncCmd(),
+		newWorldBackupCmd(),
 		newPushCmd(),
 		newPullCmd(),
 		newManifestCmd(),

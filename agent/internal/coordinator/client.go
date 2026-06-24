@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
+	"github.com/Ruichen-0079/ACBH/agent/internal/worldbackup"
 )
 
 const maxCoordinatorResponseBytes = 32 * 1024 * 1024
@@ -174,6 +175,63 @@ type UploadManifestResponse struct {
 	ArtifactKind manifest.ArtifactKind `json:"artifactKind"`
 	ArtifactID   string                `json:"artifactId"`
 	Status       string                `json:"status"`
+}
+
+type WorldBackupPlanRequest struct {
+	HostID           string                      `json:"hostId"`
+	HostToken        string                      `json:"hostToken"`
+	HostGeneration   int                         `json:"hostGeneration"`
+	ParentSnapshotID string                      `json:"parentSnapshotId,omitempty"`
+	Objects          []worldbackup.PlannedObject `json:"objects"`
+}
+
+type WorldBackupPlanResponse struct {
+	OK             bool                        `json:"ok"`
+	MissingObjects []worldbackup.PlannedObject `json:"missingObjects"`
+	ExistingCount  int                         `json:"existingCount"`
+}
+
+type WorldBackupCommitRequest struct {
+	HostID         string               `json:"hostId"`
+	HostToken      string               `json:"hostToken"`
+	HostGeneration int                  `json:"hostGeneration"`
+	Manifest       worldbackup.Manifest `json:"manifest"`
+}
+
+type WorldBackupCommitResponse struct {
+	OK         bool   `json:"ok"`
+	SnapshotID string `json:"snapshotId"`
+	Status     string `json:"status"`
+}
+
+type WorldBackupListResponse struct {
+	Snapshots []WorldBackupMetadata `json:"snapshots"`
+}
+
+type WorldBackupMetadata struct {
+	SnapshotID       string `json:"snapshotId"`
+	GroupID          string `json:"groupId"`
+	SourceHostID     string `json:"sourceHostId"`
+	HostGeneration   int    `json:"hostGeneration"`
+	CreatedAt        string `json:"createdAt"`
+	Consistent       bool   `json:"consistent"`
+	Pinned           bool   `json:"pinned"`
+	LogicalSize      int64  `json:"logicalSize"`
+	UploadedSize     int64  `json:"uploadedSize"`
+	FileCount        int    `json:"fileCount"`
+	ChangedFileCount int    `json:"changedFileCount"`
+	DeletedFileCount int    `json:"deletedFileCount"`
+}
+
+type WorldBackupManifestResponse struct {
+	Metadata WorldBackupMetadata  `json:"metadata"`
+	Manifest worldbackup.Manifest `json:"manifest"`
+}
+
+type WorldBackupPinRequest struct {
+	HostID    string `json:"hostId"`
+	HostToken string `json:"hostToken"`
+	Pinned    bool   `json:"pinned"`
 }
 
 type ArtifactAuth struct {
@@ -518,6 +576,149 @@ func (c *Client) UploadManifest(ctx context.Context, req UploadManifestRequest) 
 		return UploadManifestResponse{}, fmt.Errorf("decode coordinator response: %w", err)
 	}
 	return out, nil
+}
+
+func (c *Client) PlanWorldBackup(ctx context.Context, groupID string, req WorldBackupPlanRequest) (WorldBackupPlanResponse, error) {
+	var out WorldBackupPlanResponse
+	err := c.post(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/world-backups/plan", req, &out)
+	return out, err
+}
+
+func (c *Client) UploadWorldObjectStream(
+	ctx context.Context,
+	auth ArtifactAuth,
+	sha256 string,
+	content io.Reader,
+	size int64,
+) (UploadObjectResponse, error) {
+	httpReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPut,
+		c.baseURL+"/v1/groups/"+url.PathEscape(auth.GroupID)+"/world-objects/"+url.PathEscape(sha256),
+		content,
+	)
+	if err != nil {
+		return UploadObjectResponse{}, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/octet-stream")
+	httpReq.Header.Set("X-ACBH-Host-ID", auth.HostID)
+	httpReq.Header.Set("X-ACBH-Host-Token", auth.HostToken)
+	if size >= 0 {
+		httpReq.ContentLength = size
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return UploadObjectResponse{}, fmt.Errorf("coordinator request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCoordinatorResponseBytes))
+	if err != nil {
+		return UploadObjectResponse{}, fmt.Errorf("read coordinator response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return UploadObjectResponse{}, responseError(resp.StatusCode, body)
+	}
+	var out UploadObjectResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return UploadObjectResponse{}, fmt.Errorf("decode coordinator response: %w", err)
+	}
+	return out, nil
+}
+
+func (c *Client) CommitWorldBackup(ctx context.Context, groupID string, req WorldBackupCommitRequest) (WorldBackupCommitResponse, error) {
+	var out WorldBackupCommitResponse
+	err := c.post(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/world-backups/commit", req, &out)
+	return out, err
+}
+
+func (c *Client) GetLatestWorldBackup(ctx context.Context, auth ArtifactAuth, consistentOnly bool) (WorldBackupManifestResponse, error) {
+	var out WorldBackupManifestResponse
+	path := "/v1/groups/" + url.PathEscape(auth.GroupID) + "/world-backups/latest"
+	if consistentOnly {
+		path += "?consistentOnly=true"
+	}
+	err := c.get(ctx, path, auth, &out)
+	return out, err
+}
+
+func (c *Client) ListWorldBackups(ctx context.Context, auth ArtifactAuth) (WorldBackupListResponse, error) {
+	var out WorldBackupListResponse
+	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/world-backups", auth, &out)
+	return out, err
+}
+
+func (c *Client) GetWorldBackup(ctx context.Context, auth ArtifactAuth, snapshotID string) (WorldBackupManifestResponse, error) {
+	var out WorldBackupManifestResponse
+	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/world-backups/"+url.PathEscape(snapshotID), auth, &out)
+	return out, err
+}
+
+func (c *Client) PinWorldBackup(ctx context.Context, auth ArtifactAuth, snapshotID string, pinned bool) error {
+	req := WorldBackupPinRequest{HostID: auth.HostID, HostToken: auth.HostToken, Pinned: pinned}
+	var out struct {
+		OK bool `json:"ok"`
+	}
+	return c.post(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/world-backups/"+url.PathEscape(snapshotID)+"/pin", req, &out)
+}
+
+func (c *Client) DeleteWorldBackup(ctx context.Context, auth ArtifactAuth, snapshotID string) error {
+	httpReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodDelete,
+		c.baseURL+"/v1/groups/"+url.PathEscape(auth.GroupID)+"/world-backups/"+url.PathEscape(snapshotID),
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("X-ACBH-Host-ID", auth.HostID)
+	httpReq.Header.Set("X-ACBH-Host-Token", auth.HostToken)
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("coordinator request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCoordinatorResponseBytes))
+	if err != nil {
+		return fmt.Errorf("read coordinator response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return responseError(resp.StatusCode, body)
+	}
+	return nil
+}
+
+func (c *Client) DownloadWorldObjectStream(
+	ctx context.Context,
+	auth ArtifactAuth,
+	sha256 string,
+) (io.ReadCloser, int64, error) {
+	httpReq, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		c.baseURL+"/v1/groups/"+url.PathEscape(auth.GroupID)+"/world-objects/"+url.PathEscape(sha256),
+		nil,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("X-ACBH-Host-ID", auth.HostID)
+	httpReq.Header.Set("X-ACBH-Host-Token", auth.HostToken)
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, 0, fmt.Errorf("coordinator request failed: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxCoordinatorResponseBytes))
+		if readErr != nil {
+			return nil, 0, fmt.Errorf("read coordinator response: %w", readErr)
+		}
+		return nil, 0, responseError(resp.StatusCode, body)
+	}
+	return resp.Body, resp.ContentLength, nil
 }
 
 type GcRequest struct {

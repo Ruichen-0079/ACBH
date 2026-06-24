@@ -8,26 +8,32 @@ import type { ArtifactKind } from "../domain/artifacts.js";
 import {
   type ArtifactManifest,
   type DeleteManifestParams,
+  type DeleteWorldSnapshotManifestParams,
   type DeleteObjectParams,
   type ListObjectsParams,
+  type ListWorldSnapshotManifestParams,
   type ObjectReadStream,
   StorageObjectTooLargeError,
   StorageNotFoundError,
   StorageValidationError,
   type CoordinatorStorage,
   type ObjectExistsParams,
+  type ReadWorldSnapshotManifestParams,
   type ReadManifestParams,
   type ReadObjectParams,
   type SaveManifestParams,
   type SaveObjectParams,
   type SaveObjectFromStreamParams,
+  type SaveWorldSnapshotManifestParams,
   type StorageInfo,
+  type WorldSnapshotManifest,
 } from "./types.js";
 import {
   artifactKindDirectory,
   resolveUnderRoot,
   validateArtifactKind,
   validateManifest,
+  validateManifestPath,
   validateSha256,
   validateStorageId,
 } from "./pathSafety.js";
@@ -215,6 +221,68 @@ export class LocalFilesystemStorage implements CoordinatorStorage {
     await rm(manifestPath, { force: true });
   }
 
+  async saveWorldSnapshotManifest(params: SaveWorldSnapshotManifestParams): Promise<void> {
+    const groupId = validateStorageId("groupId", params.groupId);
+    const snapshotId = validateStorageId("snapshotId", params.snapshotId);
+    const manifest = validateWorldSnapshotManifest(params.manifest);
+    if (manifest.groupId !== groupId || manifest.snapshotId !== snapshotId) {
+      throw new StorageValidationError("world snapshot manifest IDs must match storage path IDs");
+    }
+    const manifestPath = this.worldSnapshotManifestPath(groupId, snapshotId);
+    await mkdir(path.dirname(manifestPath), { recursive: true });
+    const temporaryPath = `${manifestPath}.${randomUUID()}.tmp`;
+    const content = `${JSON.stringify(manifest, null, 2)}\n`;
+    try {
+      const handle = await open(temporaryPath, "wx");
+      try {
+        await handle.writeFile(content, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      params.beforeCommit?.();
+      await rename(temporaryPath, manifestPath);
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
+  }
+
+  async readWorldSnapshotManifest(params: ReadWorldSnapshotManifestParams): Promise<WorldSnapshotManifest> {
+    const groupId = validateStorageId("groupId", params.groupId);
+    const snapshotId = validateStorageId("snapshotId", params.snapshotId);
+    const manifestPath = this.worldSnapshotManifestPath(groupId, snapshotId);
+    let raw: string;
+    try {
+      raw = await readFile(manifestPath, "utf8");
+    } catch (error) {
+      if (isNotFound(error)) {
+        throw new StorageNotFoundError("world snapshot manifest does not exist");
+      }
+      throw error;
+    }
+    return validateWorldSnapshotManifest(JSON.parse(raw) as WorldSnapshotManifest);
+  }
+
+  async deleteWorldSnapshotManifest(params: DeleteWorldSnapshotManifestParams): Promise<void> {
+    const groupId = validateStorageId("groupId", params.groupId);
+    const snapshotId = validateStorageId("snapshotId", params.snapshotId);
+    await rm(this.worldSnapshotManifestPath(groupId, snapshotId), { force: true });
+  }
+
+  async listWorldSnapshotManifestIds(params: ListWorldSnapshotManifestParams): Promise<string[]> {
+    const groupId = validateStorageId("groupId", params.groupId);
+    const dir = resolveUnderRoot(this.root, "groups", groupId, "world-backups");
+    try {
+      const entries = await readdir(dir, { withFileTypes: true });
+      return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
+    } catch (error) {
+      if (isNotFound(error)) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
   async listObjectSha256s(params: ListObjectsParams): Promise<string[]> {
     const groupId = validateStorageId("groupId", params.groupId);
     const objectsDir = resolveUnderRoot(this.root, "groups", groupId, "objects", "sha256");
@@ -270,6 +338,10 @@ export class LocalFilesystemStorage implements CoordinatorStorage {
       "manifest.json",
     );
   }
+
+  private worldSnapshotManifestPath(groupId: string, snapshotId: string): string {
+    return resolveUnderRoot(this.root, "groups", groupId, "world-backups", snapshotId, "manifest.json");
+  }
 }
 
 class ObjectVerificationTransform extends Transform {
@@ -311,6 +383,80 @@ export function createLocalFilesystemStorageFromEnv(env = process.env): LocalFil
 
 function hashContent(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function validateWorldSnapshotManifest(manifest: WorldSnapshotManifest): WorldSnapshotManifest {
+  if (manifest.schemaVersion !== 1) {
+    throw new StorageValidationError("world snapshot schemaVersion must be 1");
+  }
+  validateStorageId("snapshotId", manifest.snapshotId);
+  validateStorageId("groupId", manifest.groupId);
+  validateStorageId("sourceHostId", manifest.sourceHostId);
+  if (manifest.parentSnapshotId !== undefined && manifest.parentSnapshotId !== "") {
+    validateStorageId("parentSnapshotId", manifest.parentSnapshotId);
+  }
+  if (!Number.isSafeInteger(manifest.hostGeneration) || manifest.hostGeneration < 0) {
+    throw new StorageValidationError("hostGeneration must be a non-negative safe integer");
+  }
+  if (Number.isNaN(Date.parse(manifest.createdAt))) {
+    throw new StorageValidationError("createdAt must be a valid timestamp");
+  }
+  if (typeof manifest.consistent !== "boolean") {
+    throw new StorageValidationError("consistent must be a boolean");
+  }
+  for (const [label, value] of [
+    ["logicalSize", manifest.logicalSize],
+    ["uploadedSize", manifest.uploadedSize],
+    ["fileCount", manifest.fileCount],
+    ["changedFileCount", manifest.changedFileCount],
+    ["deletedFileCount", manifest.deletedFileCount],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new StorageValidationError(`${label} must be a non-negative safe integer`);
+    }
+  }
+  if (!Array.isArray(manifest.files)) {
+    throw new StorageValidationError("files must be an array");
+  }
+  if (manifest.fileCount !== manifest.files.length) {
+    throw new StorageValidationError("fileCount must match files length");
+  }
+  let lastPath = "";
+  let logicalSize = 0;
+  for (const file of manifest.files) {
+    validateManifestPath(file.path);
+    if (file.path <= lastPath) {
+      throw new StorageValidationError("files must be sorted by path with no duplicates");
+    }
+    lastPath = file.path;
+    if (!Number.isSafeInteger(file.size) || file.size < 0) {
+      throw new StorageValidationError("world snapshot file size must be a non-negative safe integer");
+    }
+    const sha = validateSha256(file.sha256);
+    if (file.objectId !== `sha256:${sha}`) {
+      throw new StorageValidationError("world snapshot objectId must match sha256");
+    }
+    logicalSize += file.size;
+  }
+  if (manifest.logicalSize !== logicalSize) {
+    throw new StorageValidationError("logicalSize must match files total size");
+  }
+  const deletedPaths = manifest.deletedPaths ?? [];
+  if (!Array.isArray(deletedPaths)) {
+    throw new StorageValidationError("deletedPaths must be an array");
+  }
+  if (manifest.deletedFileCount !== deletedPaths.length) {
+    throw new StorageValidationError("deletedFileCount must match deletedPaths length");
+  }
+  let lastDeleted = "";
+  for (const deletedPath of deletedPaths) {
+    validateManifestPath(deletedPath);
+    if (deletedPath <= lastDeleted) {
+      throw new StorageValidationError("deletedPaths must be sorted by path with no duplicates");
+    }
+    lastDeleted = deletedPath;
+  }
+  return manifest;
 }
 
 function isNotFound(error: unknown): boolean {

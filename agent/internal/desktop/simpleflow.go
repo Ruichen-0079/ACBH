@@ -25,6 +25,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
 	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
 	"github.com/Ruichen-0079/ACBH/agent/internal/mcimport"
+	"github.com/Ruichen-0079/ACBH/agent/internal/worldbackup"
 )
 
 const (
@@ -1239,26 +1240,25 @@ func StartAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 		}
 	}
 	res.State = "PullingArtifacts"
-	res.Steps = append(res.Steps, "正在同步服务端数据", "正在同步世界存档")
-	if _, err := PullLatest(ctx, opts, manifest.ServerPack, "latest", false); err != nil {
+	res.Steps = append(res.Steps, "正在恢复世界存档")
+	if restored, err := RestoreLatestWorldSnapshot(ctx, opts); err != nil {
 		if isArtifactNotAvailable(err) {
-			res.Warnings = append(res.Warnings, "server-pack 暂无可用制品，首次启动已跳过。")
+			if localWorldExists(cfg.Server.Dir) {
+				res.Warnings = append(res.Warnings, "first_world_bootstrap: Group 暂无历史世界快照，使用本机现有世界首次启动。")
+			} else {
+				res.State = StateError
+				res.Message = "Group 暂无历史世界快照，且本机没有可启动的世界目录。"
+				res.ErrorCode = "no_world_snapshot"
+				return res, nil
+			}
 		} else {
 			res.State = StateError
-			res.Message = "server-pack 拉取失败：" + err.Error()
-			res.ErrorCode = "artifact_pull_failed"
+			res.Message = "世界快照恢复失败：" + err.Error()
+			res.ErrorCode = "world_restore_failed"
 			return res, nil
 		}
-	}
-	if _, err := PullLatest(ctx, opts, manifest.WorldSnapshot, "latest", false); err != nil {
-		if isArtifactNotAvailable(err) {
-			res.Warnings = append(res.Warnings, "world-snapshot 暂无可用制品，首次启动已跳过。")
-		} else {
-			res.State = StateError
-			res.Message = "world-snapshot 拉取失败：" + err.Error()
-			res.ErrorCode = "artifact_pull_failed"
-			return res, nil
-		}
+	} else {
+		res.Steps = append(res.Steps, "世界快照已恢复："+restored.SnapshotID)
 	}
 	res.State = "StartingMinecraft"
 	res.Steps = append(res.Steps, "正在检查 Minecraft 服务端", "正在启动 Minecraft")
@@ -1338,6 +1338,151 @@ func isArtifactNotAvailable(err error) bool {
 		strings.Contains(text, "404")
 }
 
+type WorldSnapshotPublishResult struct {
+	SnapshotID       string `json:"snapshotId"`
+	MissingObjects   int    `json:"missingObjects"`
+	LogicalSize      int64  `json:"logicalSize"`
+	UploadedSize     int64  `json:"uploadedSize"`
+	ChangedFileCount int    `json:"changedFileCount"`
+	DeletedFileCount int    `json:"deletedFileCount"`
+}
+
+func CreateStoppedWorldSnapshot(ctx context.Context, opts Options) (WorldSnapshotPublishResult, error) {
+	opts = withDefaults(opts)
+	cfg, err := loadDesktopConfig(opts)
+	if err != nil {
+		return WorldSnapshotPublishResult{}, err
+	}
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return WorldSnapshotPublishResult{}, err
+	}
+	auth := coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}
+	status, err := client.GetElectionStatus(ctx, auth)
+	if err != nil {
+		return WorldSnapshotPublishResult{}, fmt.Errorf("检查 current host 失败: %w", err)
+	}
+	if status.CurrentHostID == nil || *status.CurrentHostID != cfg.HostID {
+		return WorldSnapshotPublishResult{}, errors.New("not_current_host")
+	}
+	generation := status.CurrentHostGeneration
+	var parent *worldbackup.Manifest
+	if latest, err := client.GetLatestWorldBackup(ctx, auth, false); err == nil {
+		parent = &latest.Manifest
+	}
+	snapshotID := "ws_" + time.Now().UTC().Format("20060102_150405")
+	snapshot, err := worldbackup.BuildSnapshot(worldbackup.ScanOptions{
+		ServerDir:      cfg.Server.Dir,
+		AppDataDir:     opts.AppDataDir,
+		SnapshotID:     snapshotID,
+		GroupID:        cfg.GroupID,
+		SourceHostID:   cfg.HostID,
+		HostGeneration: generation,
+		Parent:         parent,
+		Consistent:     true,
+	})
+	if err != nil {
+		return WorldSnapshotPublishResult{}, err
+	}
+	planned, err := client.PlanWorldBackup(ctx, cfg.GroupID, coordinator.WorldBackupPlanRequest{
+		HostID:           cfg.HostID,
+		HostToken:        cfg.HostToken,
+		HostGeneration:   generation,
+		ParentSnapshotID: snapshot.Manifest.ParentSnapshotID,
+		Objects:          snapshot.Plan.Objects,
+	})
+	if err != nil {
+		return WorldSnapshotPublishResult{}, err
+	}
+	bySHA := map[string]worldbackup.ChangedFile{}
+	for _, changed := range snapshot.Plan.ChangedFiles {
+		if _, ok := bySHA[changed.SHA256]; !ok {
+			bySHA[changed.SHA256] = changed
+		}
+	}
+	for _, object := range planned.MissingObjects {
+		changed, ok := bySHA[object.SHA256]
+		if !ok {
+			return WorldSnapshotPublishResult{}, fmt.Errorf("coordinator requested unknown object %s", object.SHA256)
+		}
+		file, err := os.Open(changed.LocalPath)
+		if err != nil {
+			return WorldSnapshotPublishResult{}, err
+		}
+		_, uploadErr := client.UploadWorldObjectStream(ctx, auth, object.SHA256, file, object.Size)
+		closeErr := file.Close()
+		if uploadErr != nil {
+			return WorldSnapshotPublishResult{}, uploadErr
+		}
+		if closeErr != nil {
+			return WorldSnapshotPublishResult{}, closeErr
+		}
+	}
+	commit, err := client.CommitWorldBackup(ctx, cfg.GroupID, coordinator.WorldBackupCommitRequest{
+		HostID:         cfg.HostID,
+		HostToken:      cfg.HostToken,
+		HostGeneration: generation,
+		Manifest:       snapshot.Manifest,
+	})
+	if err != nil {
+		return WorldSnapshotPublishResult{}, err
+	}
+	if err := worldbackup.SaveIndexAtomic(opts.AppDataDir, snapshot.Index); err != nil {
+		return WorldSnapshotPublishResult{}, err
+	}
+	return WorldSnapshotPublishResult{
+		SnapshotID:       commit.SnapshotID,
+		MissingObjects:   len(planned.MissingObjects),
+		LogicalSize:      snapshot.Manifest.LogicalSize,
+		UploadedSize:     snapshot.Manifest.UploadedSize,
+		ChangedFileCount: snapshot.Manifest.ChangedFileCount,
+		DeletedFileCount: snapshot.Manifest.DeletedFileCount,
+	}, nil
+}
+
+func RestoreLatestWorldSnapshot(ctx context.Context, opts Options) (worldbackup.RestoreSummary, error) {
+	opts = withDefaults(opts)
+	cfg, err := loadDesktopConfig(opts)
+	if err != nil {
+		return worldbackup.RestoreSummary{}, err
+	}
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return worldbackup.RestoreSummary{}, err
+	}
+	auth := coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}
+	latest, err := client.GetLatestWorldBackup(ctx, auth, true)
+	if err != nil {
+		return worldbackup.RestoreSummary{}, err
+	}
+	downloader := func(ctx context.Context, objectID string) (io.ReadCloser, int64, error) {
+		sha, ok := strings.CutPrefix(objectID, "sha256:")
+		if !ok {
+			return nil, 0, fmt.Errorf("unsupported object ID %s", objectID)
+		}
+		return client.DownloadWorldObjectStream(ctx, auth, sha)
+	}
+	return worldbackup.Restore(ctx, worldbackup.RestoreOptions{
+		ServerDir:      cfg.Server.Dir,
+		Manifest:       latest.Manifest,
+		Downloader:     downloader,
+		ConsistentOnly: true,
+	})
+}
+
+func localWorldExists(serverDir string) bool {
+	roots, err := worldbackup.ResolveWorldRoots(serverDir, nil)
+	if err != nil {
+		return false
+	}
+	for _, root := range roots {
+		if info, err := os.Stat(filepath.Join(serverDir, filepath.FromSlash(root))); err == nil && info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
 func waitForMinecraftPort(ctx context.Context, serverDir string, timeout time.Duration) error {
 	port := "25565"
 	if report, err := mcimport.Inspect(serverDir); err == nil {
@@ -1405,19 +1550,11 @@ func StopAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 		return res, nil
 	}
 	res.State = "SyncingWorld"
-	res.Steps = append(res.Steps, "正在创建 server-pack", "正在上传 server-pack")
-	if _, err := ScanPack(opts); err != nil {
-		res.Warnings = append(res.Warnings, "创建 server-pack manifest 跳过："+err.Error())
-	}
-	if _, err := PushLatest(ctx, opts); err != nil {
-		res.Warnings = append(res.Warnings, "上传 server-pack 跳过："+err.Error())
-	}
-	res.Steps = append(res.Steps, "正在创建世界快照", "正在上传世界存档")
-	if _, err := ScanWorldSnapshotStopped(opts); err != nil {
-		res.Warnings = append(res.Warnings, "创建 world-snapshot manifest 跳过："+err.Error())
-	}
-	if _, err := PushLatest(ctx, opts); err != nil {
-		res.Warnings = append(res.Warnings, "上传 world-snapshot 跳过："+err.Error())
+	res.Steps = append(res.Steps, "正在创建世界差量快照", "正在上传变化的世界对象")
+	if backup, err := CreateStoppedWorldSnapshot(ctx, opts); err != nil {
+		res.Warnings = append(res.Warnings, "发布 world snapshot 失败："+err.Error())
+	} else {
+		res.Steps = append(res.Steps, "世界快照已发布："+backup.SnapshotID)
 	}
 	res.State = "StoppingRelay"
 	res.Steps = append(res.Steps, "正在停止公网中转")
