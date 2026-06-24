@@ -358,7 +358,15 @@ func newDesktopServerAutoCmd() *cobra.Command {
 		Use:   "server",
 		Short: "简化桌面主按钮使用的一键开服/停服命令",
 	}
-	cmd.AddCommand(newDesktopServerStartAutoCmd(), newDesktopServerStopAutoCmd(), newDesktopServerAutoStatusCmd())
+	cmd.AddCommand(
+		newDesktopServerStartAutoCmd(),
+		newDesktopServerStopAutoCmd(),
+		newDesktopServerAutoStatusCmd(),
+		newDesktopServerCandidatesCmd(),
+		newDesktopServerSelectLaunchCmd(),
+		newDesktopServerLaunchProfileCmd(),
+		newDesktopServerClearLaunchProfileCmd(),
+	)
 	return cmd
 }
 
@@ -405,6 +413,81 @@ func newDesktopServerAutoStatusCmd() *cobra.Command {
 		Short: "查询简化桌面服务器状态并输出纯 JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := desktop.ServerAutoStatus(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopServerCandidatesCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "candidates",
+		Short: "列出 Minecraft 服务端启动候选并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.ServerLaunchCandidates(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopServerSelectLaunchCmd() *cobra.Command {
+	var opts desktop.Options
+	var selectedPath string
+	cmd := &cobra.Command{
+		Use:   "select-launch",
+		Short: "保存 Minecraft 服务端启动脚本或核心 JAR 并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.SelectServerLaunch(opts, selectedPath)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&selectedPath, "path", "", "启动脚本或服务端核心 JAR 路径")
+	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("path")
+	return cmd
+}
+
+func newDesktopServerLaunchProfileCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "launch-profile",
+		Short: "读取当前 Minecraft 启动配置并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.CurrentLaunchProfile(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopServerClearLaunchProfileCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "clear-launch-profile",
+		Short: "清除当前 Minecraft 启动文件选择并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.ClearLaunchProfile(opts)
 			if err != nil {
 				return err
 			}

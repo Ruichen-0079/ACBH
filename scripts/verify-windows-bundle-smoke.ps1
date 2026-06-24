@@ -240,6 +240,9 @@ try {
         '"desktop", "environment", "check"',
         '"desktop", "setup", "configure-network"',
         '"desktop", "server", "start-auto"',
+        '"desktop", "server", "select-launch"',
+        "Update-ServerSummary",
+        "Show-LaunchEvidence",
         "advancedPanel",
         "Import-OfflinePack",
         '$advancedPanel.Visible = $false',
@@ -317,8 +320,19 @@ try {
     Write-Utf8NoBom -Path (Join-Path $serverDir "server.properties") -Text "enable-rcon=false`nserver-port=25565`nlevel-name=world"
 
     $inspect = Invoke-AgentJson -Args @("desktop", "setup", "inspect-server", "--app-data-dir", $AppData, "--server-dir", $serverDir, "--json")
-    if (-not $inspect.ok -or $inspect.report.serverType -ne "Paper" -or -not $inspect.report.launchEntry) {
+    if (-not $inspect.ok -or -not $inspect.inspectionOk -or -not $inspect.launchReady -or $inspect.state -ne "ReadyToStart" -or $inspect.report.serverType -ne "Paper" -or -not $inspect.report.launchEntry) {
         throw "setup inspect-server did not recognize Paper fixture"
+    }
+    if ($inspect.requiredJavaVersion -ne "17" -or [string]::IsNullOrWhiteSpace($inspect.detectedJavaVersion) -or [string]::IsNullOrWhiteSpace($inspect.detectedJavaPath)) {
+        throw "setup inspect-server did not report distinct required/detected Java fields"
+    }
+    $candidates = Invoke-AgentJson -Args @("desktop", "server", "candidates", "--app-data-dir", $AppData, "--json")
+    if ($candidates.jars.Count -lt 1 -or $candidates.recommended.kind -ne "jar") {
+        throw "desktop server candidates did not return launch candidates"
+    }
+    $profile = Invoke-AgentJson -Args @("desktop", "server", "launch-profile", "--app-data-dir", $AppData, "--json")
+    if ($profile.kind -ne "jar" -or $profile.serverType -ne "Paper") {
+        throw "desktop server launch-profile did not return saved profile"
     }
     $complete = Invoke-AgentJson -Args @("desktop", "setup", "complete", "--app-data-dir", $AppData, "--json")
     if (-not $complete.ok -or $complete.state -ne "Ready") {

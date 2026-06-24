@@ -38,6 +38,9 @@ const (
 	StateUnconfigured                   DesktopState = "Unconfigured"
 	StateBootstrapReady                 DesktopState = "BootstrapReady"
 	StateBootstrapWaitingForOfflinePack DesktopState = "BootstrapWaitingForOfflinePack"
+	StateServerNeedsLaunchSelection     DesktopState = "ServerNeedsLaunchSelection"
+	StateJavaNeedsRepair                DesktopState = "JavaNeedsRepair"
+	StateReadyToStart                   DesktopState = "ReadyToStart"
 	StateReady                          DesktopState = "Ready"
 	StateRunning                        DesktopState = "Running"
 	StateError                          DesktopState = "Error"
@@ -74,24 +77,25 @@ type EnvironmentReport struct {
 }
 
 type SetupState struct {
-	SetupComplete   bool   `json:"setupComplete"`
-	Mode            string `json:"mode"`
-	CoordinatorHost string `json:"coordinatorHost"`
-	CoordinatorPort string `json:"coordinatorPort"`
-	CoordinatorURL  string `json:"coordinatorUrl"`
-	PublicGamePort  string `json:"publicGamePort"`
-	PlayerAddress   string `json:"playerAddress"`
-	GroupName       string `json:"groupName"`
-	DisplayName     string `json:"displayName"`
-	ServerDir       string `json:"serverDir"`
-	ServerType      string `json:"serverType"`
-	ServerCore      string `json:"serverCore"`
-	ServerPort      string `json:"serverPort"`
-	WorldDir        string `json:"worldDir"`
-	JavaVersion     string `json:"javaVersion"`
-	JavaPath        string `json:"javaPath"`
-	EULAAccepted    bool   `json:"eulaAccepted"`
-	UpdatedAt       string `json:"updatedAt"`
+	SetupComplete   bool                   `json:"setupComplete"`
+	Mode            string                 `json:"mode"`
+	CoordinatorHost string                 `json:"coordinatorHost"`
+	CoordinatorPort string                 `json:"coordinatorPort"`
+	CoordinatorURL  string                 `json:"coordinatorUrl"`
+	PublicGamePort  string                 `json:"publicGamePort"`
+	PlayerAddress   string                 `json:"playerAddress"`
+	GroupName       string                 `json:"groupName"`
+	DisplayName     string                 `json:"displayName"`
+	ServerDir       string                 `json:"serverDir"`
+	ServerType      string                 `json:"serverType"`
+	ServerCore      string                 `json:"serverCore"`
+	ServerPort      string                 `json:"serverPort"`
+	WorldDir        string                 `json:"worldDir"`
+	JavaVersion     string                 `json:"javaVersion"`
+	JavaPath        string                 `json:"javaPath"`
+	LaunchProfile   mcimport.LaunchProfile `json:"launchProfile"`
+	EULAAccepted    bool                   `json:"eulaAccepted"`
+	UpdatedAt       string                 `json:"updatedAt"`
 }
 
 type ConfigureNetworkResult struct {
@@ -105,13 +109,22 @@ type ConfigureNetworkResult struct {
 }
 
 type InspectServerSetupResult struct {
-	OK          bool            `json:"ok"`
-	State       DesktopState    `json:"state"`
-	Report      mcimport.Report `json:"report"`
-	JavaVersion string          `json:"javaVersion"`
-	JavaPath    string          `json:"javaPath"`
-	Message     string          `json:"message"`
-	Warnings    []string        `json:"warnings,omitempty"`
+	OK                  bool                      `json:"ok"`
+	InspectionOK        bool                      `json:"inspectionOk"`
+	LaunchReady         bool                      `json:"launchReady"`
+	State               DesktopState              `json:"state"`
+	Report              mcimport.Report           `json:"report"`
+	LaunchProfile       mcimport.LaunchProfile    `json:"launchProfile"`
+	Candidates          mcimport.LaunchCandidates `json:"candidates"`
+	RequiredJavaVersion string                    `json:"requiredJavaVersion,omitempty"`
+	DetectedJavaVersion string                    `json:"detectedJavaVersion,omitempty"`
+	DetectedJavaPath    string                    `json:"detectedJavaPath,omitempty"`
+	JavaCompatibility   string                    `json:"javaCompatibility,omitempty"`
+	JavaVersion         string                    `json:"javaVersion"`
+	JavaPath            string                    `json:"javaPath"`
+	Message             string                    `json:"message"`
+	BlockingReasons     []string                  `json:"blockingReasons,omitempty"`
+	Warnings            []string                  `json:"warnings,omitempty"`
 }
 
 type SetupCompleteResult struct {
@@ -483,36 +496,164 @@ func InspectServerForSetup(opts Options, serverDir string) (InspectServerSetupRe
 	if err != nil {
 		return InspectServerSetupResult{OK: false, State: StateError, Message: err.Error()}, nil
 	}
-	javaVersion, javaPath := ResolveJavaForServer(opts, report)
+	return saveInspectedServer(opts, report)
+}
+
+func inspectServerState(report mcimport.Report, java JavaResolution) DesktopState {
+	if !report.LaunchReady {
+		return StateServerNeedsLaunchSelection
+	}
+	if java.JavaCompatibility == "incompatible" {
+		return StateJavaNeedsRepair
+	}
+	return StateReadyToStart
+}
+
+func ServerLaunchCandidates(opts Options) (mcimport.LaunchCandidates, error) {
+	opts = withDefaults(opts)
+	setup, _ := LoadSetup(opts)
+	if strings.TrimSpace(setup.ServerDir) == "" {
+		return mcimport.LaunchCandidates{}, fmt.Errorf("请先选择 Minecraft 服务端目录")
+	}
+	report, err := mcimport.Inspect(setup.ServerDir)
+	if err != nil {
+		return mcimport.LaunchCandidates{}, err
+	}
+	return report.Candidates, nil
+}
+
+func SelectServerLaunch(opts Options, selectedPath string) (InspectServerSetupResult, error) {
+	opts = withDefaults(opts)
+	setup, _ := LoadSetup(opts)
+	if strings.TrimSpace(setup.ServerDir) == "" {
+		return InspectServerSetupResult{OK: false, State: StateUnconfigured, Message: "请先选择 Minecraft 服务端目录。"}, nil
+	}
+	report, err := mcimport.SelectLaunchProfile(setup.ServerDir, selectedPath)
+	if err != nil {
+		return InspectServerSetupResult{OK: false, State: StateServerNeedsLaunchSelection, Message: err.Error()}, nil
+	}
+	return saveInspectedServer(opts, report)
+}
+
+func CurrentLaunchProfile(opts Options) (mcimport.LaunchProfile, error) {
+	opts = withDefaults(opts)
+	setup, _ := LoadSetup(opts)
+	if setup.LaunchProfile.Kind != "" {
+		profile := setup.LaunchProfile
+		report := mcimport.Report{
+			ServerDir:           setup.ServerDir,
+			ServerType:          profile.ServerType,
+			JavaRequirement:     profile.RequiredJavaVersion,
+			RequiredJavaVersion: profile.RequiredJavaVersion,
+			LaunchProfile:       profile,
+		}
+		java := ResolveJavaForServer(opts, report)
+		profile.JavaPath = java.DetectedJavaPath
+		profile.RequiredJavaVersion = java.RequiredJavaVersion
+		profile.DetectedJavaVersion = java.DetectedJavaVersion
+		profile.JavaCompatibility = java.JavaCompatibility
+		return profile, nil
+	}
+	if strings.TrimSpace(setup.ServerDir) == "" {
+		return mcimport.LaunchProfile{}, fmt.Errorf("请先选择 Minecraft 服务端目录")
+	}
+	report, err := mcimport.Inspect(setup.ServerDir)
+	if err != nil {
+		return mcimport.LaunchProfile{}, err
+	}
+	java := ResolveJavaForServer(opts, report)
+	report.LaunchProfile.JavaPath = java.DetectedJavaPath
+	report.LaunchProfile.RequiredJavaVersion = java.RequiredJavaVersion
+	report.LaunchProfile.DetectedJavaVersion = java.DetectedJavaVersion
+	report.LaunchProfile.JavaCompatibility = java.JavaCompatibility
+	return report.LaunchProfile, nil
+}
+
+func ClearLaunchProfile(opts Options) (map[string]any, error) {
+	opts = withDefaults(opts)
+	setup, _ := LoadSetup(opts)
+	setup.ServerCore = ""
+	setup.LaunchProfile = mcimport.LaunchProfile{}
+	setup.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := SaveSetup(opts, setup); err != nil {
+		return nil, err
+	}
+	if cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName)); err == nil {
+		cfg.Server.Command = ""
+		if err := agentconfig.Save(filepath.Join(opts.AppDataDir, agentconfig.FileName), cfg); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"ok": true, "message": "已清除启动文件选择。"}, nil
+}
+
+func saveInspectedServer(opts Options, report mcimport.Report) (InspectServerSetupResult, error) {
+	java := ResolveJavaForServer(opts, report)
+	report.LaunchProfile.JavaPath = java.DetectedJavaPath
+	report.LaunchProfile.RequiredJavaVersion = java.RequiredJavaVersion
+	report.LaunchProfile.DetectedJavaVersion = java.DetectedJavaVersion
+	report.LaunchProfile.JavaCompatibility = java.JavaCompatibility
+	report.JavaRequirement = java.RequiredJavaVersion
+	report.RequiredJavaVersion = java.RequiredJavaVersion
+	state := inspectServerState(report, java)
+	blockingReasons := append([]string{}, report.BlockingReasons...)
+	if !report.EULAAccepted {
+		blockingReasons = append(blockingReasons, "Minecraft EULA 尚未接受。")
+	}
+	if java.JavaCompatibility == "incompatible" {
+		blockingReasons = append(blockingReasons, "当前 Java 版本与服务端要求不兼容。")
+	}
+	ok := report.LaunchReady && report.EULAAccepted && java.JavaCompatibility != "incompatible"
+	message := "Minecraft 服务端目录已检测。"
+	if !report.LaunchReady {
+		message = "服务端目录已检测，但尚未识别启动方式。"
+	}
 	setup, _ := LoadSetup(opts)
 	setup.ServerDir = report.ServerDir
 	setup.ServerType = string(report.ServerType)
 	setup.ServerCore = report.LaunchEntry
 	setup.ServerPort = report.ServerPort
 	setup.WorldDir = report.WorldDir
-	setup.JavaVersion = javaVersion
-	setup.JavaPath = javaPath
+	setup.JavaVersion = java.DetectedJavaVersion
+	setup.JavaPath = java.DetectedJavaPath
+	setup.LaunchProfile = report.LaunchProfile
 	setup.EULAAccepted = report.EULAAccepted
 	setup.UpdatedAt = time.Now().Format(time.RFC3339)
 	if err := SaveSetup(opts, setup); err != nil {
 		return InspectServerSetupResult{}, err
 	}
-	if cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName)); err == nil {
+	if cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName)); err == nil && report.LaunchReady {
 		cfg.Server = serverConfigFromReport(opts, report)
 		if err := agentconfig.Save(filepath.Join(opts.AppDataDir, agentconfig.FileName), cfg); err != nil {
 			return InspectServerSetupResult{}, err
 		}
 	}
 	return InspectServerSetupResult{
-		OK: report.LaunchEntry != "", State: StateBootstrapReady, Report: report,
-		JavaVersion: javaVersion, JavaPath: javaPath, Message: "Minecraft 服务端目录已检测。",
-		Warnings: report.Warnings,
+		OK: ok, InspectionOK: report.InspectionOK, LaunchReady: report.LaunchReady, State: state, Report: report,
+		LaunchProfile: report.LaunchProfile, Candidates: report.Candidates,
+		RequiredJavaVersion: java.RequiredJavaVersion, DetectedJavaVersion: java.DetectedJavaVersion,
+		DetectedJavaPath: java.DetectedJavaPath, JavaCompatibility: java.JavaCompatibility,
+		JavaVersion: java.DetectedJavaVersion, JavaPath: java.DetectedJavaPath, Message: message,
+		BlockingReasons: blockingReasons, Warnings: report.Warnings,
 	}, nil
 }
 
 func serverConfigFromSetup(opts Options, setup SetupState) agentconfig.ServerConfig {
 	if strings.TrimSpace(setup.ServerDir) == "" {
 		return agentconfig.ServerConfig{}
+	}
+	if setup.LaunchProfile.Kind != "" && (setup.LaunchProfile.ScriptPath != "" || setup.LaunchProfile.JarPath != "") {
+		entry := setup.LaunchProfile.ScriptPath
+		if entry == "" {
+			entry = setup.LaunchProfile.JarPath
+		}
+		opts = withDefaults(opts)
+		return agentconfig.ServerConfig{
+			Dir:         setup.ServerDir,
+			Command:     mcimport.SuggestedCommand(entry),
+			LogDir:      filepath.Join(opts.AppDataDir, "logs", "minecraft"),
+			StopTimeout: (30 * time.Second).String(),
+		}
 	}
 	if report, err := mcimport.Inspect(setup.ServerDir); err == nil {
 		return serverConfigFromReport(opts, report)
@@ -535,25 +676,113 @@ func serverConfigFromReport(opts Options, report mcimport.Report) agentconfig.Se
 	}
 }
 
-func ResolveJavaForServer(opts Options, report mcimport.Report) (string, string) {
+type JavaResolution struct {
+	RequiredJavaVersion string `json:"requiredJavaVersion,omitempty"`
+	DetectedJavaVersion string `json:"detectedJavaVersion,omitempty"`
+	DetectedJavaPath    string `json:"detectedJavaPath,omitempty"`
+	JavaCompatibility   string `json:"javaCompatibility"`
+}
+
+func ResolveJavaForServer(opts Options, report mcimport.Report) JavaResolution {
 	opts = withDefaults(opts)
-	required := report.JavaRequirement
+	required := report.RequiredJavaVersion
 	if required == "" {
-		required = "17"
+		required = report.JavaRequirement
 	}
+	res := JavaResolution{RequiredJavaVersion: required, JavaCompatibility: "unknown"}
 	candidates := []string{
 		filepath.Join(report.ServerDir, "runtime", "bin", exeName("java")),
-		filepath.Join(opts.AppDataDir, "runtime", "java", required, "bin", exeName("java")),
+	}
+	if required != "" {
+		candidates = append(candidates, filepath.Join(opts.AppDataDir, "runtime", "java", required, "bin", exeName("java")))
 	}
 	for _, candidate := range candidates {
 		if fileExists(candidate) {
-			return required, candidate
+			res.DetectedJavaPath = candidate
+			res.DetectedJavaVersion = DetectJavaVersion(candidate)
+			res.JavaCompatibility = JavaCompatibility(required, res.DetectedJavaVersion, report.ServerType)
+			return res
 		}
 	}
 	if systemJava, err := exec.LookPath("java"); err == nil {
-		return required, systemJava
+		res.DetectedJavaPath = systemJava
+		res.DetectedJavaVersion = DetectJavaVersion(systemJava)
+		res.JavaCompatibility = JavaCompatibility(required, res.DetectedJavaVersion, report.ServerType)
+		return res
 	}
-	return required, ""
+	return res
+}
+
+func DetectJavaVersion(javaPath string) string {
+	if strings.TrimSpace(javaPath) == "" {
+		return ""
+	}
+	cmd := exec.Command(javaPath, "-version")
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return ""
+	}
+	return DetectJavaMajorVersionFromOutput(string(out))
+}
+
+func DetectJavaMajorVersionFromOutput(output string) string {
+	lower := strings.ToLower(output)
+	for _, marker := range []string{"version \"", "openjdk version \""} {
+		if idx := strings.Index(lower, marker); idx >= 0 {
+			start := idx + len(marker)
+			rest := output[start:]
+			if end := strings.Index(rest, "\""); end >= 0 {
+				return javaMajor(rest[:end])
+			}
+		}
+	}
+	fields := strings.Fields(output)
+	for _, field := range fields {
+		if strings.Contains(field, ".") || strings.Trim(field, "\"") == field {
+			if major := javaMajor(strings.Trim(field, "\"")); major != "" {
+				return major
+			}
+		}
+	}
+	return ""
+}
+
+func javaMajor(version string) string {
+	version = strings.TrimSpace(version)
+	if strings.HasPrefix(version, "1.8") {
+		return "8"
+	}
+	var b strings.Builder
+	for _, r := range version {
+		if r < '0' || r > '9' {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func JavaCompatibility(required string, detected string, serverType mcimport.ServerType) string {
+	if required == "" || detected == "" {
+		return "unknown"
+	}
+	req, reqErr := strconv.Atoi(required)
+	got, gotErr := strconv.Atoi(detected)
+	if reqErr != nil || gotErr != nil {
+		return "unknown"
+	}
+	if got < req {
+		return "incompatible"
+	}
+	if got == req {
+		return "compatible"
+	}
+	switch serverType {
+	case mcimport.Forge, mcimport.NeoForge, mcimport.Cleanroom, mcimport.CustomScript:
+		return "warning"
+	default:
+		return "compatible"
+	}
 }
 
 func CompleteSetup(opts Options) (SetupCompleteResult, error) {

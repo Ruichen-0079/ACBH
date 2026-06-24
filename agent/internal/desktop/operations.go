@@ -842,7 +842,8 @@ func StartServer(opts Options) (StartServerResult, error) {
 	}
 
 	jar := report.LaunchJar
-	if report.LaunchEntry == "" {
+	launchCommand := cfg.Server.Command
+	if report.LaunchEntry == "" && launchCommand == "" {
 		res.ErrorCode = "missing_launch_entry"
 		res.Message = "找不到服务端启动入口。请重新导入 Minecraft 服务端目录。"
 		res.Suggestion = "请确认根目录中存在 run.bat、start.bat 或受支持的服务端 jar。"
@@ -877,7 +878,6 @@ func StartServer(opts Options) (StartServerResult, error) {
 	}
 
 	// launch command from config or default
-	launchCommand := cfg.Server.Command
 	if launchCommand == "" {
 		launchCommand = report.SuggestedCommand
 	}

@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
+	"github.com/Ruichen-0079/ACBH/agent/internal/mcimport"
 )
 
 func TestChineseErrorMessages(t *testing.T) {
@@ -132,6 +133,93 @@ func TestCheckEnvironmentWritesReport(t *testing.T) {
 	}
 	if _, err := os.Stat(report.EnvironmentReportPath); err != nil {
 		t.Fatalf("environment report was not written: %v", err)
+	}
+}
+
+func TestInspectServerForSetupSeparatesInspectionAndLaunchReadiness(t *testing.T) {
+	tempDir := t.TempDir()
+	serverDir := filepath.Join(tempDir, "server")
+	if err := os.MkdirAll(serverDir, 0o700); err != nil {
+		t.Fatalf("mkdir server: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "server.properties"), []byte("server-port=25565\n"), 0o600); err != nil {
+		t.Fatalf("write properties: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "eula.txt"), []byte("eula=true\n"), 0o600); err != nil {
+		t.Fatalf("write eula: %v", err)
+	}
+
+	result, err := InspectServerForSetup(Options{AppDataDir: filepath.Join(tempDir, "data")}, serverDir)
+	if err != nil {
+		t.Fatalf("InspectServerForSetup() error = %v", err)
+	}
+	if !result.InspectionOK {
+		t.Fatal("InspectionOK = false, want true")
+	}
+	if result.LaunchReady || result.OK {
+		t.Fatalf("LaunchReady=%v OK=%v, want both false", result.LaunchReady, result.OK)
+	}
+	if result.State != StateServerNeedsLaunchSelection {
+		t.Fatalf("State = %s, want %s", result.State, StateServerNeedsLaunchSelection)
+	}
+	if len(result.BlockingReasons) == 0 {
+		t.Fatal("BlockingReasons is empty")
+	}
+}
+
+func TestDetectJavaMajorVersionFromOutput(t *testing.T) {
+	cases := map[string]string{
+		`openjdk version "21.0.11" 2026-04-15`:  "21",
+		`java version "17.0.10" 2024-01-16 LTS`: "17",
+		`java version "1.8.0_402"`:              "8",
+	}
+	for input, want := range cases {
+		if got := DetectJavaMajorVersionFromOutput(input); got != want {
+			t.Fatalf("DetectJavaMajorVersionFromOutput(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestJavaCompatibilityWarnsForForgeOnNewerJava(t *testing.T) {
+	if got := JavaCompatibility("17", "21", mcimport.Forge); got != "warning" {
+		t.Fatalf("JavaCompatibility Forge 17/21 = %q, want warning", got)
+	}
+	if got := JavaCompatibility("17", "21", mcimport.Paper); got != "compatible" {
+		t.Fatalf("JavaCompatibility Paper 17/21 = %q, want compatible", got)
+	}
+	if got := JavaCompatibility("21", "17", mcimport.Fabric); got != "incompatible" {
+		t.Fatalf("JavaCompatibility Fabric 21/17 = %q, want incompatible", got)
+	}
+}
+
+func TestSelectServerLaunchSavesProfile(t *testing.T) {
+	tempDir := t.TempDir()
+	serverDir := filepath.Join(tempDir, "server")
+	if err := os.MkdirAll(serverDir, 0o700); err != nil {
+		t.Fatalf("mkdir server: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "server-a.jar"), []byte(""), 0o600); err != nil {
+		t.Fatalf("write server-a: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "server-b.jar"), []byte(""), 0o600); err != nil {
+		t.Fatalf("write server-b: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "server.properties"), []byte("server-port=25565\n"), 0o600); err != nil {
+		t.Fatalf("write properties: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "eula.txt"), []byte("eula=true\n"), 0o600); err != nil {
+		t.Fatalf("write eula: %v", err)
+	}
+	opts := Options{AppDataDir: filepath.Join(tempDir, "data")}
+	if _, err := InspectServerForSetup(opts, serverDir); err != nil {
+		t.Fatalf("InspectServerForSetup() error = %v", err)
+	}
+	result, err := SelectServerLaunch(opts, "server-b.jar")
+	if err != nil {
+		t.Fatalf("SelectServerLaunch() error = %v", err)
+	}
+	if !result.LaunchReady || result.LaunchProfile.JarPath != "server-b.jar" {
+		t.Fatalf("LaunchReady=%v profile=%+v", result.LaunchReady, result.LaunchProfile)
 	}
 }
 

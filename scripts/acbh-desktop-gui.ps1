@@ -32,6 +32,7 @@ if ($SelfTest) {
 
 $script:ToolTip = New-Object System.Windows.Forms.ToolTip
 $script:LastStatus = $null
+$script:LastInspectResult = $null
 $script:Running = $false
 $script:CurrentState = "Unconfigured"
 
@@ -186,7 +187,7 @@ function Invoke-AgentCommandSafe {
     try {
         Set-Busy $true "$ActionName ..."
         $result = Invoke-AgentProcess -CommandArgs $CommandArgs -ExtraEnv $ExtraEnv
-        if ($result.Output) { Add-GuiLog $result.Output }
+        if ($result.Output -and -not $Json) { Add-GuiLog $result.Output }
         if ($result.ExitCode -ne 0) {
             Show-GuiError "$ActionName 失败。请查看日志区。"
             return $null
@@ -322,10 +323,99 @@ function Choose-ServerDir {
     $txtServerDir.Text = $dialog.SelectedPath
     $result = Invoke-AgentCommandSafe -ActionName "检测 Minecraft 服务端" -Args @("desktop", "setup", "inspect-server", "--app-data-dir", $AppDataDir, "--server-dir", $dialog.SelectedPath) -Json
     if ($null -ne $result) {
-        $txtServerSummary.Text = "类型：" + $result.report.serverType + " / 启动入口：" + $result.report.launchEntry + " / Java：" + $result.javaVersion
-        $checkLabels[7].Text = "✓ Minecraft 服务端：" + $result.report.serverType
-        $checkLabels[7].ForeColor = [System.Drawing.Color]::DarkGreen
+        Update-ServerSummary $result
+        if (-not $result.launchReady) {
+            Show-GuiError "已检测到 Minecraft 服务端，但无法确定启动文件。请选择 run.bat、start.bat 或服务端核心 JAR。"
+        }
     }
+}
+
+function Update-ServerSummary {
+    param([object]$Result)
+    $script:LastInspectResult = $Result
+    $profile = $Result.launchProfile
+    $entry = ""
+    if ($profile.scriptPath) { $entry = $profile.scriptPath }
+    elseif ($profile.jarPath) { $entry = $profile.jarPath }
+    elseif ($Result.report.launchEntry) { $entry = $Result.report.launchEntry }
+    else { $entry = "需要选择" }
+    $requiredJava = $(if ($Result.requiredJavaVersion) { $Result.requiredJavaVersion } else { "未知" })
+    $detectedJava = $(if ($Result.detectedJavaVersion) { $Result.detectedJavaVersion } else { "未检测到" })
+    $eulaText = $(if ($Result.report.eulaAccepted) { "已接受" } else { "未接受" })
+    $statusText = switch ([string]$Result.state) {
+        "ReadyToStart" { "可以启动" }
+        "ServerNeedsLaunchSelection" { "需要选择启动文件" }
+        "JavaNeedsRepair" { "需要修复 Java" }
+        default { [string]$Result.state }
+    }
+    $txtServerSummary.Text = @(
+        "目录：" + $Result.report.serverDir,
+        "服务端类型：" + $Result.report.serverType + "    启动方式：" + $entry,
+        "需要 Java：" + $requiredJava + "    当前 Java：" + $detectedJava,
+        "EULA：" + $eulaText + "    端口：" + $Result.report.serverPort,
+        "状态：" + $statusText
+    ) -join [Environment]::NewLine
+    if ($Result.launchReady) {
+        $checkLabels[7].Text = "✓ Minecraft 服务端：" + $Result.report.serverType
+        $checkLabels[7].ForeColor = [System.Drawing.Color]::DarkGreen
+    } else {
+        $checkLabels[7].Text = "△ Minecraft 服务端：需要选择启动文件"
+        $checkLabels[7].ForeColor = [System.Drawing.Color]::DarkOrange
+    }
+    Add-GuiLog ("服务端检测：" + $statusText + "，类型：" + $Result.report.serverType + "，启动方式：" + $entry)
+}
+
+function Select-LaunchFile {
+    param([string]$Filter, [string]$Title)
+    $serverDir = $txtServerDir.Text.Trim()
+    if (-not $serverDir) {
+        Show-GuiError "请先选择 Minecraft 服务端目录。"
+        return
+    }
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = $Title
+    $dialog.InitialDirectory = $serverDir
+    $dialog.Filter = $Filter
+    if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    $result = Invoke-AgentCommandSafe -ActionName "选择启动文件" -Args @("desktop", "server", "select-launch", "--app-data-dir", $AppDataDir, "--path", $dialog.FileName) -Json
+    if ($null -ne $result) { Update-ServerSummary $result }
+}
+
+function Use-RecommendedLaunch {
+    if ($null -eq $script:LastInspectResult -or $null -eq $script:LastInspectResult.candidates -or $null -eq $script:LastInspectResult.candidates.recommended) {
+        Show-GuiError "当前没有可用的自动推荐。"
+        return
+    }
+    $profile = $script:LastInspectResult.candidates.recommended
+    $path = $(if ($profile.scriptPath) { $profile.scriptPath } else { $profile.jarPath })
+    if (-not $path) {
+        Show-GuiError "当前没有可用的自动推荐。"
+        return
+    }
+    $result = Invoke-AgentCommandSafe -ActionName "使用自动推荐" -Args @("desktop", "server", "select-launch", "--app-data-dir", $AppDataDir, "--path", $path) -Json
+    if ($null -ne $result) { Update-ServerSummary $result }
+}
+
+function Open-ServerDir {
+    $serverDir = $txtServerDir.Text.Trim()
+    if (-not $serverDir) {
+        Show-GuiError "请先选择 Minecraft 服务端目录。"
+        return
+    }
+    Start-Process $serverDir
+}
+
+function Show-LaunchEvidence {
+    if ($null -eq $script:LastInspectResult) {
+        Show-GuiError "请先检测 Minecraft 服务端目录。"
+        return
+    }
+    $lines = @()
+    if ($script:LastInspectResult.launchProfile.evidence) { $lines += $script:LastInspectResult.launchProfile.evidence }
+    if ($script:LastInspectResult.blockingReasons) { $lines += $script:LastInspectResult.blockingReasons }
+    if ($script:LastInspectResult.warnings) { $lines += $script:LastInspectResult.warnings }
+    if ($lines.Count -eq 0) { $lines = @("暂无额外识别证据。") }
+    [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "识别证据", "OK", "Information") | Out-Null
 }
 
 function Complete-Setup {
@@ -408,7 +498,7 @@ function Add-Button {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(1040, 760)
+$form.Size = New-Object System.Drawing.Size(1040, 840)
 $form.MinimumSize = New-Object System.Drawing.Size(980, 700)
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
 
@@ -450,7 +540,7 @@ Add-Button $bootstrapPanel "重新检查环境" 280 150 { Run-EnvironmentCheck }
 $setupPanel = New-Object System.Windows.Forms.GroupBox
 $setupPanel.Text = "四步配置"
 $setupPanel.Location = New-Object System.Drawing.Point(510, 70)
-$setupPanel.Size = New-Object System.Drawing.Size(490, 300)
+$setupPanel.Size = New-Object System.Drawing.Size(490, 470)
 $form.Controls.Add($setupPanel)
 
 $lbl1 = New-Object System.Windows.Forms.Label
@@ -507,14 +597,22 @@ $txtServerDir.ReadOnly = $true
 $setupPanel.Controls.Add($txtServerDir)
 Add-Button $setupPanel "选择目录" 304 248 { Choose-ServerDir } ""
 
-$txtServerSummary = New-Object System.Windows.Forms.Label
-$txtServerSummary.Location = New-Object System.Drawing.Point(18, 276)
-$txtServerSummary.Size = New-Object System.Drawing.Size(445, 20)
+$txtServerSummary = New-Object System.Windows.Forms.TextBox
+$txtServerSummary.Location = New-Object System.Drawing.Point(18, 280)
+$txtServerSummary.Size = New-Object System.Drawing.Size(445, 64)
+$txtServerSummary.Multiline = $true
+$txtServerSummary.ScrollBars = "Vertical"
+$txtServerSummary.ReadOnly = $true
 $setupPanel.Controls.Add($txtServerSummary)
+Add-Button $setupPanel "自动推荐" 18 350 { Use-RecommendedLaunch } ""
+Add-Button $setupPanel "选择启动脚本" 198 350 { Select-LaunchFile "启动脚本 (*.bat;*.ps1)|*.bat;*.ps1|All files (*.*)|*.*" "选择启动脚本" } ""
+Add-Button $setupPanel "选择核心 JAR" 18 384 { Select-LaunchFile "Minecraft 核心 (*.jar)|*.jar|All files (*.*)|*.*" "选择服务端核心 JAR" } ""
+Add-Button $setupPanel "打开服务端目录" 198 384 { Open-ServerDir } ""
+Add-Button $setupPanel "查看识别证据" 18 418 { Show-LaunchEvidence } ""
 
 $mainPanel = New-Object System.Windows.Forms.GroupBox
 $mainPanel.Text = "主界面"
-$mainPanel.Location = New-Object System.Drawing.Point(20, 280)
+$mainPanel.Location = New-Object System.Drawing.Point(20, 310)
 $mainPanel.Size = New-Object System.Drawing.Size(470, 180)
 $form.Controls.Add($mainPanel)
 
@@ -538,7 +636,7 @@ Add-Button $mainPanel "打开日志" 204 140 { Open-LogDir } ""
 
 $advancedPanel = New-Object System.Windows.Forms.GroupBox
 $advancedPanel.Text = "高级诊断"
-$advancedPanel.Location = New-Object System.Drawing.Point(510, 385)
+$advancedPanel.Location = New-Object System.Drawing.Point(510, 550)
 $advancedPanel.Size = New-Object System.Drawing.Size(490, 96)
 $advancedPanel.Visible = $false
 $form.Controls.Add($advancedPanel)
@@ -551,8 +649,8 @@ Add-Button $advancedPanel "清理 runtime cache" 192 58 { Invoke-AgentCommandSaf
 $btnAdvanced = Add-Button $form "高级诊断" 830 28 { $advancedPanel.Visible = -not $advancedPanel.Visible } "默认隐藏高级 CLI 能力。"
 
 $script:LogBox = New-Object System.Windows.Forms.TextBox
-$script:LogBox.Location = New-Object System.Drawing.Point(20, 500)
-$script:LogBox.Size = New-Object System.Drawing.Size(980, 200)
+$script:LogBox.Location = New-Object System.Drawing.Point(20, 650)
+$script:LogBox.Size = New-Object System.Drawing.Size(980, 140)
 $script:LogBox.Multiline = $true
 $script:LogBox.ScrollBars = "Vertical"
 $script:LogBox.ReadOnly = $true

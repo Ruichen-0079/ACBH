@@ -13,36 +13,73 @@ import (
 type ServerType string
 
 const (
-	Fabric    ServerType = "Fabric"
-	Paper     ServerType = "Paper"
-	Purpur    ServerType = "Purpur"
-	Forge     ServerType = "Forge"
-	NeoForge  ServerType = "NeoForge"
-	Cleanroom ServerType = "Cleanroom"
-	Vanilla   ServerType = "Vanilla"
-	Velocity  ServerType = "Velocity"
-	Unknown   ServerType = "Unknown"
+	Fabric       ServerType = "Fabric"
+	Paper        ServerType = "Paper"
+	Purpur       ServerType = "Purpur"
+	Forge        ServerType = "Forge"
+	NeoForge     ServerType = "NeoForge"
+	Cleanroom    ServerType = "Cleanroom"
+	Vanilla      ServerType = "Vanilla"
+	Velocity     ServerType = "Velocity"
+	CustomScript ServerType = "CustomScript"
+	GenericJar   ServerType = "GenericJar"
+	Unknown      ServerType = "Unknown"
 )
 
 type Report struct {
-	ServerDir        string            `json:"serverDir"`
-	ServerType       ServerType        `json:"serverType"`
-	LaunchJar        string            `json:"launchJar,omitempty"`
-	LaunchEntry      string            `json:"launchEntry,omitempty"`
-	LaunchCandidates []string          `json:"launchCandidates,omitempty"`
-	SuggestedCommand string            `json:"suggestedCommand,omitempty"`
-	JavaRequirement  string            `json:"javaRequirement,omitempty"`
-	ServerPort       string            `json:"serverPort,omitempty"`
-	WorldDir         string            `json:"worldDir,omitempty"`
-	HasMods          bool              `json:"hasMods"`
-	HasConfig        bool              `json:"hasConfig"`
-	HasWorld         bool              `json:"hasWorld"`
-	HasProperties    bool              `json:"hasProperties"`
-	HasEULA          bool              `json:"hasEula"`
-	EULAAccepted     bool              `json:"eulaAccepted"`
-	Properties       map[string]string `json:"properties,omitempty"`
-	RCON             RCONReport        `json:"rcon"`
-	Warnings         []string          `json:"warnings,omitempty"`
+	ServerDir           string            `json:"serverDir"`
+	ServerType          ServerType        `json:"serverType"`
+	InspectionOK        bool              `json:"inspectionOk"`
+	LaunchReady         bool              `json:"launchReady"`
+	LaunchJar           string            `json:"launchJar,omitempty"`
+	LaunchEntry         string            `json:"launchEntry,omitempty"`
+	LaunchCandidates    []string          `json:"launchCandidates,omitempty"`
+	LaunchProfile       LaunchProfile     `json:"launchProfile"`
+	Candidates          LaunchCandidates  `json:"candidates"`
+	BlockingReasons     []string          `json:"blockingReasons,omitempty"`
+	SuggestedCommand    string            `json:"suggestedCommand,omitempty"`
+	JavaRequirement     string            `json:"javaRequirement,omitempty"`
+	RequiredJavaVersion string            `json:"requiredJavaVersion,omitempty"`
+	ServerPort          string            `json:"serverPort,omitempty"`
+	WorldDir            string            `json:"worldDir,omitempty"`
+	HasMods             bool              `json:"hasMods"`
+	HasConfig           bool              `json:"hasConfig"`
+	HasWorld            bool              `json:"hasWorld"`
+	HasProperties       bool              `json:"hasProperties"`
+	HasEULA             bool              `json:"hasEula"`
+	EULAAccepted        bool              `json:"eulaAccepted"`
+	Properties          map[string]string `json:"properties,omitempty"`
+	RCON                RCONReport        `json:"rcon"`
+	Warnings            []string          `json:"warnings,omitempty"`
+}
+
+type LaunchProfile struct {
+	Kind                string     `json:"kind"`
+	ServerType          ServerType `json:"serverType"`
+	ScriptPath          string     `json:"scriptPath,omitempty"`
+	JarPath             string     `json:"jarPath,omitempty"`
+	WorkingDirectory    string     `json:"workingDirectory"`
+	JavaPath            string     `json:"javaPath,omitempty"`
+	RequiredJavaVersion string     `json:"requiredJavaVersion,omitempty"`
+	DetectedJavaVersion string     `json:"detectedJavaVersion,omitempty"`
+	JavaCompatibility   string     `json:"javaCompatibility,omitempty"`
+	Confidence          string     `json:"confidence"`
+	Evidence            []string   `json:"evidence,omitempty"`
+}
+
+type LaunchCandidate struct {
+	Path       string     `json:"path"`
+	Kind       string     `json:"kind"`
+	ServerType ServerType `json:"serverType"`
+	Confidence string     `json:"confidence"`
+	Evidence   []string   `json:"evidence,omitempty"`
+}
+
+type LaunchCandidates struct {
+	Scripts     []LaunchCandidate `json:"scripts"`
+	Jars        []LaunchCandidate `json:"jars"`
+	Recommended *LaunchProfile    `json:"recommended,omitempty"`
+	Warnings    []string          `json:"warnings,omitempty"`
 }
 
 type RCONReport struct {
@@ -65,7 +102,7 @@ func Inspect(serverDir string) (Report, error) {
 		return Report{}, fmt.Errorf("服务端路径不是目录: %s", serverDir)
 	}
 
-	report := Report{ServerDir: serverDir, ServerType: Unknown}
+	report := Report{ServerDir: serverDir, ServerType: Unknown, InspectionOK: true}
 	report.HasMods = exists(filepath.Join(serverDir, "mods"))
 	report.HasConfig = exists(filepath.Join(serverDir, "config"))
 	report.HasWorld = exists(filepath.Join(serverDir, "world"))
@@ -75,10 +112,24 @@ func Inspect(serverDir string) (Report, error) {
 	report.ServerType = detection.kind
 	report.LaunchEntry = detection.entry
 	report.LaunchJar = detection.jar
-	report.LaunchCandidates = detection.candidates
+	report.LaunchCandidates = detection.candidatePaths()
+	report.Candidates = detection.candidates
+	report.LaunchProfile = detection.profile
+	report.LaunchReady = detection.profile.Kind != "" && detection.profile.Kind != "unresolved"
 	report.JavaRequirement = javaRequirementFor(detection.kind)
+	report.RequiredJavaVersion = report.JavaRequirement
 	if report.LaunchEntry != "" {
 		report.SuggestedCommand = suggestedCommand(report.LaunchEntry)
+	}
+	if report.LaunchReady && report.SuggestedCommand == "" {
+		if report.LaunchProfile.ScriptPath != "" {
+			report.SuggestedCommand = suggestedCommand(report.LaunchProfile.ScriptPath)
+		} else if report.LaunchProfile.JarPath != "" {
+			report.SuggestedCommand = suggestedCommand(report.LaunchProfile.JarPath)
+		}
+	}
+	if !report.LaunchReady {
+		report.BlockingReasons = append(report.BlockingReasons, "未识别到可用的启动脚本或服务端核心，请选择启动文件。")
 	}
 	if !report.HasProperties {
 		report.Warnings = append(report.Warnings, "未找到 server.properties，请确认选择的是服务端根目录。")
@@ -118,47 +169,152 @@ func Inspect(serverDir string) (Report, error) {
 	return report, nil
 }
 
+func SelectLaunchProfile(serverDir string, selectedPath string) (Report, error) {
+	report, err := Inspect(serverDir)
+	if err != nil {
+		return report, err
+	}
+	rel, err := normalizeSelectedPath(report.ServerDir, selectedPath)
+	if err != nil {
+		return report, err
+	}
+	for _, candidate := range report.Candidates.Scripts {
+		if sameLaunchPath(candidate.Path, rel) {
+			report.ServerType = candidate.ServerType
+			report.LaunchEntry = candidate.Path
+			report.LaunchJar = ""
+			report.LaunchReady = true
+			report.BlockingReasons = nil
+			report.LaunchProfile = LaunchProfile{
+				Kind: "script", ServerType: candidate.ServerType, ScriptPath: candidate.Path, WorkingDirectory: report.ServerDir,
+				RequiredJavaVersion: javaRequirementFor(candidate.ServerType), Confidence: candidate.Confidence, Evidence: candidate.Evidence,
+			}
+			report.SuggestedCommand = suggestedCommand(candidate.Path)
+			report.JavaRequirement = report.LaunchProfile.RequiredJavaVersion
+			report.RequiredJavaVersion = report.LaunchProfile.RequiredJavaVersion
+			return report, nil
+		}
+	}
+	for _, candidate := range report.Candidates.Jars {
+		if sameLaunchPath(candidate.Path, rel) {
+			report.ServerType = candidate.ServerType
+			report.LaunchEntry = candidate.Path
+			report.LaunchJar = candidate.Path
+			report.LaunchReady = true
+			report.BlockingReasons = nil
+			report.LaunchProfile = LaunchProfile{
+				Kind: "jar", ServerType: candidate.ServerType, JarPath: candidate.Path, WorkingDirectory: report.ServerDir,
+				RequiredJavaVersion: javaRequirementFor(candidate.ServerType), Confidence: candidate.Confidence, Evidence: candidate.Evidence,
+			}
+			report.SuggestedCommand = suggestedCommand(candidate.Path)
+			report.JavaRequirement = report.LaunchProfile.RequiredJavaVersion
+			report.RequiredJavaVersion = report.LaunchProfile.RequiredJavaVersion
+			return report, nil
+		}
+	}
+	return report, fmt.Errorf("选择的启动文件不在候选列表中: %s", selectedPath)
+}
+
+func normalizeSelectedPath(serverDir string, selectedPath string) (string, error) {
+	selectedPath = strings.TrimSpace(selectedPath)
+	if selectedPath == "" {
+		return "", fmt.Errorf("请选择启动文件")
+	}
+	clean := filepath.Clean(selectedPath)
+	if filepath.IsAbs(clean) {
+		rel, err := filepath.Rel(serverDir, clean)
+		if err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+			return "", fmt.Errorf("启动文件必须位于服务端目录内")
+		}
+		clean = rel
+	}
+	return filepath.ToSlash(clean), nil
+}
+
+func sameLaunchPath(a string, b string) bool {
+	return strings.EqualFold(filepath.ToSlash(filepath.Clean(a)), filepath.ToSlash(filepath.Clean(b)))
+}
+
 type launchDetection struct {
 	kind       ServerType
 	entry      string
 	jar        string
-	candidates []string
+	profile    LaunchProfile
+	candidates LaunchCandidates
 }
 
 func detectType(serverDir string) launchDetection {
-	var candidates []string
-	for _, script := range []string{"run.bat", "start.bat"} {
+	evidence := detectEvidence(serverDir)
+	scriptCandidates := make([]LaunchCandidate, 0)
+	for _, script := range []string{"run.bat", "start.bat", "server-start.bat", "start.ps1"} {
 		if exists(filepath.Join(serverDir, script)) {
-			candidates = append(candidates, script)
+			scriptCandidates = append(scriptCandidates, LaunchCandidate{
+				Path: script, Kind: "script", ServerType: CustomScript, Confidence: "high",
+				Evidence: append([]string{"发现 " + script}, evidence...),
+			})
 		}
 	}
 	jarCandidates := detectJarCandidates(serverDir)
-	candidates = append(candidates, jarCandidates...)
-	if len(candidates) == 0 {
-		return launchDetection{kind: Unknown}
+	if jarCandidates == nil {
+		jarCandidates = make([]LaunchCandidate, 0)
+	}
+	candidates := LaunchCandidates{Scripts: scriptCandidates, Jars: jarCandidates}
+
+	if len(scriptCandidates) > 0 {
+		entry := scriptCandidates[0].Path
+		profile := LaunchProfile{
+			Kind: "script", ServerType: CustomScript, ScriptPath: entry, WorkingDirectory: serverDir,
+			RequiredJavaVersion: javaRequirementFor(CustomScript), Confidence: "high",
+			Evidence: scriptCandidates[0].Evidence,
+		}
+		candidates.Recommended = &profile
+		jar := ""
+		if len(jarCandidates) > 0 {
+			jar = jarCandidates[0].Path
+		}
+		return launchDetection{kind: CustomScript, entry: entry, jar: jar, profile: profile, candidates: candidates}
 	}
 
-	entry := candidates[0]
-	kind := kindForEntry(entry)
-	jar := ""
-	if strings.HasSuffix(strings.ToLower(entry), ".jar") {
-		jar = entry
-	}
-	if strings.HasSuffix(strings.ToLower(entry), ".bat") {
-		for _, candidate := range jarCandidates {
-			jar = candidate
-			break
+	if len(jarCandidates) == 1 {
+		entry := jarCandidates[0].Path
+		kind := jarCandidates[0].ServerType
+		profile := LaunchProfile{
+			Kind: "jar", ServerType: kind, JarPath: entry, WorkingDirectory: serverDir,
+			RequiredJavaVersion: javaRequirementFor(kind), Confidence: jarCandidates[0].Confidence,
+			Evidence: jarCandidates[0].Evidence,
 		}
+		candidates.Recommended = &profile
+		return launchDetection{kind: kind, entry: entry, jar: entry, profile: profile, candidates: candidates}
 	}
-	return launchDetection{kind: kind, entry: entry, jar: jar, candidates: candidates}
+	if len(jarCandidates) > 1 {
+		profile := LaunchProfile{Kind: "unresolved", ServerType: Unknown, WorkingDirectory: serverDir, Confidence: "low", Evidence: append([]string{"发现多个可能的服务端核心"}, evidence...)}
+		candidates.Warnings = append(candidates.Warnings, "发现多个候选 JAR，请选择要启动的服务端核心。")
+		return launchDetection{kind: Unknown, profile: profile, candidates: candidates}
+	}
+	profile := LaunchProfile{Kind: "unresolved", ServerType: Unknown, WorkingDirectory: serverDir, Confidence: "low", Evidence: evidence}
+	return launchDetection{kind: Unknown, profile: profile, candidates: candidates}
 }
 
-func detectJarCandidates(serverDir string) []string {
+func (d launchDetection) candidatePaths() []string {
+	paths := make([]string, 0, len(d.candidates.Scripts)+len(d.candidates.Jars))
+	for _, candidate := range d.candidates.Scripts {
+		paths = append(paths, candidate.Path)
+	}
+	for _, candidate := range d.candidates.Jars {
+		paths = append(paths, candidate.Path)
+	}
+	return paths
+}
+
+func detectJarCandidates(serverDir string) []LaunchCandidate {
 	entries, err := os.ReadDir(serverDir)
 	if err != nil {
-		return nil
+		return []LaunchCandidate{}
 	}
-	var matches []string
+	var matches []LaunchCandidate
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -168,29 +324,68 @@ func detectJarCandidates(serverDir string) []string {
 		if !strings.HasSuffix(lower, ".jar") || excludedJarName(lower) {
 			continue
 		}
+		kind := kindForEntry(name)
+		if strings.HasPrefix(lower, "fabric-server-mc.") && strings.Contains(lower, "-launcher.") {
+			kind = Fabric
+		}
 		switch {
-		case name == "fabric-server-launch.jar":
-			matches = append(matches, name)
+		case name == "fabric-server-launch.jar", strings.HasPrefix(lower, "fabric-server-mc.") && strings.Contains(lower, "-launcher."):
+			matches = append(matches, launchCandidate(name, "jar", kind, "high", "发现 Fabric launcher JAR"))
 		case strings.HasPrefix(lower, "paper-"), lower == "paper.jar":
-			matches = append(matches, name)
+			matches = append(matches, launchCandidate(name, "jar", kind, "high", "发现 Paper JAR"))
 		case strings.HasPrefix(lower, "purpur-"), lower == "purpur.jar":
-			matches = append(matches, name)
+			matches = append(matches, launchCandidate(name, "jar", kind, "high", "发现 Purpur JAR"))
 		case strings.HasPrefix(lower, "forge-"), lower == "forge.jar":
-			matches = append(matches, name)
+			matches = append(matches, launchCandidate(name, "jar", kind, "high", "发现 Forge JAR"))
 		case strings.HasPrefix(lower, "neoforge-"), lower == "neoforge.jar":
-			matches = append(matches, name)
+			matches = append(matches, launchCandidate(name, "jar", kind, "high", "发现 NeoForge JAR"))
 		case strings.HasPrefix(lower, "cleanroom-"), lower == "cleanroom.jar":
-			matches = append(matches, name)
-		case strings.HasPrefix(lower, "velocity-"), lower == "velocity.jar":
-			matches = append(matches, name)
+			matches = append(matches, launchCandidate(name, "jar", kind, "high", "发现 Cleanroom JAR"))
+		case strings.HasPrefix(lower, "velocity"), lower == "velocity.jar":
+			matches = append(matches, launchCandidate(name, "jar", kind, "high", "发现 Velocity JAR"))
 		case lower == "server.jar":
-			matches = append(matches, name)
+			matches = append(matches, launchCandidate(name, "jar", Vanilla, "medium", "发现 server.jar"))
+		default:
+			matches = append(matches, launchCandidate(name, "jar", GenericJar, "medium", "发现单个可用 JAR"))
 		}
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
-		return jarPriority(matches[i]) < jarPriority(matches[j])
+		return jarPriority(matches[i].Path) < jarPriority(matches[j].Path)
 	})
+	for i := range matches {
+		matches[i].Evidence = append(matches[i].Evidence, detectEvidence(serverDir)...)
+	}
 	return matches
+}
+
+func launchCandidate(path string, kind string, serverType ServerType, confidence string, evidence string) LaunchCandidate {
+	return LaunchCandidate{Path: path, Kind: kind, ServerType: serverType, Confidence: confidence, Evidence: []string{evidence}}
+}
+
+func detectEvidence(serverDir string) []string {
+	var evidence []string
+	checks := []struct {
+		path string
+		msg  string
+	}{
+		{"mods", "发现 mods 目录"},
+		{"config", "发现 config 目录"},
+		{"server.properties", "发现 server.properties"},
+		{"user_jvm_args.txt", "发现 Forge/NeoForge user_jvm_args.txt"},
+		{"win_args.txt", "发现 Forge/NeoForge win_args.txt"},
+		{"unix_args.txt", "发现 Forge/NeoForge unix_args.txt"},
+		{filepath.Join("libraries", "net", "minecraftforge"), "发现 Forge libraries"},
+		{filepath.Join("libraries", "net", "neoforged"), "发现 NeoForge libraries"},
+		{filepath.Join("libraries", "net", "fabricmc"), "发现 Fabric libraries"},
+		{".fabric", "发现 .fabric 目录"},
+		{"velocity.toml", "发现 velocity.toml"},
+	}
+	for _, check := range checks {
+		if exists(filepath.Join(serverDir, check.path)) {
+			evidence = append(evidence, check.msg)
+		}
+	}
+	return evidence
 }
 
 func excludedJarName(lower string) bool {
@@ -206,13 +401,13 @@ func excludedJarName(lower string) bool {
 func jarPriority(name string) int {
 	lower := strings.ToLower(name)
 	switch {
-	case lower == "fabric-server-launch.jar":
+	case lower == "fabric-server-launch.jar", strings.HasPrefix(lower, "fabric-server-mc."):
 		return 10
 	case strings.HasPrefix(lower, "paper-"), lower == "paper.jar":
 		return 20
 	case strings.HasPrefix(lower, "purpur-"), lower == "purpur.jar":
 		return 21
-	case strings.HasPrefix(lower, "velocity-"), lower == "velocity.jar":
+	case strings.HasPrefix(lower, "velocity"), lower == "velocity.jar":
 		return 30
 	case lower == "server.jar":
 		return 40
@@ -230,9 +425,9 @@ func jarPriority(name string) int {
 func kindForEntry(entry string) ServerType {
 	lower := strings.ToLower(entry)
 	switch {
-	case strings.HasSuffix(lower, ".bat"):
-		return Unknown
-	case lower == "fabric-server-launch.jar":
+	case strings.HasSuffix(lower, ".bat"), strings.HasSuffix(lower, ".ps1"):
+		return CustomScript
+	case lower == "fabric-server-launch.jar", strings.HasPrefix(lower, "fabric-server-mc."):
 		return Fabric
 	case strings.HasPrefix(lower, "paper-"), lower == "paper.jar":
 		return Paper
@@ -244,12 +439,12 @@ func kindForEntry(entry string) ServerType {
 		return NeoForge
 	case strings.HasPrefix(lower, "cleanroom-"), lower == "cleanroom.jar":
 		return Cleanroom
-	case strings.HasPrefix(lower, "velocity-"), lower == "velocity.jar":
+	case strings.HasPrefix(lower, "velocity"), lower == "velocity.jar":
 		return Velocity
 	case lower == "server.jar":
 		return Vanilla
 	default:
-		return Unknown
+		return GenericJar
 	}
 }
 
@@ -264,14 +459,20 @@ func suggestedCommand(entry string) string {
 	return fmt.Sprintf("java -Xms2G -Xmx4G -jar %s nogui", entry)
 }
 
+func SuggestedCommand(entry string) string {
+	return suggestedCommand(entry)
+}
+
 func javaRequirementFor(kind ServerType) string {
 	switch kind {
-	case Forge, Cleanroom:
+	case Forge, NeoForge, Cleanroom:
 		return "17"
 	case Velocity:
 		return "17"
-	default:
+	case Fabric, Paper, Purpur, Vanilla, CustomScript, GenericJar:
 		return "17"
+	default:
+		return ""
 	}
 }
 
