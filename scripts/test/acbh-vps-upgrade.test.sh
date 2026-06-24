@@ -357,16 +357,18 @@ test_upgrade_lock() {
   write_bundle "$bundle" "v0.4.0-alpha1" "0.4.0-alpha1"
   printf '0.4.0-alpha1\n' > "$ACBH_MOCK_STATE_FILE/health.version"
   exec 8> "$ACBH_INSTALL_DIR/.upgrade.lock"
-  if command -v flock >/dev/null 2>&1; then
-    flock -n 8 || fail_test "unable to acquire test lock"
-    if run_upgrade "$bundle" 2>/dev/null; then
-      fail_test "upgrade should fail when lock is held"
-    fi
-    flock -u 8
+  if ! command -v flock >/dev/null 2>&1; then
+    fail_test "flock is required for upgrade lock test"
     finish_test "upgrade lock" "$failures_before"
-  else
-    echo "SKIP: flock not available"
+    teardown_test_env
+    return
   fi
+  flock -n 8 || fail_test "unable to acquire test lock"
+  if run_upgrade "$bundle" 2>/dev/null; then
+    fail_test "upgrade should fail when lock is held"
+  fi
+  flock -u 8
+  finish_test "upgrade lock" "$failures_before"
   teardown_test_env
 }
 

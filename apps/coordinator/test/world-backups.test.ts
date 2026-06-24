@@ -272,6 +272,65 @@ test("world backup commit rejects stale host generation", async (t) => {
   }
 });
 
+test("world backup commit rejects parent snapshot conflict under concurrent writers", async (t) => {
+  const app = await buildTestApp(t);
+  try {
+    const { groupId, hostId, hostToken, generation } = await createCurrentHost(app);
+    const content = Buffer.from("region data");
+    const objectSha = sha256(content);
+    const first = sampleWorldManifest({
+      groupId,
+      hostId,
+      generation,
+      sha256: objectSha,
+      size: content.byteLength,
+      snapshotId: "ws_parent_a",
+    });
+    await app.inject({
+      method: "PUT",
+      url: `/v1/groups/${groupId}/world-objects/${objectSha}`,
+      headers: { "content-type": "application/octet-stream", ...hostHeaders(hostId, hostToken) },
+      payload: content,
+    });
+    assert.equal(
+      (await app.inject({
+        method: "POST",
+        url: `/v1/groups/${groupId}/world-backups/commit`,
+        payload: { hostId, hostToken, hostGeneration: generation, manifest: first },
+      })).statusCode,
+      200,
+    );
+
+    const staleChild = sampleWorldManifest({
+      groupId,
+      hostId,
+      generation,
+      sha256: objectSha,
+      size: content.byteLength,
+      snapshotId: "ws_parent_conflict",
+    });
+    staleChild.parentSnapshotId = "";
+    staleChild.createdAt = "2026-06-24T00:02:00.000Z";
+    const conflict = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${groupId}/world-backups/commit`,
+      payload: { hostId, hostToken, hostGeneration: generation, manifest: staleChild },
+    });
+    assert.equal(conflict.statusCode, 409, conflict.body);
+    assert.equal(conflict.json<{ code: string }>().code, "snapshot_parent_conflict");
+
+    const latest = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${groupId}/world-backups/latest`,
+      headers: hostHeaders(hostId, hostToken),
+    });
+    assert.equal(latest.statusCode, 200, latest.body);
+    assert.equal(latest.json<{ metadata: { snapshotId: string } }>().metadata.snapshotId, "ws_parent_a");
+  } finally {
+    await app.close();
+  }
+});
+
 test("inconsistent latest world snapshot cannot be fetched for automatic restore", async (t) => {
   const app = await buildTestApp(t);
   try {
