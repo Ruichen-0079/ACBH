@@ -49,10 +49,11 @@ jobs:
       - name: VPS upgrade integration tests
         run: bash scripts/test/acbh-vps-upgrade.test.sh
       - name: shellcheck VPS scripts
+        working-directory: scripts
         run: |
           shellcheck -x -e SC2015 \
-            scripts/acbh-vps-lib.sh \
-            scripts/install-acbh-vps.sh \
-            scripts/acbh-vps-upgrade.sh \
-            scripts/acbh-vps-rollback.sh \
-            scripts/acbh-vps-status.sh
+            acbh-vps-lib.sh \
+            install-acbh-vps.sh \
+            acbh-vps-upgrade.sh \
+            acbh-vps-rollback.sh \
+            acbh-vps-status.sh

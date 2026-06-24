@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=acbh-vps-lib.sh
+# shellcheck source=./acbh-vps-lib.sh
 . "$SCRIPT_DIR/acbh-vps-lib.sh"
 
 TARGET_VERSION=""
