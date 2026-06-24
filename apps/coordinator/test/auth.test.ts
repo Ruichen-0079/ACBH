@@ -120,12 +120,12 @@ test("revoked access key is rejected", () => {
   assert.equal(result, undefined);
 
   assert.throws(
-    () => store.verifyGroupAccessKey(host.groupId, "ak_wrong_revoked"),
+    () => store.verifyGroupAccessKey(host.groupId, "wrong-revoked-access-key"),
     /Invalid access key/,
   );
 
   assert.throws(
-    () => store.joinGroup({ groupId: host.groupId, accessKey: "ak_wrong", displayName: "Attacker" }),
+    () => store.joinGroup({ groupId: host.groupId, accessKey: "wrong-access-key", displayName: "Attacker" }),
     /Invalid access key/,
   );
 });

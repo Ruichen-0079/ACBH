@@ -23,7 +23,7 @@ export const defaultMaxObjectBytes = 256 * 1024 * 1024;
 const bootstrapPackageDefinitions = [
   {
     id: "acbh-runtime-base-windows-amd64",
-    version: "0.3.3",
+    version: "0.3.5-hotfix1",
     filename: "acbh-runtime-base-windows-amd64.zip",
     requiredFor: ["desktop-bootstrap"],
   },
@@ -243,7 +243,7 @@ export async function registerRoutes(
     return {
       ok: true,
       service: "acbh-coordinator",
-      version: "0.1.0",
+      version: "0.3.5-hotfix1",
     };
   });
 

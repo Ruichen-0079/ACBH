@@ -76,6 +76,56 @@ func TestPortableAppDataDir(t *testing.T) {
 	}
 }
 
+func TestBaseStatusUsesConfiguredPublicCoordinatorURL(t *testing.T) {
+	appData := t.TempDir()
+	if err := agentconfig.Save(filepath.Join(appData, agentconfig.FileName), agentconfig.Config{
+		CoordinatorURL: "http://121.40.101.224:6121",
+		GroupID:        "grp_1",
+		MemberID:       "mem_1",
+		HostID:         "host_1",
+		HostToken:      "test-host-token",
+		DisplayName:    "owner",
+		DeviceName:     "pc",
+		Platform:       runtime.GOOS,
+		AgentVersion:   agentconfig.AgentVersion,
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	status, err := baseStatus(withDefaults(Options{AppDataDir: appData}))
+	if err != nil {
+		t.Fatalf("baseStatus() error = %v", err)
+	}
+	if status.CoordinatorURL != "http://121.40.101.224:6121" {
+		t.Fatalf("CoordinatorURL = %q, want configured public URL", status.CoordinatorURL)
+	}
+}
+
+func TestBaseStatusExplicitHostPortOverridesConfig(t *testing.T) {
+	appData := t.TempDir()
+	if err := agentconfig.Save(filepath.Join(appData, agentconfig.FileName), agentconfig.Config{
+		CoordinatorURL: "http://121.40.101.224:6121",
+		GroupID:        "grp_1",
+		MemberID:       "mem_1",
+		HostID:         "host_1",
+		HostToken:      "test-host-token",
+		DisplayName:    "owner",
+		DeviceName:     "pc",
+		Platform:       runtime.GOOS,
+		AgentVersion:   agentconfig.AgentVersion,
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	status, err := baseStatus(withDefaults(Options{AppDataDir: appData, Host: "0.0.0.0", Port: "7000"}))
+	if err != nil {
+		t.Fatalf("baseStatus() error = %v", err)
+	}
+	if status.CoordinatorURL != "http://0.0.0.0:7000" {
+		t.Fatalf("CoordinatorURL = %q, want explicit override", status.CoordinatorURL)
+	}
+}
+
 func TestResolveNodeDoesNotUseCorepack(t *testing.T) {
 	tempDir := t.TempDir()
 	nodePath := filepath.Join(tempDir, "node.exe")

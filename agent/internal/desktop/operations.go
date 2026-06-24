@@ -365,6 +365,45 @@ func SafeSyncWorld(ctx context.Context, opts Options, rconPassword string) (Safe
 	}, nil
 }
 
+func ScanWorldSnapshotStopped(opts Options) (ScanResult, error) {
+	opts = withDefaults(opts)
+	cfg, err := loadDesktopConfig(opts)
+	if err != nil {
+		return ScanResult{}, err
+	}
+	if strings.TrimSpace(cfg.Server.Dir) == "" {
+		return ScanResult{}, errors.New("请先在 GUI 中导入 MC 服务端目录。")
+	}
+	artifactID := "world-" + time.Now().Format("20060102-150405")
+	output := filepath.Join(manifestDir(opts), artifactID+".manifest.json")
+	serverPackVersion := latestServerPackID(opts)
+	if serverPackVersion == "" {
+		serverPackVersion = "server-pack-local"
+	}
+	manifestData, report, err := scanner.Scan(scanner.Options{
+		ServerDir:         cfg.Server.Dir,
+		ArtifactKind:      manifest.WorldSnapshot,
+		ArtifactID:        artifactID,
+		GroupID:           cfg.GroupID,
+		CreatorHostID:     cfg.HostID,
+		ServerPackVersion: serverPackVersion,
+		OutputPath:        output,
+	})
+	if err != nil {
+		return ScanResult{}, err
+	}
+	if err := manifest.SaveFile(output, manifestData); err != nil {
+		return ScanResult{}, err
+	}
+	return ScanResult{
+		ManifestPath: output,
+		ArtifactKind: manifest.WorldSnapshot,
+		ArtifactID:   artifactID,
+		Report:       report,
+		Message:      "停服后的世界快照 world-snapshot manifest 已生成。",
+	}, nil
+}
+
 func PushLatest(ctx context.Context, opts Options) (artifactsync.PushSummary, error) {
 	opts = withDefaults(opts)
 	cfg, err := loadDesktopConfig(opts)
@@ -639,6 +678,7 @@ func processRunning(pid int) bool {
 
 type RelayHostState struct {
 	Running  bool   `json:"running"`
+	State    string `json:"state"`
 	PID      int    `json:"pid,omitempty"`
 	Target   string `json:"target,omitempty"`
 	Message  string `json:"message"`
@@ -666,15 +706,16 @@ func StartRelayHost(opts Options, targetAddress string) (RelayHostState, error) 
 	}
 	cfg, _ := loadDesktopConfig(opts)
 	if !cp.CanPush || cp.CurrentHostID != cfg.HostID {
-		return RelayHostState{Message: "当前本地主机不是 current host，不能启动公网中转 relay。"}, nil
+		return RelayHostState{State: "blocked_not_current_host", Message: "当前本地主机不是 current host，不能启动公网中转 relay。"}, nil
 	}
 
 	pidPath := relayHostPIDPath(opts)
 	// if already running, return
 	if raw, err := os.ReadFile(pidPath); err == nil {
 		if p, _ := strconv.Atoi(strings.TrimSpace(string(raw))); p > 0 && processRunning(p) {
-			return RelayHostState{Running: true, PID: p, Target: targetAddress, Message: "公网中转 relay host 已在运行。"}, nil
+			return RelayHostState{Running: true, State: "running", PID: p, Target: targetAddress, Message: "公网中转 relay host 已在运行。"}, nil
 		}
+		_ = os.Remove(pidPath)
 	}
 
 	if targetAddress == "" {
@@ -699,7 +740,7 @@ func StartRelayHost(opts Options, targetAddress string) (RelayHostState, error) 
 	// For the manager, we poll list and start per-session host clients.
 	go runRelayHostManager(opts, targetAddress, pidPath)
 
-	return RelayHostState{Running: true, PID: pid, Target: targetAddress, Message: "公网中转 relay host 已启动 (manager 运行中)。"}, nil
+	return RelayHostState{Running: true, State: "running", PID: pid, Target: targetAddress, Message: "公网中转 relay host 已启动 (manager 运行中)。"}, nil
 }
 
 func StopRelayHost(opts Options) (RelayHostState, error) {
@@ -707,7 +748,7 @@ func StopRelayHost(opts Options) (RelayHostState, error) {
 	pidPath := relayHostPIDPath(opts)
 	raw, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return RelayHostState{Message: "公网中转 relay host 未运行。"}, nil
+		return RelayHostState{State: "stopped", Message: "公网中转 relay host 未运行。"}, nil
 	}
 	if err != nil {
 		return RelayHostState{}, err
@@ -715,7 +756,7 @@ func StopRelayHost(opts Options) (RelayHostState, error) {
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if pid <= 0 || !processRunning(pid) {
 		_ = os.Remove(pidPath)
-		return RelayHostState{Message: "公网中转 relay host 记录已清理。"}, nil
+		return RelayHostState{State: "stale_pid", Message: "公网中转 relay host 记录已清理。"}, nil
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -725,7 +766,7 @@ func StopRelayHost(opts Options) (RelayHostState, error) {
 		return RelayHostState{}, fmt.Errorf("停止 relay host 失败: %w", err)
 	}
 	_ = os.Remove(pidPath)
-	return RelayHostState{Running: false, Message: "公网中转 relay host 已停止。"}, nil
+	return RelayHostState{Running: false, State: "stopped", Message: "公网中转 relay host 已停止。"}, nil
 }
 
 func RelayHostStatus(opts Options) (RelayHostState, error) {
@@ -733,14 +774,22 @@ func RelayHostStatus(opts Options) (RelayHostState, error) {
 	pidPath := relayHostPIDPath(opts)
 	raw, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return RelayHostState{Running: false, Message: "公网中转 relay host 未运行。"}, nil
+		cp, cpErr := CanPush(context.Background(), opts)
+		if cpErr == nil && !cp.CanPush {
+			return RelayHostState{Running: false, State: "blocked_not_current_host", Message: cp.Reason}, nil
+		}
+		return RelayHostState{Running: false, State: "stopped", Message: "公网中转 relay host 未运行。"}, nil
 	}
 	if err != nil {
 		return RelayHostState{}, err
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
 	running := pid > 0 && processRunning(pid)
-	return RelayHostState{Running: running, PID: pid, Message: "公网中转 relay host 状态已查询。"}, nil
+	if !running {
+		_ = os.Remove(pidPath)
+		return RelayHostState{Running: false, State: "stale_pid", PID: pid, Message: "公网中转 relay host pid 已失效并清理。"}, nil
+	}
+	return RelayHostState{Running: true, State: "running", PID: pid, Message: "公网中转 relay host 状态已查询。"}, nil
 }
 
 // runRelayHostManager discovers tunnel sessions assigned to us and starts HostRelayClient for each.

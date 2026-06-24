@@ -9,6 +9,7 @@
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName Microsoft.VisualBasic
 
 if (-not $AgentPath) {
     $AgentPath = Join-Path $PSScriptRoot "..\acbh-agent-windows-amd64.exe"
@@ -155,7 +156,9 @@ function Refresh-HotfixStatus {
 
 function Generate-Invite {
     try {
-        $result = Invoke-AgentJson @("desktop", "setup", "create-invite", "--app-data-dir", $AppDataDir, "--expires-seconds", "1800", "--one-time", "--json")
+        $expires = [string]$cmbInviteExpiry.SelectedValue
+        if (-not $expires) { $expires = "1800" }
+        $result = Invoke-AgentJson @("desktop", "setup", "create-invite", "--app-data-dir", $AppDataDir, "--expires-seconds", $expires, "--one-time", "--json")
         if (-not $result.Json -or -not $result.Json.ok) {
             throw $(if ($result.Json.message) { $result.Json.message } else { $result.Raw.Output })
         }
@@ -165,6 +168,13 @@ function Generate-Invite {
         Add-Log "邀请码已生成并复制到剪贴板。"
     } catch {
         Show-Error "生成邀请码失败：$($_.Exception.Message)"
+    }
+}
+
+function Copy-CurrentInvite {
+    if (-not [string]::IsNullOrWhiteSpace($txtInviteCode.Text)) {
+        [System.Windows.Forms.Clipboard]::SetText($txtInviteCode.Text)
+        Add-Log "邀请码已复制。"
     }
 }
 
@@ -183,6 +193,20 @@ function List-Invites {
         [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "邀请码", "OK", "Information") | Out-Null
     } catch {
         Show-Error "读取邀请码失败：$($_.Exception.Message)"
+    }
+}
+
+function Revoke-Invite {
+    try {
+        $inviteId = [Microsoft.VisualBasic.Interaction]::InputBox("请输入要撤销的 invite ID", "撤销邀请码", "")
+        if ([string]::IsNullOrWhiteSpace($inviteId)) { return }
+        $result = Invoke-AgentJson @("desktop", "setup", "revoke-invite", "--app-data-dir", $AppDataDir, "--invite-id", $inviteId.Trim(), "--json")
+        if (-not $result.Json -or -not $result.Json.ok) {
+            throw $(if ($result.Json.message) { $result.Json.message } else { $result.Raw.Output })
+        }
+        Add-Log "邀请码已撤销：$inviteId"
+    } catch {
+        Show-Error "撤销邀请码失败：$($_.Exception.Message)"
     }
 }
 
@@ -308,7 +332,7 @@ function Add-Field {
     $identity.Controls.Add($lbl)
     $txt = New-Object System.Windows.Forms.TextBox
     $txt.Location = New-Object System.Drawing.Point(130, $Y)
-    $txt.Size = New-Object System.Drawing.Size(760, 24)
+    $txt.Size = New-Object System.Drawing.Size(610, 24)
     $txt.ReadOnly = $true
     $identity.Controls.Add($txt)
     return $txt
@@ -329,11 +353,29 @@ $btnRefresh.Location = New-Object System.Drawing.Point(760, 180)
 $btnRefresh.Size = New-Object System.Drawing.Size(130, 28)
 $btnRefresh.Add_Click({ Refresh-HotfixStatus })
 $identity.Controls.Add($btnRefresh)
+$btnCopyGroup = New-Object System.Windows.Forms.Button
+$btnCopyGroup.Text = "复制 Group"
+$btnCopyGroup.Location = New-Object System.Drawing.Point(760, 56)
+$btnCopyGroup.Size = New-Object System.Drawing.Size(130, 26)
+$btnCopyGroup.Add_Click({ if ($txtGroupId.Text) { [System.Windows.Forms.Clipboard]::SetText($txtGroupId.Text) } })
+$identity.Controls.Add($btnCopyGroup)
+$btnCopyMember = New-Object System.Windows.Forms.Button
+$btnCopyMember.Text = "复制 Member"
+$btnCopyMember.Location = New-Object System.Drawing.Point(760, 88)
+$btnCopyMember.Size = New-Object System.Drawing.Size(130, 26)
+$btnCopyMember.Add_Click({ if ($txtMemberId.Text) { [System.Windows.Forms.Clipboard]::SetText($txtMemberId.Text) } })
+$identity.Controls.Add($btnCopyMember)
+$btnCopyHost = New-Object System.Windows.Forms.Button
+$btnCopyHost.Text = "复制 Host"
+$btnCopyHost.Location = New-Object System.Drawing.Point(760, 120)
+$btnCopyHost.Size = New-Object System.Drawing.Size(130, 26)
+$btnCopyHost.Add_Click({ if ($txtHostId.Text) { [System.Windows.Forms.Clipboard]::SetText($txtHostId.Text) } })
+$identity.Controls.Add($btnCopyHost)
 
 $invitePanel = New-Object System.Windows.Forms.GroupBox
 $invitePanel.Text = "组员邀请"
 $invitePanel.Location = New-Object System.Drawing.Point(20, 290)
-$invitePanel.Size = New-Object System.Drawing.Size(450, 160)
+$invitePanel.Size = New-Object System.Drawing.Size(450, 190)
 $form.Controls.Add($invitePanel)
 $txtInviteCode = New-Object System.Windows.Forms.TextBox
 $txtInviteCode.Location = New-Object System.Drawing.Point(18, 34)
@@ -344,18 +386,43 @@ $lblInviteExpiry = New-Object System.Windows.Forms.Label
 $lblInviteExpiry.Location = New-Object System.Drawing.Point(18, 68)
 $lblInviteExpiry.Size = New-Object System.Drawing.Size(410, 22)
 $invitePanel.Controls.Add($lblInviteExpiry)
+$cmbInviteExpiry = New-Object System.Windows.Forms.ComboBox
+$cmbInviteExpiry.Location = New-Object System.Drawing.Point(18, 94)
+$cmbInviteExpiry.Size = New-Object System.Drawing.Size(190, 26)
+$cmbInviteExpiry.DropDownStyle = "DropDownList"
+$inviteOptions = @(
+    [pscustomobject]@{ Label = "30 分钟"; Value = "1800" },
+    [pscustomobject]@{ Label = "2 小时"; Value = "7200" },
+    [pscustomobject]@{ Label = "24 小时"; Value = "86400" }
+)
+$cmbInviteExpiry.DisplayMember = "Label"
+$cmbInviteExpiry.ValueMember = "Value"
+$cmbInviteExpiry.DataSource = $inviteOptions
+$invitePanel.Controls.Add($cmbInviteExpiry)
 $btnInvite = New-Object System.Windows.Forms.Button
-$btnInvite.Text = "随时生成邀请码"
-$btnInvite.Location = New-Object System.Drawing.Point(18, 104)
+$btnInvite.Text = "生成邀请码"
+$btnInvite.Location = New-Object System.Drawing.Point(238, 92)
 $btnInvite.Size = New-Object System.Drawing.Size(190, 32)
 $btnInvite.Add_Click({ Generate-Invite })
 $invitePanel.Controls.Add($btnInvite)
+$btnCopyInvite = New-Object System.Windows.Forms.Button
+$btnCopyInvite.Text = "复制邀请码"
+$btnCopyInvite.Location = New-Object System.Drawing.Point(18, 136)
+$btnCopyInvite.Size = New-Object System.Drawing.Size(125, 32)
+$btnCopyInvite.Add_Click({ Copy-CurrentInvite })
+$invitePanel.Controls.Add($btnCopyInvite)
 $btnListInvite = New-Object System.Windows.Forms.Button
-$btnListInvite.Text = "查看邀请码记录"
-$btnListInvite.Location = New-Object System.Drawing.Point(238, 104)
-$btnListInvite.Size = New-Object System.Drawing.Size(190, 32)
+$btnListInvite.Text = "查看记录"
+$btnListInvite.Location = New-Object System.Drawing.Point(158, 136)
+$btnListInvite.Size = New-Object System.Drawing.Size(125, 32)
 $btnListInvite.Add_Click({ List-Invites })
 $invitePanel.Controls.Add($btnListInvite)
+$btnRevokeInvite = New-Object System.Windows.Forms.Button
+$btnRevokeInvite.Text = "撤销邀请码"
+$btnRevokeInvite.Location = New-Object System.Drawing.Point(303, 136)
+$btnRevokeInvite.Size = New-Object System.Drawing.Size(125, 32)
+$btnRevokeInvite.Add_Click({ Revoke-Invite })
+$invitePanel.Controls.Add($btnRevokeInvite)
 
 $syncPanel = New-Object System.Windows.Forms.GroupBox
 $syncPanel.Text = "公网服务器制品同步"

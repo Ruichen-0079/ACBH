@@ -311,7 +311,7 @@ acbh-agent relay host \
   --coordinator-url http://public-node:8080 \
   --group-id grp_abc \
   --host-id host_abc \
-  --host-token ht_xxx \
+  --host-token <host-token> \
   --host-generation 3 \
   --session-id tun_abc \
   --target-address 127.0.0.1:25565

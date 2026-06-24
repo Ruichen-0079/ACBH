@@ -1166,10 +1166,13 @@ func StartAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 	if err != nil {
 		return res, err
 	}
-	if daemon, err := startDaemon(opts, "hosting"); err != nil {
-		res.Warnings = append(res.Warnings, "心跳后台未启动："+err.Error())
+	if daemon, err := startDaemon(opts, "standby"); err != nil {
+		res.State = StateError
+		res.Message = "心跳后台启动失败：" + err.Error()
+		res.ErrorCode = "heartbeat_start_failed"
+		return res, nil
 	} else if daemon.Running {
-		res.Steps = append(res.Steps, "心跳后台已启动")
+		res.Steps = append(res.Steps, "standby 心跳后台已启动")
 	}
 	res.Steps = append(res.Steps, "正在申请主机资格")
 	status, err := client.GetElectionStatus(ctx, coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken})
@@ -1189,25 +1192,73 @@ func StartAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 	var assignmentToken string
 	var assignmentID string
 	if !claimedByUs {
-		if _, err := client.CheckElectionTimeout(ctx, coordinator.ElectionAuthRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}); err != nil {
-			res.Warnings = append(res.Warnings, "申请主机资格时未能触发 election："+err.Error())
+		check, err := client.CheckElectionTimeout(ctx, coordinator.ElectionAuthRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken})
+		if err != nil {
+			res.State = StateError
+			res.Message = "触发 election 失败：" + err.Error()
+			res.ErrorCode = "election_timeout"
+			return res, nil
 		}
-		poll, err := client.PollTakeover(ctx, coordinator.TakeoverPollRequest{ElectionAuthRequest: coordinator.ElectionAuthRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}})
-		if err == nil && poll.Assignment != nil && poll.Assignment.TakeoverToken != "" {
-			assignmentID = poll.Assignment.AssignmentID
-			assignmentToken = poll.Assignment.TakeoverToken
-			_, _ = client.AcceptTakeover(ctx, coordinator.TakeoverActionRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken, AssignmentID: assignmentID, TakeoverToken: assignmentToken})
-		} else {
-			res.Warnings = append(res.Warnings, "当前 Coordinator 未返回可完成的 takeover token；将只执行本地启动前检查。")
+		if check.Election != nil && !check.Election.OK {
+			res.State = StateError
+			res.Message = "没有可接管的候选 Host。"
+			res.ErrorCode = "takeover_not_assigned"
+			return res, nil
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			poll, err := client.PollTakeover(ctx, coordinator.TakeoverPollRequest{ElectionAuthRequest: coordinator.ElectionAuthRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}})
+			if err != nil {
+				res.State = StateError
+				res.Message = "轮询 takeover assignment 失败：" + err.Error()
+				res.ErrorCode = "takeover_not_assigned"
+				return res, nil
+			}
+			if poll.Assignment != nil && poll.Assignment.TakeoverToken != "" {
+				assignmentID = poll.Assignment.AssignmentID
+				assignmentToken = poll.Assignment.TakeoverToken
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return res, ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		if assignmentID == "" || assignmentToken == "" {
+			res.State = StateError
+			res.Message = "Coordinator 未返回分配给本机的 takeover token。"
+			res.ErrorCode = "takeover_not_assigned"
+			return res, nil
+		}
+		if _, err := client.AcceptTakeover(ctx, coordinator.TakeoverActionRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken, AssignmentID: assignmentID, TakeoverToken: assignmentToken}); err != nil {
+			res.State = StateError
+			res.Message = "接受 takeover assignment 失败：" + err.Error()
+			res.ErrorCode = "takeover_accept_failed"
+			return res, nil
 		}
 	}
 	res.State = "PullingArtifacts"
 	res.Steps = append(res.Steps, "正在同步服务端数据", "正在同步世界存档")
 	if _, err := PullLatest(ctx, opts, manifest.ServerPack, "latest", false); err != nil {
-		res.Warnings = append(res.Warnings, "server-pack 拉取跳过："+err.Error())
+		if isArtifactNotAvailable(err) {
+			res.Warnings = append(res.Warnings, "server-pack 暂无可用制品，首次启动已跳过。")
+		} else {
+			res.State = StateError
+			res.Message = "server-pack 拉取失败：" + err.Error()
+			res.ErrorCode = "artifact_pull_failed"
+			return res, nil
+		}
 	}
 	if _, err := PullLatest(ctx, opts, manifest.WorldSnapshot, "latest", false); err != nil {
-		res.Warnings = append(res.Warnings, "world-snapshot 拉取跳过："+err.Error())
+		if isArtifactNotAvailable(err) {
+			res.Warnings = append(res.Warnings, "world-snapshot 暂无可用制品，首次启动已跳过。")
+		} else {
+			res.State = StateError
+			res.Message = "world-snapshot 拉取失败：" + err.Error()
+			res.ErrorCode = "artifact_pull_failed"
+			return res, nil
+		}
 	}
 	res.State = "StartingMinecraft"
 	res.Steps = append(res.Steps, "正在检查 Minecraft 服务端", "正在启动 Minecraft")
@@ -1218,27 +1269,102 @@ func StartAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 	if !started.OK {
 		res.State = StateError
 		res.Message = started.Message
-		res.ErrorCode = started.ErrorCode
+		res.ErrorCode = firstNonEmpty(started.ErrorCode, "minecraft_start_failed")
 		if assignmentID != "" && assignmentToken != "" {
 			_, _ = client.FailTakeover(ctx, coordinator.TakeoverFailRequest{TakeoverActionRequest: coordinator.TakeoverActionRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken, AssignmentID: assignmentID, TakeoverToken: assignmentToken}, FailureReason: started.Message})
 		}
 		return res, nil
 	}
+	if err := waitForMinecraftPort(ctx, cfg.Server.Dir, 30*time.Second); err != nil {
+		res.State = StateError
+		res.Message = "Minecraft 本地端口未就绪：" + err.Error()
+		res.ErrorCode = "minecraft_health_failed"
+		if assignmentID != "" && assignmentToken != "" {
+			_, _ = client.FailTakeover(ctx, coordinator.TakeoverFailRequest{TakeoverActionRequest: coordinator.TakeoverActionRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken, AssignmentID: assignmentID, TakeoverToken: assignmentToken}, FailureReason: res.Message})
+		}
+		return res, nil
+	}
 	if assignmentID != "" && assignmentToken != "" {
 		if _, err := client.CompleteTakeover(ctx, coordinator.TakeoverActionRequest{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken, AssignmentID: assignmentID, TakeoverToken: assignmentToken}); err != nil {
-			res.Warnings = append(res.Warnings, "完成 current-host lease 失败："+err.Error())
+			res.State = StateError
+			res.Message = "完成 current-host lease 失败：" + err.Error()
+			res.ErrorCode = "takeover_complete_failed"
+			return res, nil
 		}
+	}
+	if _, err := StopDaemon(opts); err != nil {
+		res.Warnings = append(res.Warnings, "切换 hosting 心跳前停止 standby daemon 失败："+err.Error())
+	}
+	if daemon, err := startDaemon(opts, "hosting"); err != nil {
+		res.State = StateError
+		res.Message = "切换 hosting 心跳失败：" + err.Error()
+		res.ErrorCode = "heartbeat_start_failed"
+		return res, nil
+	} else if daemon.Running {
+		res.Steps = append(res.Steps, "hosting 心跳后台已启动")
+	}
+	finalStatus, err := client.GetElectionStatus(ctx, coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken})
+	if err != nil || finalStatus.CurrentHostID == nil || *finalStatus.CurrentHostID != cfg.HostID {
+		res.State = StateError
+		res.Message = "Relay 启动前 current-host 身份校验失败。"
+		if err != nil {
+			res.Message += " " + err.Error()
+		}
+		res.ErrorCode = "relay_health_failed"
+		return res, nil
 	}
 	res.State = "StartingRelay"
 	res.Steps = append(res.Steps, "正在启动公网中转")
 	if err := StartRelayHostDetached(opts); err != nil {
-		res.Warnings = append(res.Warnings, "公网中转未启动："+err.Error())
+		res.State = StateError
+		res.Message = "公网中转启动失败：" + err.Error()
+		res.ErrorCode = "relay_start_failed"
+		return res, nil
 	}
 	res.OK = true
 	res.State = StateRunning
 	res.Steps = append(res.Steps, "服务器已运行")
 	res.Message = "服务器已在此电脑启动。"
 	return res, nil
+}
+
+func isArtifactNotAvailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no available artifact") ||
+		strings.Contains(text, "artifact does not exist") ||
+		strings.Contains(text, "404")
+}
+
+func waitForMinecraftPort(ctx context.Context, serverDir string, timeout time.Duration) error {
+	port := "25565"
+	if report, err := mcimport.Inspect(serverDir); err == nil {
+		if p := strings.TrimSpace(report.Properties["server-port"]); p != "" {
+			port = p
+		}
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+		conn, err := dialer.DialContext(ctx, "tcp", "127.0.0.1:"+port)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("timeout waiting for 127.0.0.1:%s", port)
 }
 
 func StopAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
@@ -1279,12 +1405,19 @@ func StopAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 		return res, nil
 	}
 	res.State = "SyncingWorld"
-	res.Steps = append(res.Steps, "正在创建世界快照", "正在上传世界存档")
+	res.Steps = append(res.Steps, "正在创建 server-pack", "正在上传 server-pack")
 	if _, err := ScanPack(opts); err != nil {
 		res.Warnings = append(res.Warnings, "创建 server-pack manifest 跳过："+err.Error())
 	}
 	if _, err := PushLatest(ctx, opts); err != nil {
-		res.Warnings = append(res.Warnings, "上传最新制品跳过："+err.Error())
+		res.Warnings = append(res.Warnings, "上传 server-pack 跳过："+err.Error())
+	}
+	res.Steps = append(res.Steps, "正在创建世界快照", "正在上传世界存档")
+	if _, err := ScanWorldSnapshotStopped(opts); err != nil {
+		res.Warnings = append(res.Warnings, "创建 world-snapshot manifest 跳过："+err.Error())
+	}
+	if _, err := PushLatest(ctx, opts); err != nil {
+		res.Warnings = append(res.Warnings, "上传 world-snapshot 跳过："+err.Error())
 	}
 	res.State = "StoppingRelay"
 	res.Steps = append(res.Steps, "正在停止公网中转")
@@ -1307,9 +1440,23 @@ func StopAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 
 func StartRelayHostDetached(opts Options) error {
 	opts = withDefaults(opts)
+	cp, err := CanPush(context.Background(), opts)
+	if err != nil {
+		return fmt.Errorf("无法检查 current host: %w", err)
+	}
+	cfg, err := loadDesktopConfig(opts)
+	if err != nil {
+		return err
+	}
+	if !cp.CanPush || cp.CurrentHostID != cfg.HostID {
+		return errors.New("blocked_not_current_host")
+	}
+	if status, err := RelayHostStatus(opts); err == nil && status.Running {
+		return nil
+	}
+	cleanupStalePID(relayHostPIDPath(opts))
 	exe := opts.ExecutablePath
 	if exe == "" {
-		var err error
 		exe, err = os.Executable()
 		if err != nil {
 			return err
@@ -1323,7 +1470,7 @@ func StartRelayHostDetached(opts Options) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(exe, "desktop", "relay", "start-host", "--app-data-dir", opts.AppDataDir)
+	cmd := exec.Command(exe, "desktop", "relay", "start-host", "--app-data-dir", opts.AppDataDir, "--target-address", "127.0.0.1:25565", "--json")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	configureBackgroundProcess(cmd)
@@ -1333,7 +1480,22 @@ func StartRelayHostDetached(opts Options) error {
 	}
 	_ = cmd.Process.Release()
 	_ = logFile.Close()
-	return nil
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		status, statusErr := RelayHostStatus(opts)
+		if statusErr == nil && status.Running {
+			return nil
+		}
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	tail, _ := os.ReadFile(logPath)
+	if len(tail) > 4096 {
+		tail = tail[len(tail)-4096:]
+	}
+	return fmt.Errorf("relay_health_failed: relay host did not stay running; log tail: %s", strings.TrimSpace(string(tail)))
 }
 
 func ServerAutoStatus(ctx context.Context, opts Options) (map[string]any, error) {

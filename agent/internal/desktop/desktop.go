@@ -404,6 +404,11 @@ func baseStatus(opts Options) (Status, error) {
 		return Status{}, fmt.Errorf("create app data directory: %w", err)
 	}
 	url := fmt.Sprintf("http://%s:%s", opts.Host, opts.Port)
+	if cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName)); err == nil && cfg.CoordinatorURL != "" {
+		if (opts.Host == "" || opts.Host == defaultHost) && (opts.Port == "" || opts.Port == defaultPort) {
+			url = cfg.CoordinatorURL
+		}
+	}
 	return Status{
 		AppDataDir:       opts.AppDataDir,
 		ConfigPath:       filepath.Join(opts.AppDataDir, agentconfig.FileName),
