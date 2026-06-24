@@ -347,6 +347,29 @@ func TestBuildPowerShellLaunchArgvRejectsOutsidePath(t *testing.T) {
 	}
 }
 
+func TestResolveLaunchScriptInsideNormalizesWindowsSeparators(t *testing.T) {
+	serverDir := t.TempDir()
+	nestedDir := filepath.Join(serverDir, "scripts")
+	if err := os.MkdirAll(nestedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "run.ps1"), []byte("Write-Host ok\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := resolveLaunchScriptInside(serverDir, `scripts\run.ps1`)
+	if err != nil {
+		t.Fatalf("resolveLaunchScriptInside() error = %v", err)
+	}
+	if resolved != filepath.Join(nestedDir, "run.ps1") {
+		t.Fatalf("resolved = %q, want nested script", resolved)
+	}
+
+	if _, err := resolveLaunchScriptInside(serverDir, `..\outside.ps1`); err == nil {
+		t.Fatal("resolveLaunchScriptInside() accepted Windows-style parent traversal")
+	}
+}
+
 func TestVerifyEnvironmentPackageRejectsUnsafeOrUnsignedPackages(t *testing.T) {
 	tempDir := t.TempDir()
 	unsafeZip := filepath.Join(tempDir, "unsafe.zip")

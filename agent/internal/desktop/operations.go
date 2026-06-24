@@ -1126,11 +1126,15 @@ func resolveLaunchScriptInside(serverDir string, scriptPath string) (string, err
 	if strings.HasPrefix(scriptPath, `\\`) {
 		return "", errors.New("暂不支持网络 UNC 启动脚本路径。")
 	}
+	normalizedScriptPath := filepath.FromSlash(strings.ReplaceAll(scriptPath, `\`, `/`))
+	if runtime.GOOS != "windows" && looksLikeWindowsAbsolutePath(normalizedScriptPath) {
+		return "", errors.New("run.ps1 不在服务端目录内，已拒绝执行。")
+	}
 	baseAbs, err := filepath.Abs(filepath.Clean(serverDir))
 	if err != nil {
 		return "", err
 	}
-	clean := filepath.Clean(filepath.FromSlash(scriptPath))
+	clean := filepath.Clean(normalizedScriptPath)
 	var candidate string
 	if filepath.IsAbs(clean) {
 		candidate = clean
@@ -1149,6 +1153,17 @@ func resolveLaunchScriptInside(serverDir string, scriptPath string) (string, err
 		return "", errors.New("run.ps1 不在服务端目录内，已拒绝执行。")
 	}
 	return candidateAbs, nil
+}
+
+func looksLikeWindowsAbsolutePath(path string) bool {
+	if len(path) < 3 || path[1] != ':' {
+		return false
+	}
+	drive := path[0]
+	if !((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) {
+		return false
+	}
+	return path[2] == '/' || path[2] == '\\'
 }
 
 func StopServer(opts Options) (StopServerResult, error) {
