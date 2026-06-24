@@ -208,10 +208,13 @@ if [ -f "$DIST_DIR/acbh-desktop-windows-amd64.exe" ]; then
   mkdir -p "$COORD_BUNDLE_ROOT/scripts"
   cp "$REPO_ROOT/apps/coordinator/package.json" "$COORD_BUNDLE_ROOT/"
   cp -R "$REPO_ROOT/apps/coordinator/dist/." "$COORD_BUNDLE_ROOT/dist/"
+  cp "$REPO_ROOT/scripts/acbh-vps-lib.sh" "$COORD_BUNDLE_ROOT/scripts/"
   cp "$REPO_ROOT/scripts/install-acbh-vps.sh" "$COORD_BUNDLE_ROOT/scripts/"
   cp "$REPO_ROOT/scripts/acbh-vps-status.sh" "$COORD_BUNDLE_ROOT/scripts/"
   cp "$REPO_ROOT/scripts/acbh-vps-upgrade.sh" "$COORD_BUNDLE_ROOT/scripts/"
+  cp "$REPO_ROOT/scripts/acbh-vps-rollback.sh" "$COORD_BUNDLE_ROOT/scripts/"
   chmod +x "$COORD_BUNDLE_ROOT/scripts/"*.sh
+  printf '%s\n' "$VERSION" > "$COORD_BUNDLE_ROOT/VERSION"
   cp "$DIST_DIR/acbh-runtime-base-windows-amd64.zip" "$COORD_BUNDLE_ROOT/packages/acbh-runtime-base-windows-amd64.zip"
   cat > "$COORD_BUNDLE_ROOT/run-coordinator.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -226,6 +229,14 @@ EOF
     echo "npm not found; cannot build coordinator linux bundle dependencies" >&2
     exit 1
   fi
+  (
+    cd "$COORD_BUNDLE_ROOT"
+    if command -v sha256sum >/dev/null 2>&1; then
+      find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+    else
+      find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS
+    fi
+  )
   tar -C "$BUNDLE_PARENT" -czf "$DIST_DIR/$COORD_BUNDLE_NAME.tar.gz" "$COORD_BUNDLE_NAME"
 
   rm -rf "$BUNDLE_PARENT"
