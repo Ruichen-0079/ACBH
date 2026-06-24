@@ -15,7 +15,7 @@ This hotfix is based on the first end-to-end VPS deployment of v0.3.4.
 ## Build
 
 ```bash
-VERSION=v0.3.5-hotfix1 ./scripts/build-agent-release-v035.sh
+VERSION=v0.3.5-hotfix1 bash ./scripts/build-agent-release-v035.sh
 ```
 
 For repository testing without rebuilding the desktop executable, run the panel directly from the bundle root:
