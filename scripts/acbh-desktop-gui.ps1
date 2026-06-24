@@ -33,6 +33,7 @@ if ($SelfTest) {
 $script:ToolTip = New-Object System.Windows.Forms.ToolTip
 $script:LastStatus = $null
 $script:LastInspectResult = $null
+$script:LastWorldBackupStatus = $null
 $script:Running = $false
 $script:CurrentState = "Unconfigured"
 
@@ -505,6 +506,173 @@ function Show-LaunchEvidence {
     [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "识别证据", "OK", "Information") | Out-Null
 }
 
+function Format-ByteSize {
+    param([long]$Bytes)
+    if ($Bytes -lt 0) { return "-" }
+    if ($Bytes -ge 1GB) { return ("{0:N2} GB" -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ("{0:N2} MB" -f ($Bytes / 1MB)) }
+    if ($Bytes -ge 1KB) { return ("{0:N2} KB" -f ($Bytes / 1KB)) }
+    return "$Bytes B"
+}
+
+function Prompt-Text {
+    param([string]$Title, [string]$Prompt, [string]$Default = "")
+    $dialog = New-Object System.Windows.Forms.Form
+    $dialog.Text = $Title
+    $dialog.StartPosition = "CenterParent"
+    $dialog.Size = New-Object System.Drawing.Size(420, 150)
+    $dialog.FormBorderStyle = "FixedDialog"
+    $dialog.MaximizeBox = $false
+    $dialog.MinimizeBox = $false
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = $Prompt
+    $label.Location = New-Object System.Drawing.Point(12, 12)
+    $label.Size = New-Object System.Drawing.Size(380, 20)
+    $dialog.Controls.Add($label)
+    $text = New-Object System.Windows.Forms.TextBox
+    $text.Text = $Default
+    $text.Location = New-Object System.Drawing.Point(12, 40)
+    $text.Size = New-Object System.Drawing.Size(380, 24)
+    $dialog.Controls.Add($text)
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = "确定"
+    $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $ok.Location = New-Object System.Drawing.Point(216, 76)
+    $ok.Size = New-Object System.Drawing.Size(80, 28)
+    $dialog.Controls.Add($ok)
+    $cancel = New-Object System.Windows.Forms.Button
+    $cancel.Text = "取消"
+    $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $cancel.Location = New-Object System.Drawing.Point(312, 76)
+    $cancel.Size = New-Object System.Drawing.Size(80, 28)
+    $dialog.Controls.Add($cancel)
+    $dialog.AcceptButton = $ok
+    $dialog.CancelButton = $cancel
+    if ($dialog.ShowDialog($form) -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+    return $text.Text.Trim()
+}
+
+function Update-WorldBackupPanel {
+    param([object]$Status)
+    if ($null -eq $Status) {
+        $txtWorldBackupSummary.Text = "尚未加载世界差量备份状态。"
+        return
+    }
+    $latest = $Status.remoteLatest
+    $lines = @()
+    if ($latest) {
+        $lines += "最新快照：$($latest.snapshotId)"
+        $lines += "时间：$($latest.createdAt)"
+        $lines += "来源 Host：$($latest.sourceHostId)"
+        $lines += "Generation：$($latest.hostGeneration)"
+        $lines += "一致性：$(if ($latest.consistent) { '一致' } else { '不一致' })"
+        $lines += "逻辑大小：$(Format-ByteSize $latest.logicalSize)"
+        $lines += "本次上传量：$(Format-ByteSize $latest.uploadedSize)"
+        $lines += "变化/删除文件数：$($latest.changedFileCount) / $($latest.deletedFileCount)"
+    } else {
+        $lines += "最新快照：暂无"
+        if ($Status.remoteLatestError) { $lines += "远程读取失败：$($Status.remoteLatestError)" }
+    }
+    $lines += "历史数量：$($Status.historyCount)"
+    if ($Status.localLatestSnapshotId) { $lines += "本地索引最新：$($Status.localLatestSnapshotId)（$($Status.localFileCount) 文件）" }
+    if ($Status.indexError) { $lines += "本地索引错误：$($Status.indexError)" }
+    $txtWorldBackupSummary.Text = ($lines -join [Environment]::NewLine)
+}
+
+function Refresh-WorldBackupStatus {
+    $status = Invoke-AgentCommandSafe -ActionName "世界差量备份状态" -Args @("desktop", "world-backup", "status", "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $status) {
+        $script:LastWorldBackupStatus = $status
+        Update-WorldBackupPanel $status
+    }
+}
+
+function Backup-WorldStopped {
+    $result = Invoke-AgentCommandSafe -ActionName "立即备份世界" -Args @("desktop", "world-backup", "create", "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $result) {
+        Add-GuiLog "世界快照已发布：$($result.snapshotId)（上传 $(Format-ByteSize $result.uploadedSize)）"
+        Refresh-WorldBackupStatus
+    }
+}
+
+function Backup-WorldOnline {
+    $extraEnv = @{}
+    if (-not $env:ACBH_RCON_PASSWORD) {
+        $password = Prompt-Text -Title "在线安全备份" -Prompt "请输入 Minecraft RCON 密码："
+        if ([string]::IsNullOrWhiteSpace($password)) {
+            Show-GuiError "在线安全备份需要 RCON 密码。"
+            return
+        }
+        $extraEnv["ACBH_RCON_PASSWORD"] = $password
+    }
+    $result = Invoke-AgentCommandSafe -ActionName "在线安全备份" -Args @("desktop", "world-backup", "create", "--app-data-dir", $AppDataDir, "--online") -ExtraEnv $extraEnv -Json
+    if ($null -ne $result) {
+        Add-GuiLog "在线世界快照已发布：$($result.snapshotId)"
+        Refresh-WorldBackupStatus
+    }
+}
+
+function Restore-LatestWorld {
+    $result = Invoke-AgentCommandSafe -ActionName "拉取最新世界" -Args @("desktop", "world-backup", "restore", "latest", "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $result) {
+        Add-GuiLog "世界已恢复：$($result.snapshotId)（下载 $($result.downloadedFiles) 个文件）"
+        Refresh-WorldBackupStatus
+    }
+}
+
+function Show-WorldBackupHistory {
+    $result = Invoke-AgentCommandSafe -ActionName "查看历史快照" -Args @("desktop", "world-backup", "list", "--app-data-dir", $AppDataDir) -Json
+    if ($null -eq $result) { return }
+    $lines = @()
+    foreach ($snap in ($result.snapshots | Sort-Object createdAt -Descending)) {
+        $pin = if ($snap.pinned) { " [固定]" } else { "" }
+        $cons = if ($snap.consistent) { "一致" } else { "不一致" }
+        $lines += "$($snap.snapshotId)  $($snap.createdAt)  host=$($snap.sourceHostId)  gen=$($snap.hostGeneration)  $cons$pin"
+    }
+    if ($lines.Count -eq 0) { $lines = @("暂无历史世界快照。") }
+    [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "历史世界快照", "OK", "Information") | Out-Null
+}
+
+function Restore-WorldBackupSnapshot {
+    $snapshotId = Prompt-Text -Title "恢复快照" -Prompt "输入快照 ID（留空取消）：" -Default "latest"
+    if ([string]::IsNullOrWhiteSpace($snapshotId)) { return }
+    $result = Invoke-AgentCommandSafe -ActionName "恢复快照" -Args @("desktop", "world-backup", "restore", $snapshotId, "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $result) {
+        Add-GuiLog "快照已恢复：$($result.snapshotId)"
+        Refresh-WorldBackupStatus
+    }
+}
+
+function Pin-WorldBackupSnapshot {
+    $snapshotId = Prompt-Text -Title "固定快照" -Prompt "输入要固定的快照 ID："
+    if ([string]::IsNullOrWhiteSpace($snapshotId)) { return }
+    $result = Invoke-AgentCommandSafe -ActionName "固定快照" -Args @("desktop", "world-backup", "pin", $snapshotId, "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $result -and $result.ok) {
+        Add-GuiLog "快照已固定：$($result.snapshotId)"
+        Refresh-WorldBackupStatus
+    }
+}
+
+function Delete-WorldBackupSnapshot {
+    $snapshotId = Prompt-Text -Title "删除快照" -Prompt "输入要删除的快照 ID："
+    if ([string]::IsNullOrWhiteSpace($snapshotId)) { return }
+    $confirm = [System.Windows.Forms.MessageBox]::Show("确认删除快照 $snapshotId ？", "删除快照", "YesNo", "Warning")
+    if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $result = Invoke-AgentCommandSafe -ActionName "删除快照" -Args @("desktop", "world-backup", "delete", $snapshotId, "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $result -and $result.ok) {
+        Add-GuiLog "快照已删除：$($result.snapshotId)"
+        Refresh-WorldBackupStatus
+    }
+}
+
+function Resume-WorldBackup {
+    $result = Invoke-AgentCommandSafe -ActionName "继续未完成备份" -Args @("desktop", "world-backup", "resume", "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $result) {
+        Add-GuiLog "备份已继续：$($result.snapshotId)"
+        Refresh-WorldBackupStatus
+    }
+}
+
 function Complete-Setup {
     $result = Invoke-AgentCommandSafe -ActionName "完成配置" -Args @("desktop", "setup", "complete", "--app-data-dir", $AppDataDir) -Json
     if ($null -ne $result -and $result.ok) {
@@ -532,6 +700,7 @@ function Refresh-Status {
             $lblState.Text = "状态：" + $status.state
         }
         Add-GuiLog "状态已刷新。"
+        Refresh-WorldBackupStatus
     } catch {
         Add-GuiLog "状态刷新失败：" + $_.Exception.Message
     }
@@ -721,6 +890,41 @@ Add-Button $mainPanel "完成并进入 ACBH" 204 104 { Complete-Setup } "保存 
 Add-Button $mainPanel "复制玩家地址" 20 140 { if ($txtPlayerAddress.Text) { [System.Windows.Forms.Clipboard]::SetText($txtPlayerAddress.Text); Add-GuiLog "玩家地址已复制。" } } ""
 Add-Button $mainPanel "打开日志" 204 140 { Open-LogDir } ""
 
+$worldBackupPanel = New-Object System.Windows.Forms.GroupBox
+$worldBackupPanel.Text = "世界差量备份"
+$worldBackupPanel.Location = New-Object System.Drawing.Point(20, 500)
+$worldBackupPanel.Size = New-Object System.Drawing.Size(470, 190)
+$form.Controls.Add($worldBackupPanel)
+
+$txtWorldBackupSummary = New-Object System.Windows.Forms.TextBox
+$txtWorldBackupSummary.Location = New-Object System.Drawing.Point(16, 24)
+$txtWorldBackupSummary.Size = New-Object System.Drawing.Size(438, 72)
+$txtWorldBackupSummary.Multiline = $true
+$txtWorldBackupSummary.ScrollBars = "Vertical"
+$txtWorldBackupSummary.ReadOnly = $true
+$worldBackupPanel.Controls.Add($txtWorldBackupSummary)
+
+function Add-WorldBackupButton {
+    param([string]$Text, [int]$X, [int]$Y, [scriptblock]$Click, [string]$Tip = "")
+    $button = New-Object System.Windows.Forms.Button
+    $button.Text = $Text
+    $button.Location = New-Object System.Drawing.Point($X, $Y)
+    $button.Size = New-Object System.Drawing.Size(104, 28)
+    Add-SafeClick $button $Click
+    if ($Tip) { $script:ToolTip.SetToolTip($button, $Tip) }
+    $worldBackupPanel.Controls.Add($button)
+    return $button
+}
+
+Add-WorldBackupButton "立即备份世界" 16 104 { Backup-WorldStopped } "创建并上传停止状态下的世界差量快照。"
+Add-WorldBackupButton "在线安全备份" 126 104 { Backup-WorldOnline } "通过 RCON 安全保存后创建差量快照。"
+Add-WorldBackupButton "拉取最新世界" 236 104 { Restore-LatestWorld } "从 Coordinator 恢复最新一致世界快照。"
+Add-WorldBackupButton "查看历史快照" 346 104 { Show-WorldBackupHistory } "列出远程历史世界快照。"
+Add-WorldBackupButton "恢复快照" 16 138 { Restore-WorldBackupSnapshot } "恢复指定快照 ID。"
+Add-WorldBackupButton "固定快照" 126 138 { Pin-WorldBackupSnapshot } "固定快照以避免被保留策略删除。"
+Add-WorldBackupButton "删除快照" 236 138 { Delete-WorldBackupSnapshot } "删除未固定且非最新的快照。"
+Add-WorldBackupButton "继续未完成备份" 346 138 { Resume-WorldBackup } "重新规划并上传缺失对象。"
+
 $advancedPanel = New-Object System.Windows.Forms.GroupBox
 $advancedPanel.Text = "高级诊断"
 $advancedPanel.Location = New-Object System.Drawing.Point(510, 550)
@@ -753,6 +957,7 @@ $form.Add_Shown({
         Run-EnvironmentCheck
         Load-DesktopConfig
         Refresh-Status
+        Update-WorldBackupPanel $null
     } catch {
         Show-GuiError "初始化失败：$($_.Exception.Message)"
     }

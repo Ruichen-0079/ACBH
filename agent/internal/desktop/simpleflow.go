@@ -23,7 +23,6 @@ import (
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
-	"github.com/Ruichen-0079/ACBH/agent/internal/manifest"
 	"github.com/Ruichen-0079/ACBH/agent/internal/mcimport"
 	"github.com/Ruichen-0079/ACBH/agent/internal/worldbackup"
 )
