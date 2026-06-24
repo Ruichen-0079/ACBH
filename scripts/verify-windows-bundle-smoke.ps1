@@ -241,6 +241,10 @@ try {
         '"desktop", "setup", "configure-network"',
         '"desktop", "server", "start-auto"',
         '"desktop", "server", "select-launch"',
+        '"desktop", "setup", "config"',
+        "Load-DesktopConfig",
+        "Forget-DesktopConfig",
+        "Create-Invite",
         "Update-ServerSummary",
         "Show-LaunchEvidence",
         "advancedPanel",
@@ -300,10 +304,26 @@ try {
     if ($network.coordinatorUrl -ne $coordURL -or $network.playerAddress -ne "127.0.0.1:25565") {
         throw "configure-network returned unexpected addresses"
     }
+    $desktopConfig = Invoke-AgentJson -Args @("desktop", "setup", "config", "--app-data-dir", $AppData, "--json")
+    if ($desktopConfig.coordinatorUrl -ne $coordURL -or $desktopConfig.publicEntry -ne "127.0.0.1:25565") {
+        throw "desktop config did not remember network settings"
+    }
 
     $group = Invoke-AgentJson -Args @("desktop", "setup", "create-group", "--app-data-dir", $AppData, "--group-name", "Smoke Group", "--display-name", "Owner", "--coordinator-url", $coordURL, "--json")
     if (-not $group.ok -or -not $group.inviteCode) {
         throw "setup create-group did not create an invite code"
+    }
+    $ownerConfig = Invoke-AgentJson -Args @("desktop", "setup", "config", "--app-data-dir", $AppData, "--json")
+    if ($ownerConfig.group.groupId -ne $group.groupId -or -not $ownerConfig.group.hostId) {
+        throw "desktop config did not remember group identity"
+    }
+    $desktopConfigRaw = Get-Content -Raw -Encoding UTF8 -Path (Join-Path $AppData "desktop-config.json")
+    if ($desktopConfigRaw -match "(?i)accessKey|hostToken|memberToken|inviteCode|rcon\.password|takeoverToken") {
+        throw "desktop-config.json leaked a sensitive field"
+    }
+    $inviteList = Invoke-AgentJson -Args @("desktop", "setup", "list-invites", "--app-data-dir", $AppData, "--json")
+    if (-not $inviteList.ok -or ($inviteList | ConvertTo-Json -Depth 8) -match [regex]::Escape($group.inviteCode)) {
+        throw "invite list failed or exposed plaintext invite code"
     }
     $joined = Invoke-AgentJson -Args @("desktop", "setup", "join-group", "--app-data-dir", $JoinAppData, "--invite-code", $group.inviteCode, "--display-name", "Friend", "--coordinator-url", $coordURL, "--json")
     if (-not $joined.ok -or $joined.groupId -ne $group.groupId) {
@@ -334,12 +354,43 @@ try {
     if ($profile.kind -ne "jar" -or $profile.serverType -ne "Paper") {
         throw "desktop server launch-profile did not return saved profile"
     }
+    $desktopConfigAfterServer = Invoke-AgentJson -Args @("desktop", "setup", "config", "--app-data-dir", $AppData, "--json")
+    if ($desktopConfigAfterServer.lastServerDir -ne $serverDir -or $desktopConfigAfterServer.launchProfile.path -ne "paper-1.20.1.jar") {
+        throw "desktop config did not remember server directory and launch profile"
+    }
+
+    $psServerDir = Join-Path $TempRoot "fixture-ps1-server"
+    New-Item -ItemType Directory -Force -Path (Join-Path $psServerDir "world") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $psServerDir "mods") | Out-Null
+    Write-Utf8NoBom -Path (Join-Path $psServerDir "Run.PS1") -Text "Write-Host 'smoke run.ps1 fixture'"
+    Write-Utf8NoBom -Path (Join-Path $psServerDir "eula.txt") -Text "eula=true"
+    Write-Utf8NoBom -Path (Join-Path $psServerDir "server.properties") -Text "server-port=25565`nlevel-name=world"
+    $psInspect = Invoke-AgentJson -Args @("desktop", "setup", "inspect-server", "--app-data-dir", $AppData, "--server-dir", $psServerDir, "--json")
+    if (-not $psInspect.ok -or -not $psInspect.launchReady -or $psInspect.report.serverType -ne "CustomScript" -or $psInspect.launchProfile.scriptType -ne "powershell" -or $psInspect.launchProfile.scriptPath -ne "Run.PS1") {
+        throw "setup inspect-server did not recognize Run.PS1 as PowerShell CustomScript"
+    }
+    $psCandidates = Invoke-AgentJson -Args @("desktop", "server", "candidates", "--app-data-dir", $AppData, "--json")
+    if ($psCandidates.scripts.Count -lt 1 -or $psCandidates.recommended.scriptType -ne "powershell") {
+        throw "desktop server candidates did not return PowerShell script candidate"
+    }
+    $psSelected = Invoke-AgentJson -Args @("desktop", "server", "select-launch", "--app-data-dir", $AppData, "--path", "Run.PS1", "--json")
+    if (-not $psSelected.launchReady -or $psSelected.launchProfile.scriptType -ne "powershell") {
+        throw "desktop server select-launch did not save PowerShell profile"
+    }
+    $psProfile = Invoke-AgentJson -Args @("desktop", "server", "launch-profile", "--app-data-dir", $AppData, "--json")
+    if ($psProfile.kind -ne "script" -or $psProfile.scriptType -ne "powershell" -or $psProfile.scriptPath -ne "Run.PS1") {
+        throw "desktop server launch-profile did not preserve PowerShell profile"
+    }
+    $desktopConfigAfterPs1 = Invoke-AgentJson -Args @("desktop", "setup", "config", "--app-data-dir", $AppData, "--json")
+    if ($desktopConfigAfterPs1.lastServerDir -ne $psServerDir -or $desktopConfigAfterPs1.launchProfile.path -ne "Run.PS1" -or $desktopConfigAfterPs1.launchProfile.scriptType -ne "powershell") {
+        throw "desktop config did not remember run.ps1 launch profile"
+    }
     $complete = Invoke-AgentJson -Args @("desktop", "setup", "complete", "--app-data-dir", $AppData, "--json")
     if (-not $complete.ok -or $complete.state -ne "Ready") {
         throw "setup complete did not enter Ready state"
     }
     $cfg = Get-Content -Raw -Encoding UTF8 -Path (Join-Path $AppData "config.yaml") | ConvertFrom-Json
-    if ($cfg.server.dir -ne $serverDir -or -not $cfg.server.command) {
+    if ($cfg.server.dir -ne $psServerDir -or -not $cfg.server.command) {
         throw "setup inspect-server did not persist server config for one-click start"
     }
 
@@ -371,9 +422,9 @@ try {
     try {
         $agentExe = Join-Path $BundleRoot "acbh-agent-windows-amd64.exe"
         if (Test-Path $agentExe) {
-            & $agentExe desktop server stop-auto --app-data-dir $AppData 2>$null | Out-Null
+            & $agentExe desktop server stop-auto --app-data-dir $AppData 2> $null | Out-Null
             if ($Port) {
-                & $agentExe desktop stop --app-data-dir $AppData --port "$Port" 2>$null | Out-Null
+                & $agentExe desktop stop --app-data-dir $AppData --port $Port 2> $null | Out-Null
             }
         }
     } catch {

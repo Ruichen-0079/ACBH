@@ -17,6 +17,7 @@ import type { RelayManager } from "./relay.js";
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
 const manifestUploadBodyLimitBytes = 1024 * 1024;
+const inviteJoinRateLimits = new Map<string, { count: number; resetAt: number }>();
 export const defaultMaxObjectBytes = 256 * 1024 * 1024;
 
 const bootstrapPackageDefinitions = [
@@ -67,6 +68,10 @@ const createInviteSchema = z.object({
 const revokeInviteSchema = z.object({
   accessKey: z.string().min(1),
   inviteId: z.string().min(1),
+});
+
+const listInviteSchema = z.object({
+  accessKey: z.string().min(1),
 });
 
 const joinInviteSchema = z.object({
@@ -773,6 +778,20 @@ export async function registerRoutes(
     );
   });
 
+  app.post("/v1/groups/:groupId/invites/list", async (request, reply) => {
+    const params = parseParams(joinGroupParamsSchema, request, reply);
+    const body = parseBody(listInviteSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () =>
+      store.listInvites({
+        groupId: params.groupId,
+        accessKey: body.accessKey,
+      }),
+    );
+  });
+
   app.post("/v1/groups/:groupId/invites/revoke", async (request, reply) => {
     const params = parseParams(joinGroupParamsSchema, request, reply);
     const body = parseBody(revokeInviteSchema, request, reply);
@@ -792,6 +811,12 @@ export async function registerRoutes(
     const body = parseBody(joinInviteSchema, request, reply);
     if (!body) {
       return reply;
+    }
+    if (!allowInviteJoinAttempt(request.ip, body.inviteCode)) {
+      return reply.code(429).send({
+        error: "Too Many Requests",
+        message: "Invite join failed. Please try again later.",
+      });
     }
     return handleStoreCall(reply, () => store.joinWithInvite(body));
   });
@@ -1096,6 +1121,27 @@ function handleStoreCall<T>(reply: FastifyReply, call: () => T): T | FastifyRepl
 
     throw error;
   }
+}
+
+function allowInviteJoinAttempt(ip: string, inviteCode: string): boolean {
+  const now = Date.now();
+  const codeHash = createHash("sha256").update(inviteCode, "utf8").digest("hex").slice(0, 16);
+  const keys = [`ip:${ip}`, `invite:${codeHash}`];
+  for (const key of keys) {
+    const current = inviteJoinRateLimits.get(key);
+    if (current && current.resetAt > now && current.count >= 10) {
+      return false;
+    }
+  }
+  for (const key of keys) {
+    const current = inviteJoinRateLimits.get(key);
+    if (!current || current.resetAt <= now) {
+      inviteJoinRateLimits.set(key, { count: 1, resetAt: now + 60_000 });
+    } else {
+      current.count += 1;
+    }
+  }
+  return true;
 }
 
 async function handleStorageCall<T>(

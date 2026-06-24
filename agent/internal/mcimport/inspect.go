@@ -56,9 +56,12 @@ type Report struct {
 type LaunchProfile struct {
 	Kind                string     `json:"kind"`
 	ServerType          ServerType `json:"serverType"`
+	ScriptType          string     `json:"scriptType,omitempty"`
 	ScriptPath          string     `json:"scriptPath,omitempty"`
 	JarPath             string     `json:"jarPath,omitempty"`
 	WorkingDirectory    string     `json:"workingDirectory"`
+	Shell               string     `json:"shell,omitempty"`
+	ShellArguments      []string   `json:"shellArguments,omitempty"`
 	JavaPath            string     `json:"javaPath,omitempty"`
 	RequiredJavaVersion string     `json:"requiredJavaVersion,omitempty"`
 	DetectedJavaVersion string     `json:"detectedJavaVersion,omitempty"`
@@ -71,6 +74,7 @@ type LaunchCandidate struct {
 	Path       string     `json:"path"`
 	Kind       string     `json:"kind"`
 	ServerType ServerType `json:"serverType"`
+	ScriptType string     `json:"scriptType,omitempty"`
 	Confidence string     `json:"confidence"`
 	Evidence   []string   `json:"evidence,omitempty"`
 }
@@ -186,7 +190,8 @@ func SelectLaunchProfile(serverDir string, selectedPath string) (Report, error) 
 			report.LaunchReady = true
 			report.BlockingReasons = nil
 			report.LaunchProfile = LaunchProfile{
-				Kind: "script", ServerType: candidate.ServerType, ScriptPath: candidate.Path, WorkingDirectory: report.ServerDir,
+				Kind: "script", ServerType: candidate.ServerType, ScriptType: candidate.ScriptType, ScriptPath: candidate.Path, WorkingDirectory: report.ServerDir,
+				Shell: scriptShell(candidate.ScriptType), ShellArguments: scriptShellArguments(candidate.ScriptType, candidate.Path),
 				RequiredJavaVersion: javaRequirementFor(candidate.ServerType), Confidence: candidate.Confidence, Evidence: candidate.Evidence,
 			}
 			report.SuggestedCommand = suggestedCommand(candidate.Path)
@@ -212,6 +217,24 @@ func SelectLaunchProfile(serverDir string, selectedPath string) (Report, error) 
 			return report, nil
 		}
 	}
+	if manual, ok, err := manualScriptCandidate(report.ServerDir, rel); err != nil {
+		return report, err
+	} else if ok {
+		report.ServerType = manual.ServerType
+		report.LaunchEntry = manual.Path
+		report.LaunchJar = ""
+		report.LaunchReady = true
+		report.BlockingReasons = nil
+		report.LaunchProfile = LaunchProfile{
+			Kind: "script", ServerType: manual.ServerType, ScriptType: manual.ScriptType, ScriptPath: manual.Path, WorkingDirectory: report.ServerDir,
+			Shell: scriptShell(manual.ScriptType), ShellArguments: scriptShellArguments(manual.ScriptType, manual.Path),
+			RequiredJavaVersion: javaRequirementFor(manual.ServerType), Confidence: manual.Confidence, Evidence: manual.Evidence,
+		}
+		report.SuggestedCommand = suggestedCommand(manual.Path)
+		report.JavaRequirement = report.LaunchProfile.RequiredJavaVersion
+		report.RequiredJavaVersion = report.LaunchProfile.RequiredJavaVersion
+		return report, nil
+	}
 	return report, fmt.Errorf("选择的启动文件不在候选列表中: %s", selectedPath)
 }
 
@@ -221,15 +244,21 @@ func normalizeSelectedPath(serverDir string, selectedPath string) (string, error
 		return "", fmt.Errorf("请选择启动文件")
 	}
 	clean := filepath.Clean(selectedPath)
+	if strings.HasPrefix(clean, `\\`) {
+		return "", fmt.Errorf("暂不支持网络 UNC 启动脚本路径")
+	}
 	if filepath.IsAbs(clean) {
 		rel, err := filepath.Rel(serverDir, clean)
 		if err != nil {
 			return "", err
 		}
-		if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		if pathEscapesBase(rel) {
 			return "", fmt.Errorf("启动文件必须位于服务端目录内")
 		}
 		clean = rel
+	}
+	if pathEscapesBase(clean) {
+		return "", fmt.Errorf("启动文件必须位于服务端目录内")
 	}
 	return filepath.ToSlash(clean), nil
 }
@@ -249,11 +278,12 @@ type launchDetection struct {
 func detectType(serverDir string) launchDetection {
 	evidence := detectEvidence(serverDir)
 	scriptCandidates := make([]LaunchCandidate, 0)
-	for _, script := range []string{"run.bat", "start.bat", "server-start.bat", "start.ps1"} {
-		if exists(filepath.Join(serverDir, script)) {
+	for _, script := range []string{"run.bat", "run.ps1", "start.bat", "start.ps1", "server-start.bat", "server-start.ps1"} {
+		if actual, ok := findCaseInsensitiveFile(serverDir, script); ok {
+			scriptType := scriptTypeForPath(actual)
 			scriptCandidates = append(scriptCandidates, LaunchCandidate{
-				Path: script, Kind: "script", ServerType: CustomScript, Confidence: "high",
-				Evidence: append([]string{"发现 " + script}, evidence...),
+				Path: actual, Kind: "script", ServerType: CustomScript, ScriptType: scriptType, Confidence: "high",
+				Evidence: append(scriptEvidence(serverDir, actual), evidence...),
 			})
 		}
 	}
@@ -265,8 +295,10 @@ func detectType(serverDir string) launchDetection {
 
 	if len(scriptCandidates) > 0 {
 		entry := scriptCandidates[0].Path
+		scriptType := scriptCandidates[0].ScriptType
 		profile := LaunchProfile{
-			Kind: "script", ServerType: CustomScript, ScriptPath: entry, WorkingDirectory: serverDir,
+			Kind: "script", ServerType: CustomScript, ScriptType: scriptType, ScriptPath: entry, WorkingDirectory: serverDir,
+			Shell: scriptShell(scriptType), ShellArguments: scriptShellArguments(scriptType, entry),
 			RequiredJavaVersion: javaRequirementFor(CustomScript), Confidence: "high",
 			Evidence: scriptCandidates[0].Evidence,
 		}
@@ -362,6 +394,153 @@ func launchCandidate(path string, kind string, serverType ServerType, confidence
 	return LaunchCandidate{Path: path, Kind: kind, ServerType: serverType, Confidence: confidence, Evidence: []string{evidence}}
 }
 
+func manualScriptCandidate(serverDir string, rel string) (LaunchCandidate, bool, error) {
+	if rel == "" {
+		return LaunchCandidate{}, false, nil
+	}
+	lower := strings.ToLower(rel)
+	if !strings.HasSuffix(lower, ".ps1") && !strings.HasSuffix(lower, ".bat") && !strings.HasSuffix(lower, ".cmd") {
+		return LaunchCandidate{}, false, nil
+	}
+	actual, err := resolveInsideServerDir(serverDir, rel)
+	if err != nil {
+		return LaunchCandidate{}, false, err
+	}
+	info, err := os.Stat(actual)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return LaunchCandidate{}, false, fmt.Errorf("%s 不存在或已被移动", rel)
+		}
+		return LaunchCandidate{}, false, err
+	}
+	if info.IsDir() {
+		return LaunchCandidate{}, false, fmt.Errorf("启动文件不能是目录: %s", rel)
+	}
+	relActual, err := filepath.Rel(serverDir, actual)
+	if err != nil {
+		return LaunchCandidate{}, false, err
+	}
+	relActual = filepath.ToSlash(relActual)
+	scriptType := scriptTypeForPath(relActual)
+	return LaunchCandidate{
+		Path: relActual, Kind: "script", ServerType: CustomScript, ScriptType: scriptType, Confidence: "manual",
+		Evidence: append(scriptEvidence(serverDir, relActual), "用户手动选择启动脚本"),
+	}, true, nil
+}
+
+func findCaseInsensitiveFile(dir string, want string) (string, bool) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if strings.EqualFold(entry.Name(), want) {
+			return entry.Name(), true
+		}
+	}
+	return "", false
+}
+
+func scriptTypeForPath(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".ps1":
+		return "powershell"
+	case ".bat", ".cmd":
+		return "batch"
+	default:
+		return ""
+	}
+}
+
+func scriptShell(scriptType string) string {
+	switch scriptType {
+	case "powershell":
+		return "powershell.exe"
+	case "batch":
+		if runtime.GOOS == "windows" {
+			return "cmd.exe"
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+func scriptShellArguments(scriptType string, scriptPath string) []string {
+	switch scriptType {
+	case "powershell":
+		return []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath}
+	case "batch":
+		if runtime.GOOS == "windows" {
+			return []string{"/c", scriptPath}
+		}
+		return []string{scriptPath}
+	default:
+		return nil
+	}
+}
+
+func scriptEvidence(serverDir string, script string) []string {
+	evidence := []string{"发现 " + script}
+	if strings.EqualFold(scriptTypeForPath(script), "powershell") {
+		evidence = append(evidence, "识别为 PowerShell 启动脚本")
+	}
+	data, err := os.ReadFile(filepath.Join(serverDir, filepath.FromSlash(script)))
+	if err != nil {
+		return evidence
+	}
+	lower := strings.ToLower(string(data))
+	for _, marker := range []string{"java.exe", "java", "java_home", "-xms", "-xmx", "-jar", "@libraries", "user_jvm_args.txt", "win_args.txt"} {
+		if strings.Contains(lower, marker) {
+			evidence = append(evidence, "脚本内容包含 "+marker)
+		}
+	}
+	if strings.Contains(lower, "libraries/net/minecraftforge") || strings.Contains(lower, "net\\minecraftforge") {
+		evidence = append(evidence, "脚本内容包含 Forge libraries 引用")
+	}
+	if strings.Contains(lower, "libraries/net/neoforged") || strings.Contains(lower, "net\\neoforged") {
+		evidence = append(evidence, "脚本内容包含 NeoForge libraries 引用")
+	}
+	return evidence
+}
+
+func resolveInsideServerDir(serverDir string, rel string) (string, error) {
+	if strings.HasPrefix(rel, `\\`) {
+		return "", fmt.Errorf("暂不支持网络 UNC 启动脚本路径")
+	}
+	baseAbs, err := filepath.Abs(serverDir)
+	if err != nil {
+		return "", err
+	}
+	clean := filepath.Clean(filepath.FromSlash(rel))
+	var candidate string
+	if filepath.IsAbs(clean) {
+		candidate = clean
+	} else {
+		candidate = filepath.Join(baseAbs, clean)
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	relToBase, err := filepath.Rel(baseAbs, candidateAbs)
+	if err != nil {
+		return "", err
+	}
+	if pathEscapesBase(relToBase) {
+		return "", fmt.Errorf("run.ps1 不在服务端目录内，已拒绝执行")
+	}
+	return candidateAbs, nil
+}
+
+func pathEscapesBase(rel string) bool {
+	rel = filepath.Clean(rel)
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel)
+}
+
 func detectEvidence(serverDir string) []string {
 	var evidence []string
 	checks := []struct {
@@ -450,6 +629,9 @@ func kindForEntry(entry string) ServerType {
 
 func suggestedCommand(entry string) string {
 	lower := strings.ToLower(entry)
+	if strings.HasSuffix(lower, ".ps1") {
+		return "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " + entry
+	}
 	if strings.HasSuffix(lower, ".bat") {
 		if runtime.GOOS == "windows" {
 			return "cmd /c " + entry
@@ -469,8 +651,10 @@ func javaRequirementFor(kind ServerType) string {
 		return "17"
 	case Velocity:
 		return "17"
-	case Fabric, Paper, Purpur, Vanilla, CustomScript, GenericJar:
+	case Fabric, Paper, Purpur, Vanilla, GenericJar:
 		return "17"
+	case CustomScript:
+		return ""
 	default:
 		return ""
 	}

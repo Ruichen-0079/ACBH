@@ -130,6 +130,54 @@ test("revoked access key is rejected", () => {
   );
 });
 
+test("invite lifecycle uses hashes, one-time use, revoke, and no shared access key", () => {
+  const store = createInMemoryCoordinatorStore();
+  const group = store.createGroup({ name: "InviteTest", ownerName: "Owner" });
+  const invite = store.createInvite({ groupId: group.groupId, accessKey: group.accessKey, expiresInSeconds: 1800, oneTime: true });
+  assert.match(invite.inviteCode, /^ACBH-[A-F0-9]{6}-[A-F0-9]{6}$/);
+
+  const snapshot = store.snapshot();
+  const storedInvite = snapshot.groups[0].invites?.[0];
+  assert.ok(storedInvite);
+  assert.equal("inviteCode" in storedInvite, false);
+  assert.notEqual(storedInvite.inviteCodeHash, invite.inviteCode);
+
+  const joined = store.joinWithInvite({
+    inviteCode: invite.inviteCode,
+    displayName: "Member",
+    deviceName: "MSI",
+    platform: "windows",
+    agentVersion: "0.1.0",
+  });
+  assert.equal(joined.groupId, group.groupId);
+  assert.ok(joined.hostToken);
+  assert.equal("accessKey" in joined, false);
+  assert.throws(
+    () => store.joinWithInvite({ inviteCode: invite.inviteCode, displayName: "Again", deviceName: "PC", platform: "windows", agentVersion: "0.1.0" }),
+    /Invalid or expired invite code/,
+  );
+
+  const second = store.createInvite({ groupId: group.groupId, accessKey: group.accessKey, expiresInSeconds: 1800, oneTime: true });
+  const listed = store.listInvites({ groupId: group.groupId, accessKey: group.accessKey });
+  assert.equal(listed.invites.some((i) => i.inviteId === second.inviteId), true);
+  assert.equal(JSON.stringify(listed).includes(second.inviteCode), false);
+  store.revokeInvite({ groupId: group.groupId, accessKey: group.accessKey, inviteId: second.inviteId });
+  assert.throws(
+    () => store.joinWithInvite({ inviteCode: second.inviteCode, displayName: "Revoked", deviceName: "PC", platform: "windows", agentVersion: "0.1.0" }),
+    /Invalid or expired invite code/,
+  );
+});
+
+test("ordinary invite member cannot generate or revoke invites", () => {
+  const store = createInMemoryCoordinatorStore();
+  const group = store.createGroup({ name: "InviteTest", ownerName: "Owner" });
+  const invite = store.createInvite({ groupId: group.groupId, accessKey: group.accessKey, expiresInSeconds: 1800, oneTime: true });
+  const joined = store.joinWithInvite({ inviteCode: invite.inviteCode, displayName: "Member", deviceName: "MSI", platform: "windows", agentVersion: "0.1.0" });
+  assert.ok(joined.hostToken);
+  assert.throws(() => store.createInvite({ groupId: group.groupId, accessKey: joined.hostToken, expiresInSeconds: 1800, oneTime: true }), /Invalid access key/);
+  assert.throws(() => store.revokeInvite({ groupId: group.groupId, accessKey: joined.hostToken, inviteId: invite.inviteId }), /Invalid access key/);
+});
+
 test("expired player token rejected in verifyPlayerToken", () => {
   const clock = testClock("2026-06-06T00:00:00.000Z");
   const store = createInMemoryCoordinatorStore({ now: clock.now, tunnelSessionTtlMs: 5_000 });

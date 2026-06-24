@@ -71,6 +71,34 @@ type CreateInviteResponse struct {
 	OneTime    bool   `json:"oneTime"`
 }
 
+type PublicInvite struct {
+	InviteID  string  `json:"inviteId"`
+	GroupID   string  `json:"groupId"`
+	ExpiresAt string  `json:"expiresAt"`
+	OneTime   bool    `json:"oneTime"`
+	UsedAt    *string `json:"usedAt"`
+	RevokedAt *string `json:"revokedAt"`
+	CreatedAt string  `json:"createdAt"`
+}
+
+type ListInvitesRequest struct {
+	AccessKey string `json:"accessKey"`
+}
+
+type ListInvitesResponse struct {
+	Invites []PublicInvite `json:"invites"`
+}
+
+type RevokeInviteRequest struct {
+	AccessKey string `json:"accessKey"`
+	InviteID  string `json:"inviteId"`
+}
+
+type RevokeInviteResponse struct {
+	OK       bool   `json:"ok"`
+	InviteID string `json:"inviteId"`
+}
+
 type JoinInviteRequest struct {
 	InviteCode   string `json:"inviteCode"`
 	DisplayName  string `json:"displayName"`
@@ -340,6 +368,18 @@ func (c *Client) RegisterHost(ctx context.Context, req RegisterHostRequest) (Reg
 func (c *Client) CreateInvite(ctx context.Context, groupID string, req CreateInviteRequest) (CreateInviteResponse, error) {
 	var out CreateInviteResponse
 	err := c.post(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/invites", req, &out)
+	return out, err
+}
+
+func (c *Client) ListInvites(ctx context.Context, groupID string, req ListInvitesRequest) (ListInvitesResponse, error) {
+	var out ListInvitesResponse
+	err := c.post(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/invites/list", req, &out)
+	return out, err
+}
+
+func (c *Client) RevokeInvite(ctx context.Context, groupID string, req RevokeInviteRequest) (RevokeInviteResponse, error) {
+	var out RevokeInviteResponse
+	err := c.post(ctx, "/v1/groups/"+url.PathEscape(groupID)+"/invites/revoke", req, &out)
 	return out, err
 }
 

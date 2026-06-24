@@ -45,6 +45,7 @@ func TestStateSaveLoadDelete(t *testing.T) {
 	want := State{
 		PID:           123,
 		SupervisorPID: 456,
+		LauncherPID:   123,
 		ServerDir:     t.TempDir(),
 		Command:       "java -jar server.jar",
 		StartedAt:     time.Now().UTC().Truncate(time.Second),
@@ -115,6 +116,44 @@ func TestSupervisorGracefulStopCreatesLogsAndClearsState(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "helper stderr") {
 		t.Fatalf("stderr log = %q", stderr)
+	}
+}
+
+func TestSupervisorCommandArgvHandlesSpacesAndRecordsLauncherPID(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	logDir := filepath.Join(t.TempDir(), "logs")
+	serverDir := filepath.Join(t.TempDir(), "测试 服务端")
+	if err := os.MkdirAll(serverDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GO_WANT_MCSERVER_HELPER", "1")
+	argv := []string{os.Args[0], "-test.run=TestMCServerHelperProcess", "--", "graceful"}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runTestSupervisor(context.Background(), SupervisorOptions{
+			StartOptions: StartOptions{
+				ServerDir:   serverDir,
+				CommandArgv: argv,
+				LogDir:      logDir,
+				RuntimeDir:  runtimeDir,
+				StopTimeout: time.Second,
+			},
+		})
+	}()
+
+	status := waitForRunning(t, runtimeDir)
+	if status.State.LauncherPID != status.State.PID || status.State.LauncherPID <= 0 {
+		t.Fatalf("state PID=%d launcherPID=%d", status.State.PID, status.State.LauncherPID)
+	}
+	if len(status.State.CommandArgv) != len(argv) {
+		t.Fatalf("CommandArgv = %#v, want %#v", status.State.CommandArgv, argv)
+	}
+	if _, stopped, err := Stop(runtimeDir); err != nil || !stopped {
+		t.Fatalf("Stop() stopped=%t error=%v", stopped, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("RunSupervisor() error = %v", err)
 	}
 }
 
@@ -478,6 +517,7 @@ func TestStartSupervisorProcess(t *testing.T) {
 	flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
 	serverDir := flags.String("server-dir", "", "")
 	command := flags.String("command", "", "")
+	commandArgv := flags.String("command-argv", "", "")
 	logDir := flags.String("log-dir", "", "")
 	runtimeDir := flags.String("runtime-dir", "", "")
 	stopTimeout := flags.Duration("stop-timeout", time.Second, "")
@@ -488,7 +528,8 @@ func TestStartSupervisorProcess(t *testing.T) {
 	err := RunSupervisor(context.Background(), SupervisorOptions{
 		StartOptions: StartOptions{
 			ServerDir: *serverDir, Command: *command, LogDir: *logDir,
-			RuntimeDir: *runtimeDir, StopTimeout: *stopTimeout,
+			CommandArgv: DecodeCommandArgv(*commandArgv),
+			RuntimeDir:  *runtimeDir, StopTimeout: *stopTimeout,
 		},
 		LockNonce: *lockNonce,
 	})

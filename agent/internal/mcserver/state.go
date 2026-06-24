@@ -17,6 +17,8 @@ var ErrStateNotFound = errors.New("server state not found")
 type State struct {
 	PID           int       `json:"pid"`
 	SupervisorPID int       `json:"supervisorPid"`
+	LauncherPID   int       `json:"launcherPid,omitempty"`
+	MinecraftPID  int       `json:"minecraftPid,omitempty"`
 	ServerDir     string    `json:"serverDir"`
 	Command       string    `json:"command"`
 	CommandArgv   []string  `json:"commandArgv,omitempty"`

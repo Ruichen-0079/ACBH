@@ -232,6 +232,7 @@ func RunSupervisor(ctx context.Context, opts SupervisorOptions) error {
 	state := State{
 		PID:           serverCmd.Process.Pid,
 		SupervisorPID: os.Getpid(),
+		LauncherPID:   serverCmd.Process.Pid,
 		ServerDir:     normalized.ServerDir,
 		Command:       normalized.Command,
 		CommandArgv:   normalized.CommandArgv,

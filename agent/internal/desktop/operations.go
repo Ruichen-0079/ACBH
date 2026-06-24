@@ -110,6 +110,9 @@ type StartServerResult struct {
 	ServerDir        string   `json:"serverDir,omitempty"`
 	WorkingDirectory string   `json:"workingDirectory,omitempty"`
 	LaunchCommand    string   `json:"launchCommand,omitempty"`
+	ScriptPath       string   `json:"scriptPath,omitempty"`
+	LauncherPath     string   `json:"launcherPath,omitempty"`
+	ExitCode         int      `json:"exitCode,omitempty"`
 	JavaPath         string   `json:"javaPath,omitempty"`
 	JarPath          string   `json:"jarPath,omitempty"`
 	LogFile          string   `json:"logFile,omitempty"`
@@ -833,6 +836,8 @@ func StartServer(opts Options) (StartServerResult, error) {
 		return res, nil
 	}
 
+	setup, _ := LoadSetup(opts)
+
 	// inspect for jar, eula, props
 	report, inspectErr := mcimport.Inspect(serverDir)
 	if inspectErr != nil {
@@ -881,16 +886,32 @@ func StartServer(opts Options) (StartServerResult, error) {
 	if launchCommand == "" {
 		launchCommand = report.SuggestedCommand
 	}
-	res.LaunchCommand = launchCommand
-
-	// parse to ensure no shell concat issue (uses argv later in mcserver)
-	argv, parseErr := mcserver.ParseCommand(launchCommand)
-	if parseErr != nil {
-		res.ErrorCode = "bad_command"
-		res.Message = "启动命令解析失败: " + parseErr.Error()
+	launchArgv, psInfo, psErr := buildPowerShellLaunchArgv(serverDir, setup, report, launchCommand)
+	if psErr != nil {
+		res.ErrorCode = psInfo.ErrorCode
+		res.Message = psErr.Error()
+		res.ScriptPath = psInfo.ScriptPath
+		res.WorkingDirectory = serverDir
+		res.LauncherPath = psInfo.LauncherPath
+		res.Suggestion = psInfo.Suggestion
 		return res, nil
 	}
-	_ = argv // will be used by mcserver.Start
+	if len(launchArgv) > 0 {
+		launchCommand = mcserver.DisplayCommand(launchArgv)
+		res.ScriptPath = psInfo.ScriptPath
+		res.LauncherPath = psInfo.LauncherPath
+	}
+	res.LaunchCommand = launchCommand
+
+	if len(launchArgv) == 0 {
+		argv, parseErr := mcserver.ParseCommand(launchCommand)
+		if parseErr != nil {
+			res.ErrorCode = "bad_command"
+			res.Message = "启动命令解析失败: " + parseErr.Error()
+			return res, nil
+		}
+		_ = argv // validated; mcserver parses again inside the supervisor.
+	}
 
 	// server.properties warn but not block (7)
 	if !report.HasProperties {
@@ -930,6 +951,7 @@ func StartServer(opts Options) (StartServerResult, error) {
 	startOpts := mcserver.StartOptions{
 		ServerDir:   serverDir,
 		Command:     launchCommand,
+		CommandArgv: launchArgv,
 		LogDir:      logDirForServer,
 		RuntimeDir:  runtimeDir,
 		StopTimeout: stopTimeout,
@@ -944,9 +966,16 @@ func StartServer(opts Options) (StartServerResult, error) {
 	// call mcserver start (this will record its own state/pid in runtime, we also record simple pid)
 	state, startErr := mcserver.Start(context.Background(), exe, startOpts)
 	if startErr != nil {
-		res.ErrorCode = "start_failed"
-		res.Message = "MC 服务端启动失败: " + startErr.Error()
-		res.Suggestion = "请查看日志目录中的 minecraft 日志，或确认端口、Java 版本、EULA。"
+		if len(launchArgv) > 0 {
+			res.ErrorCode = "powershell_script_failed"
+			res.ExitCode = -1
+			res.Message = "PowerShell 启动失败或 run.ps1 执行后立即退出: " + startErr.Error()
+			res.Suggestion = "请检查 minecraft-server.log 以及 logs/minecraft/server-stderr.log。"
+		} else {
+			res.ErrorCode = "start_failed"
+			res.Message = "MC 服务端启动失败: " + startErr.Error()
+			res.Suggestion = "请查看日志目录中的 minecraft 日志，或确认端口、Java 版本、EULA。"
+		}
 		return res, nil
 	}
 
@@ -961,6 +990,116 @@ func StartServer(opts Options) (StartServerResult, error) {
 	_ = os.WriteFile(logFile, []byte(fmt.Sprintf("[%s] MC server start requested via ACBH desktop (pid supervisor ~%d, see minecraft/*.log)\n", time.Now().Format(time.RFC3339), state.PID)), 0o600)
 
 	return res, nil
+}
+
+type powerShellLaunchInfo struct {
+	ScriptPath   string
+	LauncherPath string
+	ErrorCode    string
+	Suggestion   string
+}
+
+var lookPath = exec.LookPath
+
+func buildPowerShellLaunchArgv(serverDir string, setup SetupState, report mcimport.Report, launchCommand string) ([]string, powerShellLaunchInfo, error) {
+	scriptPath := ""
+	if setup.LaunchProfile.Kind == "script" && strings.EqualFold(setup.LaunchProfile.ScriptType, "powershell") {
+		scriptPath = setup.LaunchProfile.ScriptPath
+	}
+	if scriptPath == "" && report.LaunchProfile.Kind == "script" && strings.EqualFold(report.LaunchProfile.ScriptType, "powershell") {
+		scriptPath = report.LaunchProfile.ScriptPath
+	}
+	if scriptPath == "" {
+		scriptPath = powershellScriptFromCommand(launchCommand)
+	}
+	if scriptPath == "" {
+		return nil, powerShellLaunchInfo{}, nil
+	}
+	info := powerShellLaunchInfo{ScriptPath: scriptPath, Suggestion: "请重新选择服务端目录内的 PowerShell 启动脚本。"}
+	resolved, err := resolveLaunchScriptInside(serverDir, scriptPath)
+	if err != nil {
+		info.ErrorCode = "launch_script_outside_server_dir"
+		return nil, info, err
+	}
+	if _, err := os.Stat(resolved); err != nil {
+		info.ErrorCode = "launch_script_missing"
+		if os.IsNotExist(err) {
+			return nil, info, fmt.Errorf("%s 不存在或已被移动", filepath.Base(scriptPath))
+		}
+		return nil, info, err
+	}
+	launcher, err := findPowerShell()
+	if err != nil {
+		info.ErrorCode = "powershell_not_found"
+		info.Suggestion = "请确认 Windows PowerShell 可用，或安装 PowerShell 7 并确保 pwsh.exe 在 PATH 中。"
+		return nil, info, errors.New("未检测到 PowerShell，无法执行 run.ps1。")
+	}
+	info.ScriptPath = resolved
+	info.LauncherPath = launcher
+	return []string{launcher, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", resolved}, info, nil
+}
+
+func findPowerShell() (string, error) {
+	if p, err := lookPath("powershell.exe"); err == nil {
+		return p, nil
+	}
+	if p, err := lookPath("pwsh.exe"); err == nil {
+		return p, nil
+	}
+	return "", errors.New("powershell not found")
+}
+
+func powershellScriptFromCommand(command string) string {
+	args, err := mcserver.ParseCommand(command)
+	if err != nil {
+		return ""
+	}
+	for i, arg := range args {
+		if strings.EqualFold(arg, "-File") && i+1 < len(args) {
+			if strings.HasSuffix(strings.ToLower(args[i+1]), ".ps1") {
+				return args[i+1]
+			}
+		}
+	}
+	for _, arg := range args {
+		if strings.HasSuffix(strings.ToLower(arg), ".ps1") {
+			return arg
+		}
+	}
+	return ""
+}
+
+func resolveLaunchScriptInside(serverDir string, scriptPath string) (string, error) {
+	scriptPath = strings.TrimSpace(scriptPath)
+	if scriptPath == "" {
+		return "", errors.New("请选择启动脚本。")
+	}
+	if strings.HasPrefix(scriptPath, `\\`) {
+		return "", errors.New("暂不支持网络 UNC 启动脚本路径。")
+	}
+	baseAbs, err := filepath.Abs(filepath.Clean(serverDir))
+	if err != nil {
+		return "", err
+	}
+	clean := filepath.Clean(filepath.FromSlash(scriptPath))
+	var candidate string
+	if filepath.IsAbs(clean) {
+		candidate = clean
+	} else {
+		candidate = filepath.Join(baseAbs, clean)
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(baseAbs, candidateAbs)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", errors.New("run.ps1 不在服务端目录内，已拒绝执行。")
+	}
+	return candidateAbs, nil
 }
 
 func StopServer(opts Options) (StopServerResult, error) {

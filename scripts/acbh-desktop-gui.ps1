@@ -283,6 +283,58 @@ function Configure-Network {
     }
 }
 
+function Load-DesktopConfig {
+    $cfg = Invoke-AgentCommandSafe -ActionName "加载桌面配置" -Args @("desktop", "setup", "config", "--app-data-dir", $AppDataDir) -Json
+    if ($null -eq $cfg) { return }
+    if ($cfg.coordinatorUrl) {
+        $txtCoordinator.Text = $cfg.coordinatorUrl
+        try {
+            $uri = [System.Uri]$cfg.coordinatorUrl
+            $txtHost.Text = $uri.Host
+        } catch { }
+    }
+    if ($cfg.publicEntry) { $txtPlayerAddress.Text = $cfg.publicEntry }
+    if ($cfg.lastServerDir) {
+        $txtServerDir.Text = $cfg.lastServerDir
+        $entry = $(if ($cfg.launchProfile.path) { $cfg.launchProfile.path } else { "已选择目录" })
+        $txtServerSummary.Text = @(
+            "目录：" + $cfg.lastServerDir,
+            "启动方式：" + $entry,
+            "Java：" + $(if ($cfg.javaPath) { $cfg.javaPath } else { "未检测" }),
+            "状态：已恢复上次配置"
+        ) -join [Environment]::NewLine
+    }
+    if ($cfg.group -and $cfg.group.groupId) {
+        $lblGroupResult.Text = "服务器组：已加入 / 本机身份：已注册"
+        $checkLabels[7].Text = $(if ($cfg.lastServerDir) { "✓ Minecraft 服务端：已选择" } else { $checkLabels[7].Text })
+    }
+    if ($cfg.ui -and $cfg.ui.advancedPanelExpanded) {
+        $advancedPanel.Visible = $true
+    }
+    Add-GuiLog "桌面配置已恢复。"
+}
+
+function Forget-DesktopConfig {
+    $result = Invoke-AgentCommandSafe -ActionName "忘记此电脑配置" -Args @("desktop", "setup", "forget-config", "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $result -and $result.ok) {
+        $txtCoordinator.Text = ""
+        $txtPlayerAddress.Text = ""
+        $txtServerDir.Text = ""
+        $txtServerSummary.Text = ""
+        $lblGroupResult.Text = ""
+        Add-GuiLog "此电脑配置已忘记。"
+    }
+}
+
+function Reset-Wizard {
+    $result = Invoke-AgentCommandSafe -ActionName "重置向导" -Args @("desktop", "setup", "reset-wizard", "--app-data-dir", $AppDataDir) -Json
+    if ($null -ne $result) {
+        $txtServerDir.Text = ""
+        $txtServerSummary.Text = ""
+        Add-GuiLog "四步向导已重置。"
+    }
+}
+
 function Create-Group {
     $coord = $txtCoordinator.Text.Trim()
     if (-not $coord) {
@@ -316,6 +368,33 @@ function Join-Group {
     }
 }
 
+function Create-Invite {
+    $result = Invoke-AgentCommandSafe -ActionName "生成邀请码" -Args @("desktop", "setup", "create-invite", "--app-data-dir", $AppDataDir, "--expires-seconds", "1800", "--one-time") -Json
+    if ($null -ne $result -and $result.inviteCode) {
+        $lblGroupResult.Text = "邀请码：" + $result.inviteCode
+        [System.Windows.Forms.Clipboard]::SetText($result.inviteCode)
+        Add-GuiLog "邀请码已生成并复制，仅显示一次。"
+    } elseif ($null -ne $result) {
+        Show-GuiError $result.message
+    }
+}
+
+function List-Invites {
+    $result = Invoke-AgentCommandSafe -ActionName "查看邀请码列表" -Args @("desktop", "setup", "list-invites", "--app-data-dir", $AppDataDir) -Json
+    if ($null -eq $result) { return }
+    if (-not $result.ok) {
+        Show-GuiError $result.message
+        return
+    }
+    $lines = @()
+    foreach ($invite in $result.invites) {
+        $used = $(if ($invite.usedAt) { "已使用" } elseif ($invite.revokedAt) { "已撤销" } else { "未使用" })
+        $lines += ($invite.inviteId + "  过期：" + $invite.expiresAt + "  " + $used)
+    }
+    if ($lines.Count -eq 0) { $lines = @("暂无邀请码。") }
+    [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "邀请码列表", "OK", "Information") | Out-Null
+}
+
 function Choose-ServerDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = "选择 Minecraft 服务端根目录"
@@ -325,7 +404,7 @@ function Choose-ServerDir {
     if ($null -ne $result) {
         Update-ServerSummary $result
         if (-not $result.launchReady) {
-            Show-GuiError "已检测到 Minecraft 服务端，但无法确定启动文件。请选择 run.bat、start.bat 或服务端核心 JAR。"
+            Show-GuiError "已检测到 Minecraft 服务端，但无法确定启动文件。请选择 run.bat、run.ps1、start.bat、start.ps1 或服务端核心 JAR。"
         }
     }
 }
@@ -335,10 +414,18 @@ function Update-ServerSummary {
     $script:LastInspectResult = $Result
     $profile = $Result.launchProfile
     $entry = ""
+    $launchKind = ""
     if ($profile.scriptPath) { $entry = $profile.scriptPath }
     elseif ($profile.jarPath) { $entry = $profile.jarPath }
     elseif ($Result.report.launchEntry) { $entry = $Result.report.launchEntry }
     else { $entry = "需要选择" }
+    if ($profile.scriptType -eq "powershell") {
+        $launchKind = "PowerShell 脚本 "
+    } elseif ($profile.scriptType -eq "batch") {
+        $launchKind = "批处理脚本 "
+    } elseif ($profile.jarPath) {
+        $launchKind = "JAR "
+    }
     $requiredJava = $(if ($Result.requiredJavaVersion) { $Result.requiredJavaVersion } else { "未知" })
     $detectedJava = $(if ($Result.detectedJavaVersion) { $Result.detectedJavaVersion } else { "未检测到" })
     $eulaText = $(if ($Result.report.eulaAccepted) { "已接受" } else { "未接受" })
@@ -350,7 +437,7 @@ function Update-ServerSummary {
     }
     $txtServerSummary.Text = @(
         "目录：" + $Result.report.serverDir,
-        "服务端类型：" + $Result.report.serverType + "    启动方式：" + $entry,
+        "服务端类型：" + $Result.report.serverType + "    启动方式：" + $launchKind + $entry,
         "需要 Java：" + $requiredJava + "    当前 Java：" + $detectedJava,
         "EULA：" + $eulaText + "    端口：" + $Result.report.serverPort,
         "状态：" + $statusText
@@ -362,7 +449,7 @@ function Update-ServerSummary {
         $checkLabels[7].Text = "△ Minecraft 服务端：需要选择启动文件"
         $checkLabels[7].ForeColor = [System.Drawing.Color]::DarkOrange
     }
-    Add-GuiLog ("服务端检测：" + $statusText + "，类型：" + $Result.report.serverType + "，启动方式：" + $entry)
+    Add-GuiLog ("服务端检测：" + $statusText + "，类型：" + $Result.report.serverType + "，启动方式：" + $launchKind + $entry)
 }
 
 function Select-LaunchFile {
@@ -498,7 +585,7 @@ function Add-Button {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(1040, 840)
+$form.Size = New-Object System.Drawing.Size(1040, 900)
 $form.MinimumSize = New-Object System.Drawing.Size(980, 700)
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
 
@@ -637,7 +724,7 @@ Add-Button $mainPanel "打开日志" 204 140 { Open-LogDir } ""
 $advancedPanel = New-Object System.Windows.Forms.GroupBox
 $advancedPanel.Text = "高级诊断"
 $advancedPanel.Location = New-Object System.Drawing.Point(510, 550)
-$advancedPanel.Size = New-Object System.Drawing.Size(490, 96)
+$advancedPanel.Size = New-Object System.Drawing.Size(490, 130)
 $advancedPanel.Visible = $false
 $form.Controls.Add($advancedPanel)
 
@@ -645,11 +732,15 @@ Add-Button $advancedPanel "导入离线环境包" 14 24 { Import-OfflinePack } "
 Add-Button $advancedPanel "运行环境修复" 192 24 { Invoke-AgentCommandSafe -ActionName "环境修复" -Args @("desktop", "environment", "repair", "--app-data-dir", $AppDataDir) -Json } ""
 Add-Button $advancedPanel "查看高级状态" 14 58 { Invoke-AgentCommandSafe -ActionName "高级状态" -Args @("desktop", "status", "--app-data-dir", $AppDataDir, "--coordinator", $CoordinatorPath, "--port", $Port, "--json") -Refresh } ""
 Add-Button $advancedPanel "清理 runtime cache" 192 58 { Invoke-AgentCommandSafe -ActionName "清理 runtime cache" -Args @("desktop", "environment", "clear-cache", "--app-data-dir", $AppDataDir) -Json } ""
+Add-Button $advancedPanel "忘记此电脑配置" 314 24 { Forget-DesktopConfig } ""
+Add-Button $advancedPanel "重置向导" 314 58 { Reset-Wizard } ""
+Add-Button $advancedPanel "生成邀请码" 14 92 { Create-Invite } ""
+Add-Button $advancedPanel "查看邀请码" 192 92 { List-Invites } ""
 
 $btnAdvanced = Add-Button $form "高级诊断" 830 28 { $advancedPanel.Visible = -not $advancedPanel.Visible } "默认隐藏高级 CLI 能力。"
 
 $script:LogBox = New-Object System.Windows.Forms.TextBox
-$script:LogBox.Location = New-Object System.Drawing.Point(20, 650)
+$script:LogBox.Location = New-Object System.Drawing.Point(20, 710)
 $script:LogBox.Size = New-Object System.Drawing.Size(980, 140)
 $script:LogBox.Multiline = $true
 $script:LogBox.ScrollBars = "Vertical"
@@ -660,6 +751,7 @@ $form.Controls.Add($script:LogBox)
 $form.Add_Shown({
     try {
         Run-EnvironmentCheck
+        Load-DesktopConfig
         Refresh-Status
     } catch {
         Show-GuiError "初始化失败：$($_.Exception.Message)"

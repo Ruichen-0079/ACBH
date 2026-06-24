@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -99,13 +100,20 @@ type SetupState struct {
 }
 
 type ConfigureNetworkResult struct {
-	OK             bool         `json:"ok"`
-	State          DesktopState `json:"state"`
-	CoordinatorURL string       `json:"coordinatorUrl"`
-	PlayerAddress  string       `json:"playerAddress"`
-	BootstrapURL   string       `json:"bootstrapUrl"`
-	Message        string       `json:"message"`
-	Warnings       []string     `json:"warnings,omitempty"`
+	OK             bool           `json:"ok"`
+	State          DesktopState   `json:"state"`
+	CoordinatorURL string         `json:"coordinatorUrl"`
+	PlayerAddress  string         `json:"playerAddress"`
+	BootstrapURL   string         `json:"bootstrapUrl"`
+	Checks         []NetworkCheck `json:"checks,omitempty"`
+	Message        string         `json:"message"`
+	Warnings       []string       `json:"warnings,omitempty"`
+}
+
+type NetworkCheck struct {
+	ID      string `json:"id"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
 }
 
 type InspectServerSetupResult struct {
@@ -143,6 +151,18 @@ type SetupGroupResult struct {
 	InviteCode string       `json:"inviteCode,omitempty"`
 	ExpiresAt  string       `json:"expiresAt,omitempty"`
 	Message    string       `json:"message"`
+}
+
+type InviteListResult struct {
+	OK      bool                       `json:"ok"`
+	Invites []coordinator.PublicInvite `json:"invites"`
+	Message string                     `json:"message"`
+}
+
+type RevokeInviteResult struct {
+	OK       bool   `json:"ok"`
+	InviteID string `json:"inviteId"`
+	Message  string `json:"message"`
 }
 
 type AutoServerResult struct {
@@ -320,51 +340,154 @@ func CheckEnvironment(opts Options) (EnvironmentReport, error) {
 
 func ConfigureNetwork(opts Options, host string, coordinatorPort string, publicGamePort string) (ConfigureNetworkResult, error) {
 	opts = withDefaults(opts)
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return ConfigureNetworkResult{OK: false, State: StateError, Message: "请输入公网服务器 IP 或域名。"}, nil
+	coordURL, publicHost, err := NormalizePublicCoordinatorInput(host, coordinatorPort)
+	if err != nil {
+		return ConfigureNetworkResult{OK: false, State: StateError, Message: err.Error()}, nil
 	}
-	if coordinatorPort == "" {
-		coordinatorPort = "6121"
+	if publicHost == "" {
+		return ConfigureNetworkResult{OK: false, State: StateError, Message: "请输入公网服务器 IP 或域名。"}, nil
 	}
 	if publicGamePort == "" {
 		publicGamePort = "25565"
 	}
-	if net.ParseIP(host) == nil {
-		if _, err := net.LookupHost(host); err != nil {
+	if net.ParseIP(publicHost) == nil {
+		if _, err := net.LookupHost(publicHost); err != nil {
 			return ConfigureNetworkResult{OK: false, State: StateError, Message: "DNS 解析失败：" + err.Error()}, nil
 		}
 	}
-	if _, err := strconv.Atoi(coordinatorPort); err != nil {
-		return ConfigureNetworkResult{OK: false, State: StateError, Message: "Coordinator 端口无效。"}, nil
-	}
-	coordURL := "http://" + host + ":" + coordinatorPort
 	client, err := coordinator.NewClient(coordURL)
 	warnings := []string{}
+	checks := []NetworkCheck{}
+	addCheck := func(id string, ok bool, message string) {
+		status := "passed"
+		if !ok {
+			status = "warning"
+			warnings = append(warnings, message)
+		}
+		checks = append(checks, NetworkCheck{ID: id, Status: status, Message: message})
+	}
 	if err != nil {
 		return ConfigureNetworkResult{OK: false, State: StateError, Message: "Coordinator URL 无效：" + err.Error()}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := client.Health(ctx); err != nil {
-		warnings = append(warnings, "无法连接公网服务器或 /health 未响应："+err.Error())
-	}
+	coordHost, coordPort := hostPortFromURL(coordURL)
+	addCheck("tcp_6121", tcpCheck(coordHost, coordPort) == nil, "公网控制端 TCP "+coordPort+" 可连接")
+	addCheck("health", client.Health(ctx) == nil, "公网控制端 /health 正常")
+	manifestOK, runtimeOK, javaOK := checkBootstrapManifest(ctx, coordURL)
+	addCheck("bootstrap_manifest", manifestOK, "Bootstrap manifest 可读取")
+	addCheck("runtime_package", runtimeOK, "环境包可用")
+	addCheck("java_package", javaOK, "Java package 可用")
+	addCheck("tcp_25565", tcpCheck(publicHost, publicGamePort) == nil, "玩家入口 TCP "+publicGamePort+" 可连接")
 	setup, _ := LoadSetup(opts)
 	setup.Mode = "remote-public"
-	setup.CoordinatorHost = host
-	setup.CoordinatorPort = coordinatorPort
+	setup.CoordinatorHost = publicHost
+	setup.CoordinatorPort = coordPort
 	setup.PublicGamePort = publicGamePort
 	setup.CoordinatorURL = coordURL
-	setup.PlayerAddress = host + ":" + publicGamePort
+	setup.PlayerAddress = publicHost + ":" + publicGamePort
 	setup.UpdatedAt = time.Now().Format(time.RFC3339)
 	if err := SaveSetup(opts, setup); err != nil {
 		return ConfigureNetworkResult{}, err
 	}
+	_ = syncDesktopConfig(opts, func(cfg *DesktopConfig) {
+		cfg.Mode = "remote-public"
+		cfg.CoordinatorURL = coordURL
+		cfg.PublicEntry = setup.PlayerAddress
+		cfg.RelayTarget = firstNonEmpty(cfg.RelayTarget, "127.0.0.1:"+publicGamePort)
+		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 1)
+	})
 	return ConfigureNetworkResult{
 		OK: len(warnings) == 0, State: StateBootstrapReady, CoordinatorURL: coordURL,
 		PlayerAddress: setup.PlayerAddress, BootstrapURL: coordURL + "/v1/bootstrap/manifest",
-		Message: "公网服务器配置已保存。", Warnings: warnings,
+		Checks: checks, Message: "公网服务器配置已保存。", Warnings: warnings,
 	}, nil
+}
+
+func NormalizePublicCoordinatorInput(input string, coordinatorPort string) (coordinatorURL string, publicHost string, err error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", fmt.Errorf("请输入公网服务器 IP 或域名")
+	}
+	if coordinatorPort == "" {
+		coordinatorPort = "6121"
+	}
+	if !strings.Contains(input, "://") {
+		input = "http://" + input
+	}
+	parsed, err := url.Parse(input)
+	if err != nil || parsed.Hostname() == "" {
+		return "", "", fmt.Errorf("公网服务器地址无效")
+	}
+	host := parsed.Hostname()
+	port := parsed.Port()
+	if port == "" && parsed.Scheme == "http" {
+		port = coordinatorPort
+	}
+	if port == "" && parsed.Scheme == "https" {
+		coordinatorURL = parsed.Scheme + "://" + host
+	} else {
+		coordinatorURL = parsed.Scheme + "://" + net.JoinHostPort(host, port)
+	}
+	return strings.TrimRight(coordinatorURL, "/"), host, nil
+}
+
+func hostPortFromURL(raw string) (string, string) {
+	parsed, _ := url.Parse(raw)
+	port := parsed.Port()
+	if port == "" {
+		if parsed.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return parsed.Hostname(), port
+}
+
+func tcpCheck(host string, port string) error {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 1200*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
+}
+
+func checkBootstrapManifest(ctx context.Context, coordURL string) (bool, bool, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(coordURL, "/")+"/v1/bootstrap/manifest", nil)
+	if err != nil {
+		return false, false, false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, false, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, false, false
+	}
+	var body struct {
+		Packages []struct {
+			PackageID string `json:"packageId"`
+			ID        string `json:"id"`
+			Available bool   `json:"available"`
+		} `json:"packages"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2*1024*1024)).Decode(&body); err != nil {
+		return false, false, false
+	}
+	runtimeOK := false
+	javaOK := false
+	for _, pkg := range body.Packages {
+		id := strings.ToLower(firstNonEmpty(pkg.PackageID, pkg.ID))
+		if strings.Contains(id, "runtime") && pkg.Available {
+			runtimeOK = true
+		}
+		if strings.Contains(id, "java") && pkg.Available {
+			javaOK = true
+		}
+	}
+	return true, runtimeOK, javaOK
 }
 
 func SetupCreateGroup(ctx context.Context, opts Options, groupName string, displayName string, coordinatorURL string) (SetupGroupResult, error) {
@@ -417,13 +540,22 @@ func SetupCreateGroup(ctx context.Context, opts Options, groupName string, displ
 	if err := agentconfig.Save(filepath.Join(opts.AppDataDir, agentconfig.FileName), cfg); err != nil {
 		return SetupGroupResult{}, err
 	}
+	secrets := NewDefaultSecretStore(opts)
+	_ = secrets.Put("accessKey", created.AccessKey)
+	_ = secrets.Put("hostToken", registered.HostToken)
 	setup.GroupName = groupName
 	setup.DisplayName = displayName
 	setup.CoordinatorURL = coordinatorURL
 	setup.UpdatedAt = time.Now().Format(time.RFC3339)
 	_ = SaveSetup(opts, setup)
+	_ = syncDesktopConfig(opts, func(cfg *DesktopConfig) {
+		cfg.Mode = firstNonEmpty(setup.Mode, "remote-public")
+		cfg.CoordinatorURL = coordinatorURL
+		cfg.Group = DesktopGroupConfig{GroupID: created.GroupID, MemberID: joined.MemberID, HostID: registered.HostID, Role: "owner"}
+		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 2)
+	})
 	invite, inviteErr := client.CreateInvite(ctx, created.GroupID, coordinator.CreateInviteRequest{
-		AccessKey: created.AccessKey, ExpiresInSeconds: 7 * 24 * 3600, OneTime: false,
+		AccessKey: created.AccessKey, ExpiresInSeconds: 30 * 60, OneTime: true,
 	})
 	result := SetupGroupResult{
 		OK: true, State: StateBootstrapReady, GroupID: created.GroupID, MemberID: joined.MemberID,
@@ -480,14 +612,88 @@ func SetupJoinGroup(ctx context.Context, opts Options, inviteCode string, displa
 	if err := agentconfig.Save(filepath.Join(opts.AppDataDir, agentconfig.FileName), cfg); err != nil {
 		return SetupGroupResult{}, err
 	}
+	secrets := NewDefaultSecretStore(opts)
+	_ = secrets.Put("hostToken", joined.HostToken)
 	setup.DisplayName = displayName
 	setup.CoordinatorURL = coordinatorURL
 	setup.UpdatedAt = time.Now().Format(time.RFC3339)
 	_ = SaveSetup(opts, setup)
+	_ = syncDesktopConfig(opts, func(cfg *DesktopConfig) {
+		cfg.Mode = firstNonEmpty(setup.Mode, "remote-public")
+		cfg.CoordinatorURL = coordinatorURL
+		cfg.Group = DesktopGroupConfig{GroupID: joined.GroupID, MemberID: joined.MemberID, HostID: joined.HostID, Role: "member"}
+		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 2)
+	})
 	return SetupGroupResult{
 		OK: true, State: StateBootstrapReady, GroupID: joined.GroupID, MemberID: joined.MemberID,
 		HostID: joined.HostID, Message: "已加入 Group，本机已注册。",
 	}, nil
+}
+
+func SetupCreateInvite(ctx context.Context, opts Options, expiresSeconds int, oneTime bool) (SetupGroupResult, error) {
+	opts = withDefaults(opts)
+	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
+	if err != nil {
+		return SetupGroupResult{OK: false, State: StateUnconfigured, Message: "请先创建或加入服务器组。"}, nil
+	}
+	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
+	if accessKey == "" {
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "当前设备不是 owner，不能生成邀请码。"}, nil
+	}
+	if expiresSeconds <= 0 {
+		expiresSeconds = 30 * 60
+	}
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return SetupGroupResult{}, err
+	}
+	invite, err := client.CreateInvite(ctx, cfg.GroupID, coordinator.CreateInviteRequest{AccessKey: accessKey, ExpiresInSeconds: expiresSeconds, OneTime: oneTime})
+	if err != nil {
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "生成邀请码失败。"}, nil
+	}
+	return SetupGroupResult{OK: true, State: StateBootstrapReady, GroupID: cfg.GroupID, InviteCode: invite.InviteCode, ExpiresAt: invite.ExpiresAt, Message: "邀请码已生成，仅显示一次。"}, nil
+}
+
+func SetupListInvites(ctx context.Context, opts Options) (InviteListResult, error) {
+	opts = withDefaults(opts)
+	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
+	if err != nil {
+		return InviteListResult{OK: false, Message: "请先创建或加入服务器组。"}, nil
+	}
+	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
+	if accessKey == "" {
+		return InviteListResult{OK: false, Message: "当前设备不是 owner，不能查看邀请码。"}, nil
+	}
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return InviteListResult{}, err
+	}
+	list, err := client.ListInvites(ctx, cfg.GroupID, coordinator.ListInvitesRequest{AccessKey: accessKey})
+	if err != nil {
+		return InviteListResult{OK: false, Message: "读取邀请码列表失败。"}, nil
+	}
+	return InviteListResult{OK: true, Invites: list.Invites, Message: "邀请码列表已读取。"}, nil
+}
+
+func SetupRevokeInvite(ctx context.Context, opts Options, inviteID string) (RevokeInviteResult, error) {
+	opts = withDefaults(opts)
+	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
+	if err != nil {
+		return RevokeInviteResult{OK: false, Message: "请先创建或加入服务器组。"}, nil
+	}
+	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
+	if accessKey == "" {
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "当前设备不是 owner，不能撤销邀请码。"}, nil
+	}
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return RevokeInviteResult{}, err
+	}
+	revoked, err := client.RevokeInvite(ctx, cfg.GroupID, coordinator.RevokeInviteRequest{AccessKey: accessKey, InviteID: inviteID})
+	if err != nil {
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "撤销邀请码失败。"}, nil
+	}
+	return RevokeInviteResult{OK: true, InviteID: revoked.InviteID, Message: "邀请码已撤销。"}, nil
 }
 
 func InspectServerForSetup(opts Options, serverDir string) (InspectServerSetupResult, error) {
@@ -628,6 +834,12 @@ func saveInspectedServer(opts Options, report mcimport.Report) (InspectServerSet
 			return InspectServerSetupResult{}, err
 		}
 	}
+	_ = syncDesktopConfig(opts, func(cfg *DesktopConfig) {
+		cfg.LastServerDir = report.ServerDir
+		cfg.LaunchProfile = desktopLaunchProfileFromMC(report.LaunchProfile)
+		cfg.JavaPath = java.DetectedJavaPath
+		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 3)
+	})
 	return InspectServerSetupResult{
 		OK: ok, InspectionOK: report.InspectionOK, LaunchReady: report.LaunchReady, State: state, Report: report,
 		LaunchProfile: report.LaunchProfile, Candidates: report.Candidates,
@@ -806,6 +1018,9 @@ func CompleteSetup(opts Options) (SetupCompleteResult, error) {
 	if err := SaveSetup(opts, setup); err != nil {
 		return SetupCompleteResult{}, err
 	}
+	_ = syncDesktopConfig(opts, func(cfg *DesktopConfig) {
+		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 4)
+	})
 	return SetupCompleteResult{OK: true, State: StateReady, Setup: setup, Message: "配置已完成，可以进入 ACBH。"}, nil
 }
 

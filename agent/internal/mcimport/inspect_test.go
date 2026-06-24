@@ -110,6 +110,94 @@ func TestInspectStartBatAsCustomScript(t *testing.T) {
 	}
 }
 
+func TestInspectRunPs1AsPowerShellCustomScript(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "测试 服务端")
+	mkdir(t, dir)
+	writeFile(t, filepath.Join(dir, "run.ps1"), "java -Xmx2G -jar server.jar nogui\n")
+	writeFile(t, filepath.Join(dir, "server.properties"), "server-port=25565\n")
+	writeFile(t, filepath.Join(dir, "eula.txt"), "eula=true\n")
+	mkdir(t, filepath.Join(dir, "mods"))
+	mkdir(t, filepath.Join(dir, "world"))
+
+	report, err := Inspect(dir)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if report.ServerType != CustomScript || !report.LaunchReady {
+		t.Fatalf("ServerType=%s launchReady=%v, want CustomScript true", report.ServerType, report.LaunchReady)
+	}
+	if report.LaunchEntry != "run.ps1" {
+		t.Fatalf("LaunchEntry = %q, want run.ps1", report.LaunchEntry)
+	}
+	if report.LaunchProfile.Kind != "script" || report.LaunchProfile.ScriptType != "powershell" || report.LaunchProfile.ScriptPath != "run.ps1" {
+		t.Fatalf("LaunchProfile = %+v", report.LaunchProfile)
+	}
+	if report.LaunchProfile.Shell != "powershell.exe" {
+		t.Fatalf("Shell = %q, want powershell.exe", report.LaunchProfile.Shell)
+	}
+	if len(report.LaunchProfile.ShellArguments) == 0 || report.LaunchProfile.ShellArguments[len(report.LaunchProfile.ShellArguments)-1] != "run.ps1" {
+		t.Fatalf("ShellArguments = %#v", report.LaunchProfile.ShellArguments)
+	}
+	if report.RequiredJavaVersion != "" {
+		t.Fatalf("RequiredJavaVersion = %q, want empty for CustomScript", report.RequiredJavaVersion)
+	}
+}
+
+func TestInspectRunPs1CaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Run.PS1"), "Write-Host ok\n")
+	writeFile(t, filepath.Join(dir, "server.properties"), "server-port=25565\n")
+	writeFile(t, filepath.Join(dir, "eula.txt"), "eula=true\n")
+
+	report, err := Inspect(dir)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if report.LaunchEntry != "Run.PS1" || report.LaunchProfile.ScriptType != "powershell" {
+		t.Fatalf("LaunchEntry=%q LaunchProfile=%+v", report.LaunchEntry, report.LaunchProfile)
+	}
+}
+
+func TestInspectScriptCandidatePriorityAndManualSelectPowerShell(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "run.bat"), "java -jar server.jar nogui\n")
+	writeFile(t, filepath.Join(dir, "run.ps1"), "java -jar server.jar nogui\n")
+	writeFile(t, filepath.Join(dir, "start.ps1"), "java -jar server.jar nogui\n")
+	writeFile(t, filepath.Join(dir, "server.properties"), "server-port=25565\n")
+	writeFile(t, filepath.Join(dir, "eula.txt"), "eula=true\n")
+
+	report, err := Inspect(dir)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if report.LaunchEntry != "run.bat" {
+		t.Fatalf("LaunchEntry = %q, want run.bat", report.LaunchEntry)
+	}
+	if len(report.Candidates.Scripts) != 3 {
+		t.Fatalf("script candidates = %#v", report.Candidates.Scripts)
+	}
+	selected, err := SelectLaunchProfile(dir, "run.ps1")
+	if err != nil {
+		t.Fatalf("SelectLaunchProfile() error = %v", err)
+	}
+	if selected.LaunchProfile.ScriptPath != "run.ps1" || selected.LaunchProfile.ScriptType != "powershell" {
+		t.Fatalf("selected profile = %+v", selected.LaunchProfile)
+	}
+}
+
+func TestSelectLaunchProfileRejectsOutsideScript(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "server")
+	mkdir(t, dir)
+	writeFile(t, filepath.Join(root, "outside.ps1"), "Write-Host outside\n")
+	writeFile(t, filepath.Join(dir, "server.properties"), "server-port=25565\n")
+	writeFile(t, filepath.Join(dir, "eula.txt"), "eula=true\n")
+
+	if _, err := SelectLaunchProfile(dir, `..\outside.ps1`); err == nil {
+		t.Fatal("SelectLaunchProfile() error = nil, want outside path rejection")
+	}
+}
+
 func TestInspectForgeAndNeoForgeMarkers(t *testing.T) {
 	cases := []struct {
 		name string

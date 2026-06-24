@@ -166,6 +166,16 @@ export type InviteRecord = {
   createdAt: string;
 };
 
+export type PublicInvite = {
+  inviteId: string;
+  groupId: string;
+  expiresAt: string;
+  oneTime: boolean;
+  usedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+};
+
 export type DeletedArtifact = {
   groupId: string;
   artifactKind: ArtifactKind;
@@ -579,7 +589,7 @@ export class InMemoryCoordinatorStore {
   }): { inviteId: string; inviteCode: string; groupId: string; expiresAt: string; oneTime: boolean } {
     const group = this.requireGroup(input.groupId);
     this.verifyAccessKey(group, input.accessKey);
-    const ttlSeconds = Math.max(60, Math.min(input.expiresInSeconds ?? 7 * 24 * 3600, 30 * 24 * 3600));
+    const ttlSeconds = Math.max(60, Math.min(input.expiresInSeconds ?? 30 * 60, 30 * 24 * 3600));
     const now = this.now();
     const inviteId = createId("inv");
     const inviteCode = createInviteCode();
@@ -610,6 +620,22 @@ export class InMemoryCoordinatorStore {
     group.updatedAt = invite.revokedAt;
     this.triggerMutation();
     return { ok: true, inviteId: input.inviteId };
+  }
+
+  listInvites(input: { groupId: string; accessKey: string }): { invites: PublicInvite[] } {
+    const group = this.requireGroup(input.groupId);
+    this.verifyAccessKey(group, input.accessKey);
+    return {
+      invites: Array.from(group.invites.values()).map((invite) => ({
+        inviteId: invite.inviteId,
+        groupId: invite.groupId,
+        expiresAt: invite.expiresAt,
+        oneTime: invite.oneTime,
+        usedAt: invite.usedAt,
+        revokedAt: invite.revokedAt,
+        createdAt: invite.createdAt,
+      })),
+    };
   }
 
   joinWithInvite(input: {

@@ -223,6 +223,80 @@ func TestSelectServerLaunchSavesProfile(t *testing.T) {
 	}
 }
 
+func TestBuildPowerShellLaunchArgvHandlesChineseAndSpacePath(t *testing.T) {
+	serverDir := filepath.Join(t.TempDir(), "测试 服务端")
+	if err := os.MkdirAll(serverDir, 0o700); err != nil {
+		t.Fatalf("mkdir server: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "run.ps1"), []byte("Write-Host ok\n"), 0o600); err != nil {
+		t.Fatalf("write run.ps1: %v", err)
+	}
+	oldLookPath := lookPath
+	t.Cleanup(func() { lookPath = oldLookPath })
+	lookPath = func(file string) (string, error) {
+		if file == "powershell.exe" {
+			return `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`, nil
+		}
+		return "", errors.New("not found")
+	}
+
+	argv, info, err := buildPowerShellLaunchArgv(serverDir, SetupState{
+		LaunchProfile: mcimport.LaunchProfile{Kind: "script", ScriptType: "powershell", ScriptPath: "run.ps1"},
+	}, mcimport.Report{}, "")
+	if err != nil {
+		t.Fatalf("buildPowerShellLaunchArgv() error = %v", err)
+	}
+	if len(argv) != 8 || argv[0] == "" || argv[6] != "-File" {
+		t.Fatalf("argv = %#v", argv)
+	}
+	if argv[7] != filepath.Join(serverDir, "run.ps1") {
+		t.Fatalf("script argv = %q, want absolute run.ps1", argv[7])
+	}
+	if info.LauncherPath == "" || info.ScriptPath != argv[7] {
+		t.Fatalf("info = %+v", info)
+	}
+}
+
+func TestBuildPowerShellLaunchArgvReportsMissingPowerShell(t *testing.T) {
+	serverDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(serverDir, "run.ps1"), []byte("Write-Host ok\n"), 0o600); err != nil {
+		t.Fatalf("write run.ps1: %v", err)
+	}
+	oldLookPath := lookPath
+	t.Cleanup(func() { lookPath = oldLookPath })
+	lookPath = func(string) (string, error) { return "", errors.New("not found") }
+
+	_, info, err := buildPowerShellLaunchArgv(serverDir, SetupState{
+		LaunchProfile: mcimport.LaunchProfile{Kind: "script", ScriptType: "powershell", ScriptPath: "run.ps1"},
+	}, mcimport.Report{}, "")
+	if err == nil {
+		t.Fatal("buildPowerShellLaunchArgv() error = nil")
+	}
+	if info.ErrorCode != "powershell_not_found" || !strings.Contains(err.Error(), "未检测到 PowerShell") {
+		t.Fatalf("info=%+v err=%v", info, err)
+	}
+}
+
+func TestBuildPowerShellLaunchArgvRejectsOutsidePath(t *testing.T) {
+	root := t.TempDir()
+	serverDir := filepath.Join(root, "server")
+	if err := os.MkdirAll(serverDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "outside.ps1"), []byte("Write-Host outside\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, info, err := buildPowerShellLaunchArgv(serverDir, SetupState{
+		LaunchProfile: mcimport.LaunchProfile{Kind: "script", ScriptType: "powershell", ScriptPath: `..\outside.ps1`},
+	}, mcimport.Report{}, "")
+	if err == nil {
+		t.Fatal("buildPowerShellLaunchArgv() error = nil")
+	}
+	if info.ErrorCode != "launch_script_outside_server_dir" {
+		t.Fatalf("info = %+v", info)
+	}
+}
+
 func TestVerifyEnvironmentPackageRejectsUnsafeOrUnsignedPackages(t *testing.T) {
 	tempDir := t.TempDir()
 	unsafeZip := filepath.Join(tempDir, "unsafe.zip")

@@ -205,8 +205,13 @@ if [ -f "$DIST_DIR/acbh-desktop-windows-amd64.exe" ]; then
   COORD_BUNDLE_ROOT="$BUNDLE_PARENT/$COORD_BUNDLE_NAME"
   mkdir -p "$COORD_BUNDLE_ROOT/dist"
   mkdir -p "$COORD_BUNDLE_ROOT/packages"
+  mkdir -p "$COORD_BUNDLE_ROOT/scripts"
   cp "$REPO_ROOT/apps/coordinator/package.json" "$COORD_BUNDLE_ROOT/"
   cp -R "$REPO_ROOT/apps/coordinator/dist/." "$COORD_BUNDLE_ROOT/dist/"
+  cp "$REPO_ROOT/scripts/install-acbh-vps.sh" "$COORD_BUNDLE_ROOT/scripts/"
+  cp "$REPO_ROOT/scripts/acbh-vps-status.sh" "$COORD_BUNDLE_ROOT/scripts/"
+  cp "$REPO_ROOT/scripts/acbh-vps-upgrade.sh" "$COORD_BUNDLE_ROOT/scripts/"
+  chmod +x "$COORD_BUNDLE_ROOT/scripts/"*.sh
   cp "$DIST_DIR/acbh-runtime-base-windows-amd64.zip" "$COORD_BUNDLE_ROOT/packages/acbh-runtime-base-windows-amd64.zip"
   cat > "$COORD_BUNDLE_ROOT/run-coordinator.sh" <<'EOF'
 #!/usr/bin/env bash

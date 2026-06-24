@@ -239,9 +239,15 @@ func newDesktopSetupCmd() *cobra.Command {
 	cmd.AddCommand(
 		newDesktopSetupCreateGroupCmd(),
 		newDesktopSetupJoinGroupCmd(),
+		newDesktopSetupCreateInviteCmd(),
+		newDesktopSetupListInvitesCmd(),
+		newDesktopSetupRevokeInviteCmd(),
 		newDesktopSetupConfigureNetworkCmd(),
 		newDesktopSetupInspectServerCmd(),
 		newDesktopSetupCompleteCmd(),
+		newDesktopSetupConfigCmd(),
+		newDesktopSetupForgetConfigCmd(),
+		newDesktopSetupResetWizardCmd(),
 	)
 	return cmd
 }
@@ -288,6 +294,67 @@ func newDesktopSetupJoinGroupCmd() *cobra.Command {
 	cmd.Flags().StringVar(&coordinatorURL, "coordinator-url", "", "公网 Coordinator URL")
 	addIgnoredJSONFlag(cmd)
 	_ = cmd.MarkFlagRequired("invite-code")
+	return cmd
+}
+
+func newDesktopSetupCreateInviteCmd() *cobra.Command {
+	var opts desktop.Options
+	var expires int
+	var oneTime bool
+	cmd := &cobra.Command{
+		Use:   "create-invite",
+		Short: "Owner 生成一次性邀请码并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.SetupCreateInvite(cmd.Context(), opts, expires, oneTime)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().IntVar(&expires, "expires-seconds", 30*60, "邀请码有效期秒数")
+	cmd.Flags().BoolVar(&oneTime, "one-time", true, "邀请码是否一次性")
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopSetupListInvitesCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "list-invites",
+		Short: "Owner 查看邀请码元数据并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.SetupListInvites(cmd.Context(), opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopSetupRevokeInviteCmd() *cobra.Command {
+	var opts desktop.Options
+	var inviteID string
+	cmd := &cobra.Command{
+		Use:   "revoke-invite",
+		Short: "Owner 撤销邀请码并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.SetupRevokeInvite(cmd.Context(), opts, inviteID)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&inviteID, "invite-id", "", "邀请码 ID")
+	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("invite-id")
 	return cmd
 }
 
@@ -342,6 +409,59 @@ func newDesktopSetupCompleteCmd() *cobra.Command {
 		Short: "完成四步配置并输出纯 JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := desktop.CompleteSetup(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopSetupConfigCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "读取桌面向导记忆配置并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.LoadDesktopConfig(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopSetupForgetConfigCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "forget-config",
+		Short: "忘记此电脑桌面向导记忆并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := desktop.ForgetDesktopConfig(opts, desktop.NewDefaultSecretStore(opts)); err != nil {
+				return err
+			}
+			return printJSON(cmd, map[string]any{"ok": true, "message": "已忘记此电脑配置。"})
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopSetupResetWizardCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "reset-wizard",
+		Short: "重置四步向导进度并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.ResetDesktopWizard(opts)
 			if err != nil {
 				return err
 			}
