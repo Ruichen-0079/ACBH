@@ -149,21 +149,26 @@ type SetupGroupResult struct {
 	GroupID    string       `json:"groupId"`
 	HostID     string       `json:"hostId"`
 	MemberID   string       `json:"memberId"`
+	InviteID   string       `json:"inviteId,omitempty"`
 	InviteCode string       `json:"inviteCode,omitempty"`
 	ExpiresAt  string       `json:"expiresAt,omitempty"`
+	OneTime    bool         `json:"oneTime,omitempty"`
 	Message    string       `json:"message"`
+	ErrorCode  string       `json:"errorCode,omitempty"`
 }
 
 type InviteListResult struct {
 	OK      bool                       `json:"ok"`
 	Invites []coordinator.PublicInvite `json:"invites"`
 	Message string                     `json:"message"`
+	ErrorCode string                   `json:"errorCode,omitempty"`
 }
 
 type RevokeInviteResult struct {
-	OK       bool   `json:"ok"`
-	InviteID string `json:"inviteId"`
-	Message  string `json:"message"`
+	OK        bool   `json:"ok"`
+	InviteID  string `json:"inviteId"`
+	Message   string `json:"message"`
+	ErrorCode string `json:"errorCode,omitempty"`
 }
 
 type PartialFailureDetail struct {
@@ -562,6 +567,7 @@ func SetupCreateGroup(ctx context.Context, opts Options, groupName string, displ
 	_ = syncDesktopConfig(opts, func(cfg *DesktopConfig) {
 		cfg.Mode = firstNonEmpty(setup.Mode, "remote-public")
 		cfg.CoordinatorURL = coordinatorURL
+		cfg.GroupName = groupName
 		cfg.Group = DesktopGroupConfig{GroupID: created.GroupID, MemberID: joined.MemberID, HostID: registered.HostID, Role: "owner"}
 		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 2)
 	})
@@ -645,43 +651,47 @@ func SetupCreateInvite(ctx context.Context, opts Options, expiresSeconds int, on
 	opts = withDefaults(opts)
 	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
 	if err != nil {
-		return SetupGroupResult{OK: false, State: StateUnconfigured, Message: "请先创建或加入服务器组。"}, nil
+		return SetupGroupResult{OK: false, State: StateUnconfigured, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
 	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
 	if accessKey == "" {
-		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "当前设备不是 owner，不能生成邀请码。"}, nil
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "当前设备不是 owner，不能生成邀请码。", ErrorCode: "invite_permission_denied"}, nil
 	}
 	if expiresSeconds <= 0 {
 		expiresSeconds = 30 * 60
 	}
 	client, err := coordinator.NewClient(cfg.CoordinatorURL)
 	if err != nil {
-		return SetupGroupResult{}, err
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
 	}
 	invite, err := client.CreateInvite(ctx, cfg.GroupID, coordinator.CreateInviteRequest{AccessKey: accessKey, ExpiresInSeconds: expiresSeconds, OneTime: oneTime})
 	if err != nil {
-		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "生成邀请码失败。"}, nil
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "生成邀请码失败。", ErrorCode: "invite_create_failed"}, nil
 	}
-	return SetupGroupResult{OK: true, State: StateBootstrapReady, GroupID: cfg.GroupID, InviteCode: invite.InviteCode, ExpiresAt: invite.ExpiresAt, Message: "邀请码已生成，仅显示一次。"}, nil
+	return SetupGroupResult{
+		OK: true, State: StateBootstrapReady, GroupID: cfg.GroupID,
+		InviteID: invite.InviteID, InviteCode: invite.InviteCode, ExpiresAt: invite.ExpiresAt, OneTime: invite.OneTime,
+		Message: "邀请码已生成，仅显示一次。",
+	}, nil
 }
 
 func SetupListInvites(ctx context.Context, opts Options) (InviteListResult, error) {
 	opts = withDefaults(opts)
 	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
 	if err != nil {
-		return InviteListResult{OK: false, Message: "请先创建或加入服务器组。"}, nil
+		return InviteListResult{OK: false, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
 	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
 	if accessKey == "" {
-		return InviteListResult{OK: false, Message: "当前设备不是 owner，不能查看邀请码。"}, nil
+		return InviteListResult{OK: false, Message: "当前设备不是 owner，不能查看邀请码。", ErrorCode: "invite_permission_denied"}, nil
 	}
 	client, err := coordinator.NewClient(cfg.CoordinatorURL)
 	if err != nil {
-		return InviteListResult{}, err
+		return InviteListResult{OK: false, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
 	}
 	list, err := client.ListInvites(ctx, cfg.GroupID, coordinator.ListInvitesRequest{AccessKey: accessKey})
 	if err != nil {
-		return InviteListResult{OK: false, Message: "读取邀请码列表失败。"}, nil
+		return InviteListResult{OK: false, Message: "读取邀请码列表失败。", ErrorCode: "invite_list_failed"}, nil
 	}
 	return InviteListResult{OK: true, Invites: list.Invites, Message: "邀请码列表已读取。"}, nil
 }
@@ -690,19 +700,19 @@ func SetupRevokeInvite(ctx context.Context, opts Options, inviteID string) (Revo
 	opts = withDefaults(opts)
 	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
 	if err != nil {
-		return RevokeInviteResult{OK: false, Message: "请先创建或加入服务器组。"}, nil
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
 	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
 	if accessKey == "" {
-		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "当前设备不是 owner，不能撤销邀请码。"}, nil
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "当前设备不是 owner，不能撤销邀请码。", ErrorCode: "invite_permission_denied"}, nil
 	}
 	client, err := coordinator.NewClient(cfg.CoordinatorURL)
 	if err != nil {
-		return RevokeInviteResult{}, err
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
 	}
 	revoked, err := client.RevokeInvite(ctx, cfg.GroupID, coordinator.RevokeInviteRequest{AccessKey: accessKey, InviteID: inviteID})
 	if err != nil {
-		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "撤销邀请码失败。"}, nil
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "撤销邀请码失败。", ErrorCode: "invite_revoke_failed"}, nil
 	}
 	return RevokeInviteResult{OK: true, InviteID: revoked.InviteID, Message: "邀请码已撤销。"}, nil
 }

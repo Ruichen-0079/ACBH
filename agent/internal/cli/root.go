@@ -283,7 +283,11 @@ func newDesktopSetupJoinGroupCmd() *cobra.Command {
 		Use:   "join-group",
 		Short: "使用邀请码加入 Group、注册本机并输出纯 JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.SetupJoinGroup(cmd.Context(), opts, inviteCode, displayName, coordinatorURL)
+			code := strings.TrimSpace(inviteCode)
+			if code == "" {
+				code = strings.TrimSpace(os.Getenv("ACBH_INVITE_CODE"))
+			}
+			result, err := desktop.SetupJoinGroup(cmd.Context(), opts, code, displayName, coordinatorURL)
 			if err != nil {
 				return err
 			}
@@ -291,11 +295,10 @@ func newDesktopSetupJoinGroupCmd() *cobra.Command {
 		},
 	}
 	addDesktopCommonFlags(cmd, &opts)
-	cmd.Flags().StringVar(&inviteCode, "invite-code", "", "ACBH 邀请码")
+	cmd.Flags().StringVar(&inviteCode, "invite-code", "", "ACBH 邀请码（也可用环境变量 ACBH_INVITE_CODE）")
 	cmd.Flags().StringVar(&displayName, "display-name", "", "本机昵称")
 	cmd.Flags().StringVar(&coordinatorURL, "coordinator-url", "", "公网 Coordinator URL")
 	addIgnoredJSONFlag(cmd)
-	_ = cmd.MarkFlagRequired("invite-code")
 	return cmd
 }
 

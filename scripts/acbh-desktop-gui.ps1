@@ -45,6 +45,12 @@ $script:GuiActiveMutex = $null
 $script:GuiOperationButtons = New-Object System.Collections.Generic.List[System.Windows.Forms.Button]
 $script:GuiCancelSource = $null
 $script:GuiSelfTestFailures = 0
+$script:DesktopGroupContext = $null
+$script:LastCreatedInvite = $null
+$script:InviteListGeneration = 0
+$script:InviteManagerForm = $null
+$script:InviteListView = $null
+$script:PendingInviteCode = $null
 
 function Initialize-GuiAsyncHost {
     if (-not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) {
@@ -253,6 +259,8 @@ function Start-GuiOperation {
     $script:GuiOperationGeneration++
     $generation = $script:GuiOperationGeneration
     if ($MutexClass) { $script:GuiActiveMutex = $MutexClass }
+    $script:Running = $true
+    $script:GuiOperationState = "Running"
     $cancelSource = $null
     if ($Cancellable) { $cancelSource = New-Object System.Threading.CancellationTokenSource }
     $script:GuiCancelSource = $cancelSource
@@ -379,6 +387,47 @@ function Run-GuiSelfTests {
     $msg = Format-AgentFailureMessage $biz "测试操作"
     Assert-Test "failure message includes errorCode" ($msg -match "test_code")
 
+    $sampleCode = "ACBH-ABCDEF-123456"
+    $masked = Mask-InviteIdentifier $sampleCode
+    Assert-Test "invite code masked in list helper" ($masked -match "••••" -and $masked -notmatch "ABCDEF")
+    $redactedLog = Redact-Secrets ("inviteCode=$sampleCode and $sampleCode")
+    Assert-Test "invite code redacted from logs" ($redactedLog -notmatch $sampleCode)
+    $ownerCfg = [pscustomobject]@{ group = [pscustomobject]@{ role = "owner"; groupId = "grp_test" } }
+    $memberCfg = [pscustomobject]@{ group = [pscustomobject]@{ role = "member"; groupId = "grp_test" } }
+    Assert-Test "owner can manage invites" (Test-CanManageInvites $ownerCfg)
+    Assert-Test "member cannot manage invites" (-not (Test-CanManageInvites $memberCfg))
+    $availableInvite = [pscustomobject]@{ inviteId = "inv_1"; oneTime = $true; expiresAt = ([datetime]::UtcNow.AddHours(1).ToString("o")) }
+    $revokedInvite = [pscustomobject]@{ inviteId = "inv_2"; revokedAt = "2026-01-01T00:00:00Z" }
+    Assert-Test "available invite detected" ((Get-InviteLifecycleStatus $availableInvite).Available)
+    Assert-Test "revoked invite blocked" (-not (Get-InviteLifecycleStatus $revokedInvite).Available)
+    $script:InviteListGeneration = 0
+    $gen1 = ++$script:InviteListGeneration
+    $gen2 = ++$script:InviteListGeneration
+    Assert-Test "invite list generation advances" ($gen2 -gt $gen1)
+    $failInvite = [pscustomobject]@{ ok = $false; message = "denied"; errorCode = "invite_permission_denied" }
+    $failMsg = Format-InviteErrorMessage $failInvite "生成邀请码"
+    Assert-Test "invite permission error is actionable" ($failMsg -match "owner")
+    $script:PendingInviteCode = $sampleCode
+    $script:PendingInviteCode = $null
+    Assert-Test "pending invite cleared" ($null -eq $script:PendingInviteCode)
+
+    $swInvite = [Diagnostics.Stopwatch]::StartNew()
+    Start-GuiOperation -Name "selftest-invite" -MutexClass "invite" -Work { Start-Sleep -Milliseconds 40; return "ok" }
+    Start-Sleep -Milliseconds 120
+    Assert-Test "invite create callback returns quickly" ($swInvite.ElapsedMilliseconds -lt 300)
+    $script:GuiOperationState = "Idle"
+    $script:GuiActiveMutex = $null
+    $inviteDup = $false
+    Start-GuiOperation -Name "invite-first" -MutexClass "invite" -Work { Start-Sleep -Milliseconds 300; return "ok" }
+    Start-GuiOperation -Name "invite-second" -MutexClass "invite" -Work { return "no" }
+    if ($script:GuiOperationName -eq "invite-first") { $inviteDup = $true }
+    $deadline2 = [datetime]::UtcNow.AddSeconds(3)
+    while ($script:GuiOperationState -eq "Running" -and [datetime]::UtcNow -lt $deadline2) {
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 50
+    }
+    Assert-Test "double invite generate suppressed" $inviteDup
+
     $hidden.Close()
     $script:GuiActiveThreadJob = $null
     [Console]::Out.WriteLine("GUI self-test failures: " + $script:GuiSelfTestFailures)
@@ -389,11 +438,433 @@ function Redact-Secrets {
     param([string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $safe = $Text
-    $safe = [regex]::Replace($safe, '(?i)(accessKey|hostToken|joinToken|relayToken|proxyPassword|rcon\.password|ACBH_RCON_PASSWORD)(\s*[:=]\s*)[^\s,;}]+', '$1$2[已隐藏]')
+    $safe = [regex]::Replace($safe, '(?i)(accessKey|hostToken|joinToken|relayToken|proxyPassword|rcon\.password|ACBH_RCON_PASSWORD|inviteCode)(\s*[:=]\s*)[^\s,;}"\]]+', '$1$2[已隐藏]')
     $safe = [regex]::Replace($safe, 'ak_[A-Za-z0-9_\-]+', 'ak_[已隐藏]')
     $safe = [regex]::Replace($safe, 'ht_[A-Za-z0-9_\-]+', 'ht_[已隐藏]')
     $safe = [regex]::Replace($safe, 'ACBH-[A-Fa-f0-9]{6}-[A-Fa-f0-9]{6}', 'ACBH-[邀请码已隐藏]')
     return $safe
+}
+
+function Mask-InviteIdentifier {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return "-" }
+    $value = $Text.Trim()
+    if ($value -match '^ACBH-[A-Fa-f0-9]{6}-[A-Fa-f0-9]{6}$') {
+        return ("ACBH-" + $value.Substring(5, 2) + "••••" + $value.Substring($value.Length - 4))
+    }
+    if ($value.Length -le 8) { return ($value.Substring(0, 1) + "••••") }
+    return ($value.Substring(0, 4) + "••••" + $value.Substring($value.Length - 4))
+}
+
+function Get-InviteLifecycleStatus {
+    param($Invite)
+    if ($null -eq $Invite) { return @{ Label = "未知"; Available = $false; SortRank = 9 } }
+    if ($Invite.revokedAt) { return @{ Label = "已撤销"; Available = $false; SortRank = 4 } }
+    if ($Invite.usedAt -and $Invite.oneTime) { return @{ Label = "已使用"; Available = $false; SortRank = 3 } }
+    if ($Invite.expiresAt) {
+        try {
+            $expires = [datetime]::Parse($Invite.expiresAt).ToUniversalTime()
+            if ($expires -lt [datetime]::UtcNow) { return @{ Label = "已过期"; Available = $false; SortRank = 2 } }
+        } catch { }
+    }
+    if ($Invite.usedAt -and -not $Invite.oneTime) {
+        return @{ Label = "可用(已使用)"; Available = $true; SortRank = 0 }
+    }
+    return @{ Label = "可用"; Available = $true; SortRank = 0 }
+}
+
+function Format-InviteUsageLimit {
+    param($Invite)
+    if ($null -eq $Invite) { return "-" }
+    if ($Invite.oneTime) { return "单次使用" }
+    return "可重复使用"
+}
+
+function Format-InviteErrorMessage {
+    param($JsonResult, [string]$ActionName)
+    $parts = @("$ActionName 失败")
+    if ($null -ne $JsonResult) {
+        if ($JsonResult.PSObject.Properties.Name -contains "message" -and $JsonResult.message) {
+            $parts += $JsonResult.message
+        }
+        if ($JsonResult.PSObject.Properties.Name -contains "errorCode" -and $JsonResult.errorCode) {
+            $parts += ("errorCode=" + $JsonResult.errorCode)
+        }
+    }
+    switch ($JsonResult.errorCode) {
+        "not_configured" { $parts += "下一步：先完成 Group 配置。" }
+        "invite_permission_denied" { $parts += "下一步：请使用创建 Group 的 owner 设备管理邀请码。" }
+        "coordinator_unreachable" { $parts += "下一步：检查公网 Coordinator 地址与网络。" }
+        "invite_create_failed" { $parts += "下一步：稍后重试或检查 Coordinator 日志。" }
+        "invite_list_failed" { $parts += "下一步：确认 Coordinator 在线后刷新列表。" }
+        "invite_revoke_failed" { $parts += "下一步：确认邀请码仍可撤销后重试。" }
+    }
+    return (Redact-Secrets (($parts -join "；")))
+}
+
+function Test-CanManageInvites {
+    param($DesktopConfig)
+    if ($null -eq $DesktopConfig) { return $false }
+    if ($DesktopConfig.group -and $DesktopConfig.group.role -eq "owner") { return $true }
+    return $false
+}
+
+function Update-MembersPanel {
+    param($DesktopConfig)
+    $script:DesktopGroupContext = $DesktopConfig
+    if ($null -eq $lblMembersGroup) { return }
+    Invoke-OnUiThread {
+        $groupLabel = "未配置"
+        $identity = "未注册"
+        $permission = "未知"
+        if ($null -ne $DesktopConfig) {
+            if ($DesktopConfig.groupName) {
+                $groupLabel = $DesktopConfig.groupName
+            } elseif ($DesktopConfig.group -and $DesktopConfig.group.groupId) {
+                $groupLabel = $DesktopConfig.group.groupId
+            }
+            if ($DesktopConfig.group) {
+                $role = if ($DesktopConfig.group.role) { $DesktopConfig.group.role } else { "member" }
+                $hostId = if ($DesktopConfig.group.hostId) { $DesktopConfig.group.hostId } else { "-" }
+                $identity = "$role / $hostId"
+            }
+            $permission = if (Test-CanManageInvites $DesktopConfig) { "可生成与管理邀请码" } else { "仅可加入 Group，不能管理邀请码" }
+        }
+        $lblMembersGroup.Text = "当前 Group：" + $groupLabel
+        $lblMembersIdentity.Text = "本机身份：" + $identity
+        $lblMembersPermission.Text = "邀请权限：" + $permission
+        if ($btnCreateInviteMain) { $btnCreateInviteMain.Enabled = (Test-CanManageInvites $DesktopConfig) -and ($script:GuiOperationState -ne "Running") }
+        if ($btnOpenInviteManager) { $btnOpenInviteManager.Enabled = ($null -ne $DesktopConfig -and $DesktopConfig.group -and $DesktopConfig.group.groupId) -and ($script:GuiOperationState -ne "Running") }
+    }
+}
+
+function Copy-InviteClipboard {
+    param([string]$Text, [string]$Hint = "邀请码已复制，请勿发送给不受信任的人。")
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    [System.Windows.Forms.Clipboard]::SetText($Text)
+    [System.Windows.Forms.MessageBox]::Show($Hint, "ACBH", "OK", "Information") | Out-Null
+}
+
+function Build-FullInviteShareText {
+    param($InviteResult)
+    $coord = ""
+    if ($txtCoordinator -and $txtCoordinator.Text) { $coord = $txtCoordinator.Text.Trim() }
+    if (-not $coord -and $script:DesktopGroupContext -and $script:DesktopGroupContext.coordinatorUrl) {
+        $coord = $script:DesktopGroupContext.coordinatorUrl
+    }
+    $lines = @(
+        ("ACBH 邀请码：" + $InviteResult.inviteCode),
+        ("Coordinator：" + $(if ($coord) { $coord } else { "(请填写你的公网 Coordinator 地址)" })),
+        '请在 ACBH 中选择「加入已有 Group」并粘贴邀请码。',
+        "说明：此邀请码用于让另一台电脑加入 ACBH Group 并成为候选 Host，不是 Minecraft 玩家白名单。"
+    )
+    return ($lines -join [Environment]::NewLine)
+}
+
+function Show-InviteCreatedDialog {
+    param($InviteResult)
+    if ($null -eq $InviteResult -or -not $InviteResult.inviteCode) { return }
+    $script:LastCreatedInvite = [pscustomobject]@{
+        inviteCode = $InviteResult.inviteCode
+        inviteId = $InviteResult.inviteId
+        groupId = $InviteResult.groupId
+        expiresAt = $InviteResult.expiresAt
+        oneTime = $InviteResult.oneTime
+    }
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "邀请码已生成"
+    $dlg.StartPosition = "CenterParent"
+    $dlg.Size = New-Object System.Drawing.Size(520, 360)
+    $dlg.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
+    $warn = New-Object System.Windows.Forms.Label
+    $warn.Text = "该邀请码只显示一次，请立即复制保存。"
+    $warn.ForeColor = [System.Drawing.Color]::DarkRed
+    $warn.Location = New-Object System.Drawing.Point(16, 12)
+    $warn.Size = New-Object System.Drawing.Size(470, 20)
+    $dlg.Controls.Add($warn)
+    $info = New-Object System.Windows.Forms.TextBox
+    $info.Multiline = $true
+    $info.ReadOnly = $true
+    $info.Location = New-Object System.Drawing.Point(16, 40)
+    $info.Size = New-Object System.Drawing.Size(470, 220)
+    $usage = if ($InviteResult.oneTime) { "单次使用" } else { "可重复使用" }
+    $info.Text = @(
+        "邀请码：$($InviteResult.inviteCode)",
+        "Group：$($InviteResult.groupId)",
+        "过期时间：$($InviteResult.expiresAt)",
+        "使用限制：$usage"
+    ) -join [Environment]::NewLine
+    $dlg.Controls.Add($info)
+    $btnCopyCode = New-Object System.Windows.Forms.Button
+    $btnCopyCode.Text = "复制邀请码"
+    $btnCopyCode.Location = New-Object System.Drawing.Point(16, 275)
+    $btnCopyCode.Size = New-Object System.Drawing.Size(120, 30)
+    $btnCopyCode.Add_Click({ Copy-InviteClipboard $InviteResult.inviteCode })
+    $dlg.Controls.Add($btnCopyCode)
+    $btnCopyAll = New-Object System.Windows.Forms.Button
+    $btnCopyAll.Text = "复制完整邀请信息"
+    $btnCopyAll.Location = New-Object System.Drawing.Point(146, 275)
+    $btnCopyAll.Size = New-Object System.Drawing.Size(140, 30)
+    $btnCopyAll.Add_Click({ Copy-InviteClipboard (Build-FullInviteShareText $InviteResult) "完整邀请信息已复制，请勿发送给不受信任的人。" })
+    $dlg.Controls.Add($btnCopyAll)
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = "关闭"
+    $btnClose.Location = New-Object System.Drawing.Point(386, 275)
+    $btnClose.Size = New-Object System.Drawing.Size(100, 30)
+    $btnClose.Add_Click({ $dlg.Close() })
+    $dlg.Controls.Add($btnClose)
+    if ($form) { [void]$dlg.ShowDialog($form) } else { [void]$dlg.ShowDialog() }
+}
+
+function Show-CreateInviteDialog {
+    if (-not (Test-CanManageInvites $script:DesktopGroupContext)) {
+        Show-GuiError (Format-InviteErrorMessage ([pscustomobject]@{ message = "当前设备无权限生成邀请码。"; errorCode = "invite_permission_denied" }) "生成邀请码")
+        return
+    }
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.Text = "生成邀请码"
+    $dlg.StartPosition = "CenterParent"
+    $dlg.Size = New-Object System.Drawing.Size(420, 260)
+    $dlg.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
+    $note = New-Object System.Windows.Forms.Label
+    $note.Text = "当前 Coordinator 支持：有效期、是否单次使用。备注与最大使用次数暂不支持。"
+    $note.Location = New-Object System.Drawing.Point(16, 12)
+    $note.Size = New-Object System.Drawing.Size(380, 36)
+    $dlg.Controls.Add($note)
+    $lblExpire = New-Object System.Windows.Forms.Label
+    $lblExpire.Text = "有效期（分钟）"
+    $lblExpire.Location = New-Object System.Drawing.Point(16, 56)
+    $lblExpire.Size = New-Object System.Drawing.Size(120, 20)
+    $dlg.Controls.Add($lblExpire)
+    $numExpire = New-Object System.Windows.Forms.NumericUpDown
+    $numExpire.Minimum = 1
+    $numExpire.Maximum = 43200
+    $numExpire.Value = 30
+    $numExpire.Location = New-Object System.Drawing.Point(140, 54)
+    $numExpire.Size = New-Object System.Drawing.Size(120, 24)
+    $dlg.Controls.Add($numExpire)
+    $chkOneTime = New-Object System.Windows.Forms.CheckBox
+    $chkOneTime.Text = "单次使用（用一次后失效）"
+    $chkOneTime.Checked = $true
+    $chkOneTime.Location = New-Object System.Drawing.Point(16, 92)
+    $chkOneTime.Size = New-Object System.Drawing.Size(260, 24)
+    $dlg.Controls.Add($chkOneTime)
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = "生成"
+    $btnOk.Location = New-Object System.Drawing.Point(200, 170)
+    $btnOk.Size = New-Object System.Drawing.Size(90, 30)
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "取消"
+    $btnCancel.Location = New-Object System.Drawing.Point(300, 170)
+    $btnCancel.Size = New-Object System.Drawing.Size(90, 30)
+    $btnOk.Add_Click({
+        $dlg.Tag = @{
+            expiresSeconds = [int]($numExpire.Value * 60)
+            oneTime = [bool]$chkOneTime.Checked
+            confirmed = $true
+        }
+        $dlg.Close()
+    })
+    $btnCancel.Add_Click({ $dlg.Close() })
+    $dlg.Controls.Add($btnOk)
+    $dlg.Controls.Add($btnCancel)
+    if ($form) { [void]$dlg.ShowDialog($form) } else { [void]$dlg.ShowDialog() }
+    if (-not $dlg.Tag -or -not $dlg.Tag.confirmed) { return }
+    $expiresSeconds = [int]$dlg.Tag.expiresSeconds
+    $oneTimeFlag = if ($dlg.Tag.oneTime) { "true" } else { "false" }
+    Start-GuiOperation -Name "生成邀请码" -MutexClass "invite" -Work {
+        Invoke-AgentCommandAsync -CommandArgs @(
+            "desktop", "setup", "create-invite",
+            "--app-data-dir", $AppDataDir,
+            "--expires-seconds", "$expiresSeconds",
+            "--one-time", $oneTimeFlag
+        )
+    } -OnComplete {
+        param($agentResult)
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "生成邀请码" } catch { }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-InviteErrorMessage $parsed "生成邀请码")
+            return
+        }
+        Add-GuiLog "邀请码已生成（明文仅显示一次，不会写入日志）。"
+        Invoke-OnUiThread { Show-InviteCreatedDialog $parsed }
+        if ($script:InviteManagerForm -and $script:InviteManagerForm.Visible) { Refresh-InviteListInManager }
+    }
+}
+
+function Sort-InviteRows {
+    param([array]$Invites)
+    return @($Invites | ForEach-Object {
+        $status = Get-InviteLifecycleStatus $_
+        [pscustomobject]@{
+            Invite = $_
+            Status = $status
+            CreatedAt = $_.createdAt
+        }
+    } | Sort-Object @{ Expression = { - [int]$_.Status.SortRank } }, @{ Expression = { $_.CreatedAt }; Descending = $true })
+}
+
+function Populate-InviteListView {
+    param([System.Windows.Forms.ListView]$ListView, [array]$Invites)
+    $ListView.Items.Clear()
+    foreach ($row in (Sort-InviteRows $Invites)) {
+        $invite = $row.Invite
+        $status = $row.Status
+        $item = New-Object System.Windows.Forms.ListViewItem (Mask-InviteIdentifier $invite.inviteId)
+        $item.SubItems.Add($status.Label) | Out-Null
+        $item.SubItems.Add($(if ($invite.createdAt) { $invite.createdAt } else { "-" })) | Out-Null
+        $item.SubItems.Add($(if ($invite.expiresAt) { $invite.expiresAt } else { "-" })) | Out-Null
+        $item.SubItems.Add($(Format-InviteUsageLimit $invite)) | Out-Null
+        $item.SubItems.Add($(if ($invite.usedAt) { "1" } else { "0" })) | Out-Null
+        $item.Tag = $invite
+        if ($status.Available) { $item.ForeColor = [System.Drawing.Color]::DarkGreen }
+        elseif ($status.Label -eq "已撤销") { $item.ForeColor = [System.Drawing.Color]::Gray }
+        [void]$ListView.Items.Add($item)
+    }
+}
+
+function Refresh-InviteListInManager {
+    if (-not $script:InviteManagerForm -or -not $script:InviteListView) { return }
+    if (-not (Test-CanManageInvites $script:DesktopGroupContext)) {
+        Show-GuiError (Format-InviteErrorMessage ([pscustomobject]@{ message = "当前设备无权限查看邀请码。"; errorCode = "invite_permission_denied" }) "刷新邀请码列表")
+        return
+    }
+    $generation = ++$script:InviteListGeneration
+    Start-GuiOperation -Name "刷新邀请码列表" -MutexClass "invite" -Cancellable -Work {
+        Invoke-AgentCommandAsync -CommandArgs @("desktop", "setup", "list-invites", "--app-data-dir", $AppDataDir) -CancelSource $script:GuiCancelSource
+    } -OnComplete {
+        param($agentResult)
+        if ($generation -ne $script:InviteListGeneration) { return }
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "刷新邀请码列表" } catch { }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-InviteErrorMessage $parsed "刷新邀请码列表")
+            return
+        }
+        Invoke-OnUiThread {
+            if ($script:InviteListView) {
+                Populate-InviteListView $script:InviteListView $parsed.invites
+            }
+        }
+        Add-GuiLog "邀请码列表已刷新（列表仅显示掩码 ID）。"
+    }
+}
+
+function Revoke-SelectedInvite {
+    if (-not $script:InviteListView -or $script:InviteListView.SelectedItems.Count -lt 1) {
+        Show-GuiError "请先在列表中选择一个邀请码。"
+        return
+    }
+    $invite = $script:InviteListView.SelectedItems[0].Tag
+    if ($null -eq $invite) { return }
+    $status = Get-InviteLifecycleStatus $invite
+    if (-not $status.Available) {
+        Show-GuiError "该邀请码已不可用（$($status.Label)），无需重复撤销。撤销操作不可逆。"
+        return
+    }
+    $masked = Mask-InviteIdentifier $invite.inviteId
+    $answer = [System.Windows.Forms.MessageBox]::Show(
+        "确认撤销邀请码 $masked ？`n创建：$($invite.createdAt)`n状态：$($status.Label)`n撤销后不可恢复。",
+        "撤销邀请码",
+        "YesNo",
+        "Warning"
+    )
+    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    Start-GuiOperation -Name "撤销邀请码" -MutexClass "invite" -Work {
+        Invoke-AgentCommandAsync -CommandArgs @("desktop", "setup", "revoke-invite", "--app-data-dir", $AppDataDir, "--invite-id", $invite.inviteId)
+    } -OnComplete {
+        param($agentResult)
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "撤销邀请码" } catch { }
+        }
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-InviteErrorMessage $parsed "撤销邀请码")
+            return
+        }
+        Add-GuiLog "邀请码已撤销：$masked"
+        Refresh-InviteListInManager
+    }
+}
+
+function Open-InviteManagerWindow {
+    if ($script:InviteManagerForm -and $script:InviteManagerForm.Visible) {
+        $script:InviteManagerForm.Activate()
+        Refresh-InviteListInManager
+        return
+    }
+    $mgr = New-Object System.Windows.Forms.Form
+    $mgr.Text = "邀请码管理"
+    $mgr.StartPosition = "CenterParent"
+    $mgr.Size = New-Object System.Drawing.Size(760, 460)
+    $mgr.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
+    $lblGroup = New-Object System.Windows.Forms.Label
+    $groupText = if ($script:DesktopGroupContext -and $script:DesktopGroupContext.groupName) { $script:DesktopGroupContext.groupName } elseif ($script:DesktopGroupContext -and $script:DesktopGroupContext.group -and $script:DesktopGroupContext.group.groupId) { $script:DesktopGroupContext.group.groupId } else { "未配置" }
+    $lblGroup.Text = "当前 Group：$groupText"
+    $lblGroup.Location = New-Object System.Drawing.Point(16, 12)
+    $lblGroup.Size = New-Object System.Drawing.Size(500, 20)
+    $mgr.Controls.Add($lblGroup)
+    $btnRefresh = New-Object System.Windows.Forms.Button
+    $btnRefresh.Text = "刷新"
+    $btnRefresh.Location = New-Object System.Drawing.Point(16, 40)
+    $btnRefresh.Size = New-Object System.Drawing.Size(90, 28)
+    $btnRefresh.Add_Click({ Refresh-InviteListInManager })
+    $mgr.Controls.Add($btnRefresh)
+    $btnCreate = New-Object System.Windows.Forms.Button
+    $btnCreate.Text = "生成邀请码"
+    $btnCreate.Location = New-Object System.Drawing.Point(116, 40)
+    $btnCreate.Size = New-Object System.Drawing.Size(110, 28)
+    $btnCreate.Enabled = (Test-CanManageInvites $script:DesktopGroupContext)
+    $btnCreate.Add_Click({ Show-CreateInviteDialog })
+    $mgr.Controls.Add($btnCreate)
+    $list = New-Object System.Windows.Forms.ListView
+    $list.View = "Details"
+    $list.FullRowSelect = $true
+    $list.GridLines = $true
+    $list.Location = New-Object System.Drawing.Point(16, 78)
+    $list.Size = New-Object System.Drawing.Size(710, 280)
+    [void]$list.Columns.Add("Invite ID", 140)
+    [void]$list.Columns.Add("状态", 90)
+    [void]$list.Columns.Add("创建时间", 150)
+    [void]$list.Columns.Add("过期时间", 150)
+    [void]$list.Columns.Add("使用限制", 90)
+    [void]$list.Columns.Add("已用", 50)
+    $mgr.Controls.Add($list)
+    $script:InviteListView = $list
+    $btnCopyLast = New-Object System.Windows.Forms.Button
+    $btnCopyLast.Text = "复制最近邀请码"
+    $btnCopyLast.Location = New-Object System.Drawing.Point(16, 370)
+    $btnCopyLast.Size = New-Object System.Drawing.Size(130, 30)
+    $btnCopyLast.Add_Click({
+        if ($script:LastCreatedInvite -and $script:LastCreatedInvite.inviteCode) {
+            Copy-InviteClipboard $script:LastCreatedInvite.inviteCode
+        } else {
+            [System.Windows.Forms.MessageBox]::Show("没有可复制的最近邀请码。邀请码明文只显示一次，请在生成后立即复制。", "ACBH", "OK", "Information") | Out-Null
+        }
+    })
+    $mgr.Controls.Add($btnCopyLast)
+    $btnRevoke = New-Object System.Windows.Forms.Button
+    $btnRevoke.Text = "撤销邀请码"
+    $btnRevoke.Location = New-Object System.Drawing.Point(156, 370)
+    $btnRevoke.Size = New-Object System.Drawing.Size(110, 30)
+    $btnRevoke.Enabled = (Test-CanManageInvites $script:DesktopGroupContext)
+    $btnRevoke.Add_Click({ Revoke-SelectedInvite })
+    $mgr.Controls.Add($btnRevoke)
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = "关闭"
+    $btnClose.Location = New-Object System.Drawing.Point(626, 370)
+    $btnClose.Size = New-Object System.Drawing.Size(100, 30)
+    $btnClose.Add_Click({ $mgr.Close() })
+    $mgr.Controls.Add($btnClose)
+    $mgr.Add_FormClosed({ $script:InviteManagerForm = $null; $script:InviteListView = $null })
+    $script:InviteManagerForm = $mgr
+    if ($form) { [void]$mgr.Show($form) } else { [void]$mgr.Show() }
+    Refresh-InviteListInManager
 }
 
 function Add-GuiLog {
@@ -671,6 +1142,7 @@ function Load-DesktopConfig {
             }
         }
         Add-GuiLog "桌面配置已恢复。"
+        Update-MembersPanel $cfg
     }
 }
 
@@ -712,10 +1184,13 @@ function Create-Group {
     Invoke-AgentCommandSafe -ActionName "创建 Group" -Args $args -Json -OnComplete {
         param($result)
         if ($null -eq $result) { return }
-        Invoke-OnUiThread {
-            $lblGroupResult.Text = "Group 已创建，本机已注册。邀请码：" + $(if ($result.inviteCode) { $result.inviteCode } else { "当前 Coordinator 不支持" })
-        }
+        Invoke-OnUiThread { $lblGroupResult.Text = "Group 已创建，本机已注册（owner）。" }
         Add-GuiLog "Group 已创建。本机 Host ID: $($result.hostId)"
+        if ($result.inviteCode) {
+            Add-GuiLog "初始邀请码已生成（明文仅显示一次，不会写入日志）。"
+            Invoke-OnUiThread { Show-InviteCreatedDialog $result }
+        }
+        Load-DesktopConfig
     }
 }
 
@@ -730,43 +1205,30 @@ function Join-Group {
         Show-GuiError "请输入邀请码。"
         return
     }
-    $args = @("desktop", "setup", "join-group", "--app-data-dir", $AppDataDir, "--invite-code", $code, "--display-name", $txtDisplayName.Text, "--coordinator-url", $coord)
-    Invoke-AgentCommandSafe -ActionName "加入 Group" -Args $args -Json -OnComplete {
-        param($result)
-        if ($null -eq $result) { return }
-        Invoke-OnUiThread { $lblGroupResult.Text = "已加入 Group，本机已注册。" }
-    }
-}
-
-function Create-Invite {
-    Invoke-AgentCommandSafe -ActionName "生成邀请码" -Args @("desktop", "setup", "create-invite", "--app-data-dir", $AppDataDir, "--expires-seconds", "1800", "--one-time") -Json -OnComplete {
-        param($result)
-        if ($null -eq $result) { return }
-        if ($result.inviteCode) {
-            Invoke-OnUiThread { $lblGroupResult.Text = "邀请码：" + $result.inviteCode }
-            [System.Windows.Forms.Clipboard]::SetText($result.inviteCode)
-            Add-GuiLog "邀请码已生成并复制，仅显示一次。"
-        } else {
-            Show-GuiError $result.message
+    $script:PendingInviteCode = $code
+    $args = @("desktop", "setup", "join-group", "--app-data-dir", $AppDataDir, "--display-name", $txtDisplayName.Text, "--coordinator-url", $coord)
+    $extraEnv = @{ ACBH_INVITE_CODE = $code }
+    Start-GuiOperation -Name "加入 Group" -MutexClass "invite" -Work {
+        Invoke-AgentCommandAsync -CommandArgs $args -ExtraEnv $extraEnv
+    } -OnComplete {
+        param($agentResult)
+        $parsed = $agentResult.ParsedJson
+        if (-not $parsed -and $agentResult.Stdout) {
+            try { $parsed = ConvertFrom-JsonSafe -Text $agentResult.Stdout -ActionName "加入 Group" } catch { }
         }
-    }
-}
-
-function List-Invites {
-    Invoke-AgentCommandSafe -ActionName "查看邀请码列表" -Args @("desktop", "setup", "list-invites", "--app-data-dir", $AppDataDir) -Json -OnComplete {
-        param($result)
-        if ($null -eq $result) { return }
-        if (-not $result.ok) {
-            Show-GuiError $result.message
+        if ($agentResult.ExitCode -ne 0 -or -not (Test-AgentBusinessResult $parsed)) {
+            Show-GuiError (Format-InviteErrorMessage $parsed "加入 Group")
             return
         }
-        $lines = @()
-        foreach ($invite in $result.invites) {
-            $used = $(if ($invite.usedAt) { "已使用" } elseif ($invite.revokedAt) { "已撤销" } else { "未使用" })
-            $lines += ($invite.inviteId + "  过期：" + $invite.expiresAt + "  " + $used)
+        Invoke-OnUiThread {
+            $lblGroupResult.Text = "已加入 Group，本机已注册。"
+            $txtInvite.Text = ""
+            $txtInvite.UseSystemPasswordChar = $true
         }
-        if ($lines.Count -eq 0) { $lines = @("暂无邀请码。") }
-        [System.Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "邀请码列表", "OK", "Information") | Out-Null
+        $script:PendingInviteCode = $null
+        Add-GuiLog "已加入 Group。本机 Host ID: $($parsed.hostId)"
+        Load-DesktopConfig
+        Refresh-Status
     }
 }
 
@@ -1232,8 +1694,8 @@ if ($SelfTest) {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(1040, 900)
-$form.MinimumSize = New-Object System.Drawing.Size(980, 700)
+$form.Size = New-Object System.Drawing.Size(1040, 1000)
+$form.MinimumSize = New-Object System.Drawing.Size(980, 820)
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
 
 $title = New-Object System.Windows.Forms.Label
@@ -1302,8 +1764,29 @@ $txtDisplayName.Size = New-Object System.Drawing.Size(130, 24)
 $setupPanel.Controls.Add($txtDisplayName)
 $txtInvite = New-Object System.Windows.Forms.TextBox
 $txtInvite.Location = New-Object System.Drawing.Point(304, 48)
-$txtInvite.Size = New-Object System.Drawing.Size(160, 24)
+$txtInvite.Size = New-Object System.Drawing.Size(120, 24)
+$txtInvite.UseSystemPasswordChar = $true
 $setupPanel.Controls.Add($txtInvite)
+$btnToggleInvite = New-Object System.Windows.Forms.Button
+$btnToggleInvite.Text = "显示"
+$btnToggleInvite.Location = New-Object System.Drawing.Point(428, 46)
+$btnToggleInvite.Size = New-Object System.Drawing.Size(36, 26)
+$btnToggleInvite.Add_Click({
+    if ($txtInvite.UseSystemPasswordChar) {
+        $txtInvite.UseSystemPasswordChar = $false
+        $btnToggleInvite.Text = "隐藏"
+    } else {
+        $txtInvite.UseSystemPasswordChar = $true
+        $btnToggleInvite.Text = "显示"
+    }
+})
+$setupPanel.Controls.Add($btnToggleInvite)
+$lblInviteHint = New-Object System.Windows.Forms.Label
+$lblInviteHint.Text = "邀请码用于让另一台电脑加入 ACBH Group（非 MC 玩家白名单）"
+$lblInviteHint.ForeColor = [System.Drawing.Color]::DimGray
+$lblInviteHint.Location = New-Object System.Drawing.Point(304, 72)
+$lblInviteHint.Size = New-Object System.Drawing.Size(170, 32)
+$setupPanel.Controls.Add($lblInviteHint)
 Add-Button $setupPanel "创建 Group" 18 78 { Create-Group } ""
 Add-Button $setupPanel "加入已有 Group" 198 78 { Join-Group } ""
 $lblGroupResult = New-Object System.Windows.Forms.Label
@@ -1379,9 +1862,36 @@ Add-Button $mainPanel "完成并进入 ACBH" 204 104 { Complete-Setup } "保存 
 Add-Button $mainPanel "复制玩家地址" 20 140 { if ($txtPlayerAddress.Text) { [System.Windows.Forms.Clipboard]::SetText($txtPlayerAddress.Text); Add-GuiLog "玩家地址已复制。" } } ""
 Add-Button $mainPanel "打开日志" 204 140 { Open-LogDir } ""
 
+$membersPanel = New-Object System.Windows.Forms.GroupBox
+$membersPanel.Text = "成员与邀请"
+$membersPanel.Location = New-Object System.Drawing.Point(20, 500)
+$membersPanel.Size = New-Object System.Drawing.Size(470, 120)
+$form.Controls.Add($membersPanel)
+
+$lblMembersGroup = New-Object System.Windows.Forms.Label
+$lblMembersGroup.Text = "当前 Group：未配置"
+$lblMembersGroup.Location = New-Object System.Drawing.Point(16, 24)
+$lblMembersGroup.Size = New-Object System.Drawing.Size(430, 18)
+$membersPanel.Controls.Add($lblMembersGroup)
+$lblMembersIdentity = New-Object System.Windows.Forms.Label
+$lblMembersIdentity.Text = "本机身份：未注册"
+$lblMembersIdentity.Location = New-Object System.Drawing.Point(16, 44)
+$lblMembersIdentity.Size = New-Object System.Drawing.Size(430, 18)
+$membersPanel.Controls.Add($lblMembersIdentity)
+$lblMembersPermission = New-Object System.Windows.Forms.Label
+$lblMembersPermission.Text = "邀请权限：未知"
+$lblMembersPermission.Location = New-Object System.Drawing.Point(16, 64)
+$lblMembersPermission.Size = New-Object System.Drawing.Size(430, 18)
+$membersPanel.Controls.Add($lblMembersPermission)
+$btnCreateInviteMain = Add-Button $membersPanel "生成邀请码" 16 86 { Show-CreateInviteDialog } "生成一次性或可重复使用的 Group 邀请码。"
+Register-GuiOperationButton $btnCreateInviteMain
+$btnOpenInviteManager = Add-Button $membersPanel "查看邀请码" 196 86 { Open-InviteManagerWindow } "打开邀请码管理窗口。"
+Register-GuiOperationButton $btnOpenInviteManager
+Add-Button $membersPanel "刷新" 376 86 { Load-DesktopConfig; if ($script:InviteManagerForm -and $script:InviteManagerForm.Visible) { Refresh-InviteListInManager } } "刷新 Group 身份；若管理窗口已打开则同步列表。"
+
 $worldBackupPanel = New-Object System.Windows.Forms.GroupBox
 $worldBackupPanel.Text = "世界差量备份"
-$worldBackupPanel.Location = New-Object System.Drawing.Point(20, 500)
+$worldBackupPanel.Location = New-Object System.Drawing.Point(20, 630)
 $worldBackupPanel.Size = New-Object System.Drawing.Size(470, 190)
 $form.Controls.Add($worldBackupPanel)
 
@@ -1416,7 +1926,7 @@ Add-WorldBackupButton "继续未完成备份" 346 138 { Resume-WorldBackup } "�
 
 $advancedPanel = New-Object System.Windows.Forms.GroupBox
 $advancedPanel.Text = "高级诊断"
-$advancedPanel.Location = New-Object System.Drawing.Point(510, 550)
+$advancedPanel.Location = New-Object System.Drawing.Point(510, 680)
 $advancedPanel.Size = New-Object System.Drawing.Size(490, 130)
 $advancedPanel.Visible = $false
 $form.Controls.Add($advancedPanel)
@@ -1427,14 +1937,11 @@ Add-Button $advancedPanel "查看高级状态" 14 58 { Invoke-AgentCommandSafe -
 Add-Button $advancedPanel "清理 runtime cache" 192 58 { Invoke-AgentCommandSafe -ActionName "清理 runtime cache" -Args @("desktop", "environment", "clear-cache", "--app-data-dir", $AppDataDir) -Json } ""
 Add-Button $advancedPanel "忘记此电脑配置" 314 24 { Forget-DesktopConfig } ""
 Add-Button $advancedPanel "重置向导" 314 58 { Reset-Wizard } ""
-Add-Button $advancedPanel "生成邀请码" 14 92 { Create-Invite } ""
-Add-Button $advancedPanel "查看邀请码" 192 92 { List-Invites } ""
-
 $btnAdvanced = Add-Button $form "高级诊断" 830 28 { $advancedPanel.Visible = -not $advancedPanel.Visible } "默认隐藏高级 CLI 能力。"
 
 $script:LogBox = New-Object System.Windows.Forms.TextBox
-$script:LogBox.Location = New-Object System.Drawing.Point(20, 710)
-$script:LogBox.Size = New-Object System.Drawing.Size(980, 140)
+$script:LogBox.Location = New-Object System.Drawing.Point(20, 840)
+$script:LogBox.Size = New-Object System.Drawing.Size(980, 120)
 $script:LogBox.Multiline = $true
 $script:LogBox.ScrollBars = "Vertical"
 $script:LogBox.ReadOnly = $true

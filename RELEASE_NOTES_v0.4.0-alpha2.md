@@ -31,6 +31,14 @@
 - 新增 `acbh_vps_wait_for_health`（默认 60s、每秒重试、version 匹配）。
 - 升级与自动回滚在 `systemctl start` 后使用同一等待机制。
 
+### Windows GUI 邀请码管理
+
+- 主界面新增 **成员与邀请** 区域：生成、查看、刷新邀请码；显示当前 Group、本机身份与邀请权限。
+- 邀请码管理窗口支持列表（默认掩码 Invite ID）、撤销、复制最近邀请码。
+- 生成邀请码使用独立结果对话框（明文仅显示一次）；支持配置有效期与是否单次使用（与 Coordinator API 一致）。
+- 加入 Group 时邀请码通过 `ACBH_INVITE_CODE` 环境变量传递，不写入命令行参数与日志。
+- 邀请码操作全部走后台任务，窗口保持响应。
+
 ## 配置
 
 ```json
@@ -45,3 +53,4 @@
 
 - Agent 尚未输出 NDJSON 进度事件；GUI 使用阶段日志 + 不确定进度条。
 - Manifest commit 等事务阶段不可安全取消。
+- 邀请码 API 暂不支持备注、自定义最大使用次数（仅 `oneTime` 与 `expiresInSeconds`）；列表无法重新显示已生成邀请码明文。
