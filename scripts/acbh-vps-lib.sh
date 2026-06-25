@@ -19,7 +19,32 @@ ACBH_SKIP_ROOT="${ACBH_SKIP_ROOT:-0}"
 # shellcheck disable=SC2034
 ACBH_VPS_UPGRADE_REPORT_ERROR=""
 ACBH_VPS_UPGRADE_DRY_RUN="false"
+ACBH_VPS_STATE_BACKUP=""
+ACBH_VPS_HEALTH_WAIT_ATTEMPTS=""
+ACBH_VPS_HEALTH_WAIT_ELAPSED=""
+ACBH_VPS_HEALTH_WAIT_LAST_ERROR=""
 ACBH_VPS_UPGRADE_LOCK_FD=""
+
+acbh_vps_set_upgrade_dry_run() {
+  ACBH_VPS_UPGRADE_DRY_RUN="$1"
+}
+
+acbh_vps_set_state_backup() {
+  ACBH_VPS_STATE_BACKUP="$1"
+}
+
+acbh_vps_set_health_wait_result() {
+  ACBH_VPS_HEALTH_WAIT_ATTEMPTS="$1"
+  ACBH_VPS_HEALTH_WAIT_ELAPSED="$2"
+  ACBH_VPS_HEALTH_WAIT_LAST_ERROR="$3"
+}
+
+acbh_vps_format_health_wait_error() {
+  printf 'health check failed after upgrade (attempts=%s, elapsed=%ss, last=%s)' \
+    "${ACBH_VPS_HEALTH_WAIT_ATTEMPTS:-0}" \
+    "${ACBH_VPS_HEALTH_WAIT_ELAPSED:-0}" \
+    "${ACBH_VPS_HEALTH_WAIT_LAST_ERROR:-unknown}"
+}
 
 acbh_vps_log() {
   printf '[acbh-vps] %s\n' "$*" >&2
@@ -485,9 +510,7 @@ acbh_vps_wait_for_health() {
       now_ts="$(date +%s)"
       elapsed=$((now_ts - start_ts))
       acbh_vps_log "health ready after ${attempt} attempt(s) in ${elapsed}s"
-      ACBH_VPS_HEALTH_WAIT_ATTEMPTS="$attempt"
-      ACBH_VPS_HEALTH_WAIT_ELAPSED="$elapsed"
-      ACBH_VPS_HEALTH_WAIT_LAST_ERROR=""
+      acbh_vps_set_health_wait_result "$attempt" "$elapsed" ""
       return 0
     fi
     last_error="health check failed for $expected_version"
@@ -496,9 +519,7 @@ acbh_vps_wait_for_health() {
   now_ts="$(date +%s)"
   elapsed=$((now_ts - start_ts))
   acbh_vps_log "health wait timeout after ${attempt} attempt(s) in ${elapsed}s; last error: ${last_error}"
-  ACBH_VPS_HEALTH_WAIT_ATTEMPTS="$attempt"
-  ACBH_VPS_HEALTH_WAIT_ELAPSED="$elapsed"
-  ACBH_VPS_HEALTH_WAIT_LAST_ERROR="$last_error"
+  acbh_vps_set_health_wait_result "$attempt" "$elapsed" "$last_error"
   return 1
 }
 

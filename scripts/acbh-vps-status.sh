@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=./acbh-vps-lib.sh
+# shellcheck disable=SC1091  # acbh-vps-lib.sh is co-located; SCRIPT_DIR supports bundle relocation.
 . "$SCRIPT_DIR/acbh-vps-lib.sh"
 
 while [ "$#" -gt 0 ]; do
@@ -43,6 +43,10 @@ echo "Listening ports:"
 "$ACBH_SS_CMD" -ltn | grep -E ":(${ACBH_COORDINATOR_PORT}|${ACBH_RELAY_PORT}) " || true
 echo
 echo "Health:"
-"$ACBH_CURL_CMD" -fsS "http://127.0.0.1:${ACBH_COORDINATOR_PORT}/health" && echo || true
+if "$ACBH_CURL_CMD" -fsS "http://127.0.0.1:${ACBH_COORDINATOR_PORT}/health"; then
+  echo
+fi
 echo "Bootstrap manifest:"
-"$ACBH_CURL_CMD" -fsS "http://127.0.0.1:${ACBH_COORDINATOR_PORT}/v1/bootstrap/manifest" && echo || true
+if "$ACBH_CURL_CMD" -fsS "http://127.0.0.1:${ACBH_COORDINATOR_PORT}/v1/bootstrap/manifest"; then
+  echo
+fi
