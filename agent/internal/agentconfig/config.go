@@ -13,7 +13,7 @@ import (
 const (
 	DirName      = "ACBH"
 	FileName     = "config.yaml"
-	AgentVersion = "v0.4.0-alpha2"
+	AgentVersion = "v0.4.0-alpha3"
 
 	DefaultServerStartTimeout = 120 * time.Second
 	MinServerStartTimeout     = 10 * time.Second

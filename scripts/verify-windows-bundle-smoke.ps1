@@ -130,6 +130,33 @@ function Invoke-AgentJson {
     return $result.Stdout | ConvertFrom-Json
 }
 
+function Invoke-DesktopProbe {
+    $desktopExe = Join-Path $BundleRoot "acbh-desktop-windows-amd64.exe"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $desktopExe
+    $psi.Arguments = "--gui"
+    $psi.WorkingDirectory = $BundleRoot
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    Set-ProcessUtf8OutputEncoding $psi
+    $process = [System.Diagnostics.Process]::Start($psi)
+    if ($null -eq $process) {
+        throw "failed to start desktop process"
+    }
+    Start-Sleep -Seconds 3
+    if (-not $process.HasExited) {
+        $process.Kill()
+        $process.WaitForExit()
+    }
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Stdout = $process.StandardOutput.ReadToEnd()
+        Stderr = $process.StandardError.ReadToEnd()
+    }
+}
+
 function New-TestEnvironmentPackage {
     param([Parameter(Mandatory = $true)][string]$Target)
 
@@ -161,7 +188,6 @@ function New-TestEnvironmentPackage {
 
 try {
     New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot "coordinator\dist") | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot "scripts") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot "docs") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot "runtime\node") | Out-Null
 
@@ -182,7 +208,6 @@ try {
 
     Copy-Item -Recurse -Force (Join-Path $RepoRoot "apps\coordinator\dist\*") (Join-Path $BundleRoot "coordinator\dist")
     Copy-Item -Force (Join-Path $RepoRoot "apps\coordinator\package.json") (Join-Path $BundleRoot "coordinator\package.json")
-    Copy-PowerShellUtf8Bom -Source (Join-Path $RepoRoot "scripts\acbh-desktop-gui.ps1") -Target (Join-Path $BundleRoot "scripts\acbh-desktop-gui.ps1")
     Copy-Item -Recurse -Force (Join-Path $RepoRoot "docs\zh-CN") (Join-Path $BundleRoot "docs\zh-CN")
 
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
@@ -203,58 +228,13 @@ try {
         Pop-Location
     }
 
-    $guiPath = Join-Path $BundleRoot "scripts\acbh-desktop-gui.ps1"
-    $guiBytes = [System.IO.File]::ReadAllBytes($guiPath)
-    if ($guiBytes.Length -lt 3 -or $guiBytes[0] -ne 0xEF -or $guiBytes[1] -ne 0xBB -or $guiBytes[2] -ne 0xBF) {
-        throw "GUI script in bundle must be UTF-8 with BOM for Windows PowerShell 5.1"
+    $legacyGuiPath = Join-Path $BundleRoot "scripts\acbh-desktop-gui.ps1"
+    if (Test-Path $legacyGuiPath) {
+        throw "production Windows bundle must not include legacy PowerShell GUI script"
     }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $guiPath -SelfTest | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "GUI script failed powershell.exe -File self-test"
-    }
-    $guiText = Get-Content -Raw -Encoding UTF8 -Path $guiPath
-    $parseErrors = $null
-    $null = [System.Management.Automation.PSParser]::Tokenize($guiText, [ref]$parseErrors)
-    if ($parseErrors -and $parseErrors.Count -gt 0) {
-        throw "GUI script parse failed: $($parseErrors[0].Message)"
-    }
-    foreach ($forbiddenPattern in @(
-        '\.DoWork\s*(\+)?\s*=',
-        '\.RunWorkerCompleted\s*(\+)?\s*=',
-        '\.ProgressChanged\s*(\+)?\s*=',
-        'Task\.Run',
-        'ThreadPool',
-        'New-Object\s+System\.ComponentModel\.BackgroundWorker',
-        '\[System\.Threading\.Thread\]',
-        '\.BeginInvoke\('
-    )) {
-        if ($guiText -match $forbiddenPattern) {
-            throw "GUI smoke failed; forbidden async/event pattern: $forbiddenPattern"
-        }
-    }
-    foreach ($requiredText in @(
-        "Invoke-AgentCommandSafe",
-        "Add-SafeClick",
-        "Show-GuiError",
-        "Redact-Secrets",
-        '"desktop", "environment", "check"',
-        '"desktop", "setup", "configure-network"',
-        '"desktop", "server", "start-auto"',
-        '"desktop", "server", "select-launch"',
-        '"desktop", "setup", "config"',
-        "Load-DesktopConfig",
-        "Forget-DesktopConfig",
-        "Create-Invite",
-        "Update-ServerSummary",
-        "Show-LaunchEvidence",
-        "advancedPanel",
-        "Import-OfflinePack",
-        '$advancedPanel.Visible = $false',
-        'New-Object System.Diagnostics.ProcessStartInfo'
-    )) {
-        if (-not $guiText.Contains($requiredText)) {
-            throw "GUI smoke failed; missing required text: $requiredText"
-        }
+    $desktopProbe = Invoke-DesktopProbe
+    if ($desktopProbe.Stdout -notmatch "ACBH Desktop: http://") {
+        throw "Go desktop runtime did not print local URL"
     }
 
     $packageJson = Get-Content -Raw -Path (Join-Path $BundleRoot "coordinator\package.json") | ConvertFrom-Json
@@ -404,7 +384,6 @@ try {
     }
 
     foreach ($requiredPath in @(
-        "scripts\acbh-desktop-gui.ps1",
         "docs\zh-CN\windows-private-desktop-quickstart.md",
         "coordinator\package.json",
         "coordinator\node_modules\ws\package.json",

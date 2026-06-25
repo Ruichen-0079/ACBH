@@ -102,6 +102,7 @@ type SetupState struct {
 
 type ConfigureNetworkResult struct {
 	OK             bool           `json:"ok"`
+	Outcome        string         `json:"outcome"`
 	State          DesktopState   `json:"state"`
 	CoordinatorURL string         `json:"coordinatorUrl"`
 	PlayerAddress  string         `json:"playerAddress"`
@@ -158,10 +159,10 @@ type SetupGroupResult struct {
 }
 
 type InviteListResult struct {
-	OK      bool                       `json:"ok"`
-	Invites []coordinator.PublicInvite `json:"invites"`
-	Message string                     `json:"message"`
-	ErrorCode string                   `json:"errorCode,omitempty"`
+	OK        bool                       `json:"ok"`
+	Invites   []coordinator.PublicInvite `json:"invites"`
+	Message   string                     `json:"message"`
+	ErrorCode string                     `json:"errorCode,omitempty"`
 }
 
 type RevokeInviteResult struct {
@@ -276,7 +277,7 @@ func CheckEnvironment(opts Options) (EnvironmentReport, error) {
 		LastSuccessfulBootstrapVersion: agentconfig.AgentVersion,
 	}
 	add := func(id, status, message string, repairable bool, impact, repair, manual string) {
-		if status != "passed" {
+		if status == "failed" {
 			report.OK = false
 		}
 		report.Checks = append(report.Checks, EnvironmentCheck{
@@ -322,9 +323,10 @@ func CheckEnvironment(opts Options) (EnvironmentReport, error) {
 		guiPath = filepath.Join(opts.WorkingDir, "scripts", "acbh-desktop-gui.ps1")
 	}
 	if fileExists(guiPath) {
-		add("gui_script", "passed", "GUI 脚本存在。", false, "", "", "")
+		add("legacy_gui_script", "warning", "Legacy PowerShell GUI 脚本存在，但生产入口使用 Go desktop runtime。", false, "仅影响开发回退路径。", "", "")
+		report.Warnings = append(report.Warnings, "检测到 legacy PowerShell GUI；生产入口不会调用它。")
 	} else {
-		add("gui_script", "failed", "GUI 脚本缺失："+guiPath, false, "桌面界面无法打开。", "", "重新下载完整 Windows bundle。")
+		add("legacy_gui_script", "passed", "生产桌面入口不依赖 PowerShell GUI 脚本。", false, "", "", "")
 	}
 	if runtime.GOOS == "windows" {
 		add("dpapi", "passed", "Windows DPAPI 可用。", false, "", "", "")
@@ -414,10 +416,17 @@ func ConfigureNetwork(opts Options, host string, coordinatorPort string, publicG
 		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 1)
 	})
 	return ConfigureNetworkResult{
-		OK: len(warnings) == 0, State: StateBootstrapReady, CoordinatorURL: coordURL,
+		OK: true, Outcome: outcomeForWarnings(warnings), State: StateBootstrapReady, CoordinatorURL: coordURL,
 		PlayerAddress: setup.PlayerAddress, BootstrapURL: coordURL + "/v1/bootstrap/manifest",
 		Checks: checks, Message: "公网服务器配置已保存。", Warnings: warnings,
 	}, nil
+}
+
+func outcomeForWarnings(warnings []string) string {
+	if len(warnings) > 0 {
+		return string(OutcomeSuccessWithWarnings)
+	}
+	return string(OutcomeSuccess)
 }
 
 func NormalizePublicCoordinatorInput(input string, coordinatorPort string) (coordinatorURL string, publicHost string, err error) {
@@ -531,16 +540,22 @@ func SetupCreateGroup(ctx context.Context, opts Options, groupName string, displ
 	if err != nil {
 		return SetupGroupResult{OK: false, State: StateError, Message: "创建 Group 失败：" + err.Error()}, nil
 	}
-	joined, err := client.JoinGroup(ctx, created.GroupID, coordinator.JoinGroupRequest{AccessKey: created.AccessKey, DisplayName: displayName})
-	if err != nil {
-		return SetupGroupResult{OK: false, State: StateError, GroupID: created.GroupID, Message: "注册成员失败：" + err.Error()}, nil
+	memberID := created.OwnerMemberID
+	memberRole := "owner"
+	if memberID == "" {
+		joined, err := client.JoinGroup(ctx, created.GroupID, coordinator.JoinGroupRequest{AccessKey: created.AccessKey, DisplayName: displayName})
+		if err != nil {
+			return SetupGroupResult{OK: false, State: StateError, GroupID: created.GroupID, Message: "注册成员失败：" + err.Error()}, nil
+		}
+		memberID = joined.MemberID
+		memberRole = joined.Role
 	}
 	registered, err := client.RegisterHost(ctx, coordinator.RegisterHostRequest{
-		GroupID: created.GroupID, AccessKey: created.AccessKey, MemberID: joined.MemberID,
+		GroupID: created.GroupID, AccessKey: created.AccessKey, MemberID: memberID,
 		DeviceName: opts.DeviceName, Platform: runtime.GOOS, AgentVersion: agentconfig.AgentVersion,
 	})
 	if err != nil {
-		return SetupGroupResult{OK: false, State: StateError, GroupID: created.GroupID, MemberID: joined.MemberID, Message: "注册本机 Host 失败：" + err.Error()}, nil
+		return SetupGroupResult{OK: false, State: StateError, GroupID: created.GroupID, MemberID: memberID, Message: "注册本机 Host 失败：" + err.Error()}, nil
 	}
 	setup, _ := LoadSetup(opts)
 	serverCfg := serverConfigFromSetup(opts, setup)
@@ -548,7 +563,7 @@ func SetupCreateGroup(ctx context.Context, opts Options, groupName string, displ
 		serverCfg = existing.Server
 	}
 	cfg := agentconfig.Config{
-		CoordinatorURL: coordinatorURL, GroupID: created.GroupID, MemberID: joined.MemberID,
+		CoordinatorURL: coordinatorURL, GroupID: created.GroupID, MemberID: memberID,
 		HostID: registered.HostID, HostToken: registered.HostToken, DisplayName: displayName,
 		DeviceName: opts.DeviceName, Platform: runtime.GOOS, AgentVersion: agentconfig.AgentVersion,
 		Server: serverCfg,
@@ -568,14 +583,14 @@ func SetupCreateGroup(ctx context.Context, opts Options, groupName string, displ
 		cfg.Mode = firstNonEmpty(setup.Mode, "remote-public")
 		cfg.CoordinatorURL = coordinatorURL
 		cfg.GroupName = groupName
-		cfg.Group = DesktopGroupConfig{GroupID: created.GroupID, MemberID: joined.MemberID, HostID: registered.HostID, Role: "owner"}
+		cfg.Group = DesktopGroupConfig{GroupID: created.GroupID, MemberID: memberID, HostID: registered.HostID, Role: memberRole}
 		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 2)
 	})
 	invite, inviteErr := client.CreateInvite(ctx, created.GroupID, coordinator.CreateInviteRequest{
 		AccessKey: created.AccessKey, ExpiresInSeconds: 30 * 60, OneTime: true,
 	})
 	result := SetupGroupResult{
-		OK: true, State: StateBootstrapReady, GroupID: created.GroupID, MemberID: joined.MemberID,
+		OK: true, State: StateBootstrapReady, GroupID: created.GroupID, MemberID: memberID,
 		HostID: registered.HostID, Message: "Group 已创建，本机已注册。",
 	}
 	if inviteErr == nil {
@@ -653,18 +668,16 @@ func SetupCreateInvite(ctx context.Context, opts Options, expiresSeconds int, on
 	if err != nil {
 		return SetupGroupResult{OK: false, State: StateUnconfigured, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
-	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
-	if accessKey == "" {
-		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "当前设备不是 owner，不能生成邀请码。", ErrorCode: "invite_permission_denied"}, nil
-	}
 	if expiresSeconds <= 0 {
 		expiresSeconds = 30 * 60
 	}
-	client, err := coordinator.NewClient(cfg.CoordinatorURL)
-	if err != nil {
-		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
+	client, _, errorCode, message := prepareInviteManager(ctx, opts, cfg)
+	if errorCode != "" {
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: message, ErrorCode: errorCode}, nil
 	}
-	invite, err := client.CreateInvite(ctx, cfg.GroupID, coordinator.CreateInviteRequest{AccessKey: accessKey, ExpiresInSeconds: expiresSeconds, OneTime: oneTime})
+	invite, err := client.CreateInvite(ctx, cfg.GroupID, coordinator.CreateInviteRequest{
+		HostID: cfg.HostID, HostToken: cfg.HostToken, ExpiresInSeconds: expiresSeconds, OneTime: oneTime,
+	})
 	if err != nil {
 		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "生成邀请码失败。", ErrorCode: "invite_create_failed"}, nil
 	}
@@ -681,15 +694,11 @@ func SetupListInvites(ctx context.Context, opts Options) (InviteListResult, erro
 	if err != nil {
 		return InviteListResult{OK: false, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
-	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
-	if accessKey == "" {
-		return InviteListResult{OK: false, Message: "当前设备不是 owner，不能查看邀请码。", ErrorCode: "invite_permission_denied"}, nil
+	client, _, errorCode, message := prepareInviteManager(ctx, opts, cfg)
+	if errorCode != "" {
+		return InviteListResult{OK: false, Message: message, ErrorCode: errorCode}, nil
 	}
-	client, err := coordinator.NewClient(cfg.CoordinatorURL)
-	if err != nil {
-		return InviteListResult{OK: false, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
-	}
-	list, err := client.ListInvites(ctx, cfg.GroupID, coordinator.ListInvitesRequest{AccessKey: accessKey})
+	list, err := client.ListInvites(ctx, cfg.GroupID, coordinator.ListInvitesRequest{HostID: cfg.HostID, HostToken: cfg.HostToken})
 	if err != nil {
 		return InviteListResult{OK: false, Message: "读取邀请码列表失败。", ErrorCode: "invite_list_failed"}, nil
 	}
@@ -702,19 +711,47 @@ func SetupRevokeInvite(ctx context.Context, opts Options, inviteID string) (Revo
 	if err != nil {
 		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
-	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
-	if accessKey == "" {
-		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "当前设备不是 owner，不能撤销邀请码。", ErrorCode: "invite_permission_denied"}, nil
+	client, _, errorCode, message := prepareInviteManager(ctx, opts, cfg)
+	if errorCode != "" {
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: message, ErrorCode: errorCode}, nil
 	}
-	client, err := coordinator.NewClient(cfg.CoordinatorURL)
-	if err != nil {
-		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
-	}
-	revoked, err := client.RevokeInvite(ctx, cfg.GroupID, coordinator.RevokeInviteRequest{AccessKey: accessKey, InviteID: inviteID})
+	revoked, err := client.RevokeInvite(ctx, cfg.GroupID, coordinator.RevokeInviteRequest{HostID: cfg.HostID, HostToken: cfg.HostToken, InviteID: inviteID})
 	if err != nil {
 		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "撤销邀请码失败。", ErrorCode: "invite_revoke_failed"}, nil
 	}
 	return RevokeInviteResult{OK: true, InviteID: revoked.InviteID, Message: "邀请码已撤销。"}, nil
+}
+
+func prepareInviteManager(ctx context.Context, opts Options, cfg agentconfig.Config) (*coordinator.Client, *coordinator.WhoAmIResponse, string, string) {
+	client, err := coordinator.NewClient(cfg.CoordinatorURL)
+	if err != nil {
+		return nil, nil, "coordinator_unreachable", "无法连接 Coordinator。"
+	}
+	caps, err := client.GetCapabilities(ctx)
+	if err != nil {
+		var apiErr *coordinator.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == 404 {
+			return nil, nil, "unsupported_capability", "当前 Coordinator 版本不支持该功能，请先升级 VPS。"
+		}
+		return nil, nil, "capability_handshake_failed", "无法确认 Coordinator 能力：" + err.Error()
+	}
+	if !caps.Supports("invite_management_v1") {
+		return nil, nil, "unsupported_capability", "当前 Coordinator 版本不支持该功能，请先升级 VPS。"
+	}
+	who, err := client.WhoAmI(ctx, coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken})
+	if err != nil {
+		return nil, nil, "identity_resolve_failed", "无法从 Coordinator 确认当前身份：" + err.Error()
+	}
+	local, _ := LoadDesktopConfig(opts)
+	serverRole := strings.ToLower(who.Role)
+	localRole := strings.ToLower(local.Group.Role)
+	if serverRole != "owner" && serverRole != "admin" {
+		if localRole == "owner" || localRole == "admin" {
+			return nil, &who, "identity_mismatch", "本地身份与服务端身份不一致，请重新认证或修复身份。"
+		}
+		return nil, &who, "invite_permission_denied", "当前服务端身份不是 owner/admin，不能管理邀请码。"
+	}
+	return client, &who, "", ""
 }
 
 func InspectServerForSetup(opts Options, serverDir string) (InspectServerSetupResult, error) {

@@ -59,7 +59,9 @@ type RegisterHostResponse struct {
 }
 
 type CreateInviteRequest struct {
-	AccessKey        string `json:"accessKey"`
+	AccessKey        string `json:"accessKey,omitempty"`
+	HostID           string `json:"hostId,omitempty"`
+	HostToken        string `json:"hostToken,omitempty"`
 	ExpiresInSeconds int    `json:"expiresInSeconds,omitempty"`
 	OneTime          bool   `json:"oneTime,omitempty"`
 }
@@ -83,7 +85,9 @@ type PublicInvite struct {
 }
 
 type ListInvitesRequest struct {
-	AccessKey string `json:"accessKey"`
+	AccessKey string `json:"accessKey,omitempty"`
+	HostID    string `json:"hostId,omitempty"`
+	HostToken string `json:"hostToken,omitempty"`
 }
 
 type ListInvitesResponse struct {
@@ -91,7 +95,9 @@ type ListInvitesResponse struct {
 }
 
 type RevokeInviteRequest struct {
-	AccessKey string `json:"accessKey"`
+	AccessKey string `json:"accessKey,omitempty"`
+	HostID    string `json:"hostId,omitempty"`
+	HostToken string `json:"hostToken,omitempty"`
 	InviteID  string `json:"inviteId"`
 }
 
@@ -143,6 +149,53 @@ type HeartbeatResponse struct {
 	OK     bool   `json:"ok"`
 	HostID string `json:"hostId"`
 	Status string `json:"status"`
+}
+
+type Capabilities struct {
+	CoordinatorVersion    string   `json:"coordinatorVersion"`
+	ProtocolVersion       int      `json:"protocolVersion"`
+	MinimumClientProtocol int      `json:"minimumClientProtocol"`
+	Capabilities          []string `json:"capabilities"`
+	ServerTime            string   `json:"serverTime"`
+	AuthenticationMode    string   `json:"authenticationMode"`
+}
+
+func (c Capabilities) Supports(name string) bool {
+	for _, capability := range c.Capabilities {
+		if capability == name {
+			return true
+		}
+	}
+	return false
+}
+
+type WhoAmIResponse struct {
+	GroupID        string          `json:"groupId"`
+	MemberID       string          `json:"memberId"`
+	HostID         string          `json:"hostId"`
+	Role           string          `json:"role"`
+	CredentialKind string          `json:"credentialKind"`
+	Lease          HostLeaseStatus `json:"lease"`
+}
+
+type HostLeaseStatus struct {
+	GroupID              string `json:"groupId"`
+	HostID               string `json:"hostId"`
+	CurrentHostID        string `json:"currentHostId,omitempty"`
+	CurrentHostIDMatches bool   `json:"currentHostIdMatches"`
+	LeaseValid           bool   `json:"leaseValid"`
+	LeaseExpiresAt       string `json:"leaseExpiresAt,omitempty"`
+	LeaseRemaining       int64  `json:"leaseRemaining"`
+	Generation           int    `json:"generation"`
+	ServerTime           string `json:"serverTime"`
+	HeartbeatActive      bool   `json:"heartbeatActive"`
+}
+
+type EnsureActiveLeaseResponse struct {
+	OK      bool            `json:"ok"`
+	Renewed bool            `json:"renewed"`
+	Lease   HostLeaseStatus `json:"lease"`
+	Message string          `json:"message"`
 }
 
 type UploadObjectRequest struct {
@@ -356,6 +409,29 @@ type TakeoverActionResponse struct {
 type apiError struct {
 	Message string `json:"message"`
 	Error   string `json:"error"`
+	Code    string `json:"code"`
+}
+
+type APIError struct {
+	StatusCode int
+	Code       string
+	Message    string
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("coordinator rejected request (%d %s): %s", e.StatusCode, e.Code, e.Message)
+	}
+	if e.Message != "" {
+		return fmt.Sprintf("coordinator rejected request (%d): %s", e.StatusCode, e.Message)
+	}
+	return fmt.Sprintf("coordinator rejected request (%d)", e.StatusCode)
+}
+
+func IsAPIErrorCode(err error, code string) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Code == code
 }
 
 func NewClient(baseURL string) (*Client, error) {
@@ -405,6 +481,12 @@ func (c *Client) Health(ctx context.Context) error {
 	return nil
 }
 
+func (c *Client) GetCapabilities(ctx context.Context) (Capabilities, error) {
+	var out Capabilities
+	err := c.getNoAuth(ctx, "/v1/capabilities", &out)
+	return out, err
+}
+
 func (c *Client) CreateGroup(ctx context.Context, req CreateGroupRequest) (CreateGroupResponse, error) {
 	var out CreateGroupResponse
 	err := c.post(ctx, "/v1/groups", req, &out)
@@ -450,6 +532,30 @@ func (c *Client) JoinInvite(ctx context.Context, req JoinInviteRequest) (JoinInv
 func (c *Client) SendHeartbeat(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, error) {
 	var out HeartbeatResponse
 	err := c.post(ctx, "/v1/hosts/heartbeat", req, &out)
+	return out, err
+}
+
+func (c *Client) WhoAmI(ctx context.Context, auth ArtifactAuth) (WhoAmIResponse, error) {
+	var out WhoAmIResponse
+	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/whoami", auth, &out)
+	return out, err
+}
+
+func (c *Client) GetLeaseStatus(ctx context.Context, auth ArtifactAuth) (HostLeaseStatus, error) {
+	var out HostLeaseStatus
+	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/lease/status", auth, &out)
+	return out, err
+}
+
+func (c *Client) EnsureActiveLease(ctx context.Context, auth ArtifactAuth, generation *int) (EnsureActiveLeaseResponse, error) {
+	body := struct {
+		GroupID    string `json:"groupId"`
+		HostID     string `json:"hostId"`
+		HostToken  string `json:"hostToken"`
+		Generation *int   `json:"generation,omitempty"`
+	}{GroupID: auth.GroupID, HostID: auth.HostID, HostToken: auth.HostToken, Generation: generation}
+	var out EnsureActiveLeaseResponse
+	err := c.post(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/lease/ensure-active", body, &out)
 	return out, err
 }
 
@@ -913,6 +1019,29 @@ func (c *Client) post(ctx context.Context, path string, in any, out any) error {
 	return nil
 }
 
+func (c *Client) getNoAuth(ctx context.Context, path string, out any) error {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("coordinator request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCoordinatorResponseBytes))
+	if err != nil {
+		return fmt.Errorf("read coordinator response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return responseError(resp.StatusCode, body)
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decode coordinator response: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) get(ctx context.Context, path string, auth ArtifactAuth, out any) error {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
@@ -946,15 +1075,15 @@ func (c *Client) get(ctx context.Context, path string, auth ArtifactAuth, out an
 func responseError(statusCode int, body []byte) error {
 	var apiErr apiError
 	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
-		return fmt.Errorf("coordinator rejected request (%d): %s", statusCode, apiErr.Message)
+		return &APIError{StatusCode: statusCode, Code: apiErr.Code, Message: apiErr.Message, Body: string(body)}
 	}
 
 	text := strings.TrimSpace(string(body))
 	if text == "" {
-		return fmt.Errorf("coordinator rejected request (%d)", statusCode)
+		return &APIError{StatusCode: statusCode}
 	}
 
-	return fmt.Errorf("coordinator rejected request (%d): %s", statusCode, text)
+	return &APIError{StatusCode: statusCode, Message: text, Body: text}
 }
 
 func ValidStatus(status string) bool {
