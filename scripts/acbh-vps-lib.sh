@@ -19,7 +19,32 @@ ACBH_SKIP_ROOT="${ACBH_SKIP_ROOT:-0}"
 # shellcheck disable=SC2034
 ACBH_VPS_UPGRADE_REPORT_ERROR=""
 ACBH_VPS_UPGRADE_DRY_RUN="false"
+ACBH_VPS_STATE_BACKUP=""
+ACBH_VPS_HEALTH_WAIT_ATTEMPTS=""
+ACBH_VPS_HEALTH_WAIT_ELAPSED=""
+ACBH_VPS_HEALTH_WAIT_LAST_ERROR=""
 ACBH_VPS_UPGRADE_LOCK_FD=""
+
+acbh_vps_set_upgrade_dry_run() {
+  ACBH_VPS_UPGRADE_DRY_RUN="$1"
+}
+
+acbh_vps_set_state_backup() {
+  ACBH_VPS_STATE_BACKUP="$1"
+}
+
+acbh_vps_set_health_wait_result() {
+  ACBH_VPS_HEALTH_WAIT_ATTEMPTS="$1"
+  ACBH_VPS_HEALTH_WAIT_ELAPSED="$2"
+  ACBH_VPS_HEALTH_WAIT_LAST_ERROR="$3"
+}
+
+acbh_vps_format_health_wait_error() {
+  printf 'health check failed after upgrade (attempts=%s, elapsed=%ss, last=%s)' \
+    "${ACBH_VPS_HEALTH_WAIT_ATTEMPTS:-0}" \
+    "${ACBH_VPS_HEALTH_WAIT_ELAPSED:-0}" \
+    "${ACBH_VPS_HEALTH_WAIT_LAST_ERROR:-unknown}"
+}
 
 acbh_vps_log() {
   printf '[acbh-vps] %s\n' "$*" >&2
@@ -442,6 +467,8 @@ acbh_vps_extract_json_field() {
   node -e 'const j=JSON.parse(process.argv[1]); const f=process.argv[2]; const v=j[f]; process.stdout.write(v===undefined?"":String(v));' "$json" "$field"
 }
 
+ACBH_HEALTH_WAIT_SECONDS="${ACBH_HEALTH_WAIT_SECONDS:-60}"
+
 acbh_vps_check_health() {
   local expected_version="$1"
   local health_url health_json actual_version
@@ -470,8 +497,34 @@ acbh_vps_check_health() {
   return 0
 }
 
+acbh_vps_wait_for_health() {
+  local expected_version="$1"
+  local deadline attempt=0 elapsed=0 last_error=""
+  local start_ts now_ts
+
+  start_ts="$(date +%s)"
+  deadline=$((start_ts + ACBH_HEALTH_WAIT_SECONDS))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    attempt=$((attempt + 1))
+    if acbh_vps_check_health "$expected_version"; then
+      now_ts="$(date +%s)"
+      elapsed=$((now_ts - start_ts))
+      acbh_vps_log "health ready after ${attempt} attempt(s) in ${elapsed}s"
+      acbh_vps_set_health_wait_result "$attempt" "$elapsed" ""
+      return 0
+    fi
+    last_error="health check failed for $expected_version"
+    sleep 1
+  done
+  now_ts="$(date +%s)"
+  elapsed=$((now_ts - start_ts))
+  acbh_vps_log "health wait timeout after ${attempt} attempt(s) in ${elapsed}s; last error: ${last_error}"
+  acbh_vps_set_health_wait_result "$attempt" "$elapsed" "$last_error"
+  return 1
+}
+
 acbh_vps_assert_health() {
-  acbh_vps_check_health "$1" || acbh_vps_die "health check failed for $1"
+  acbh_vps_wait_for_health "$1" || acbh_vps_die "health check failed for $1"
 }
 
 acbh_vps_check_ports() {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=./acbh-vps-lib.sh
+# shellcheck disable=SC1091  # acbh-vps-lib.sh is co-located; SCRIPT_DIR supports bundle relocation.
 . "$SCRIPT_DIR/acbh-vps-lib.sh"
 
 BUNDLE_DIR=""
@@ -46,7 +46,7 @@ if [ ! -d "$BUNDLE_DIR" ]; then
 fi
 
 BUNDLE_DIR="$(acbh_vps_resolve_path "$BUNDLE_DIR")"
-ACBH_VPS_UPGRADE_DRY_RUN="$DRY_RUN"
+acbh_vps_set_upgrade_dry_run "$DRY_RUN"
 
 VERSION=""
 PREVIOUS_RELEASE=""
@@ -136,15 +136,15 @@ mv "$STAGING_DIR" "$RELEASE_DIR"
 STAGING_DIR=""
 
 STATE_BACKUP="$(acbh_vps_backup_coordinator_state || true)"
-ACBH_VPS_STATE_BACKUP="$STATE_BACKUP"
+acbh_vps_set_state_backup "$STATE_BACKUP"
 ROLLBACK_NEEDED="true"
 
 acbh_vps_service_stop
 acbh_vps_switch_current_symlink "$RELEASE_DIR"
 acbh_vps_service_start
 
-if ! acbh_vps_check_health "$VERSION"; then
-  ACBH_VPS_UPGRADE_REPORT_ERROR="health check failed after upgrade"
+if ! acbh_vps_wait_for_health "$VERSION"; then
+  ACBH_VPS_UPGRADE_REPORT_ERROR="$(acbh_vps_format_health_wait_error)"
   acbh_vps_die "$ACBH_VPS_UPGRADE_REPORT_ERROR"
 fi
 if ! acbh_vps_check_ports; then

@@ -40,6 +40,31 @@ copy_private_node_runtime() {
   cp "$node_bin" "$target_dir/runtime/node/node.exe"
 }
 
+normalize_shell_scripts_lf() {
+  local root="$1"
+  local file bom hex has_crlf
+  while IFS= read -r -d '' file; do
+    bom="$(head -c 3 "$file" | od -An -tx1 | tr -d ' \n')"
+    if [ "$bom" = "efbbbf" ]; then
+      echo "shell script has UTF-8 BOM: $file" >&2
+      exit 1
+    fi
+    if grep -q $'\r' "$file"; then
+      has_crlf=1
+      if sed --version >/dev/null 2>&1; then
+        sed -i 's/\r$//' "$file"
+      else
+        perl -pi -e 's/\r$//' "$file"
+      fi
+      echo "normalized CRLF to LF: $file" >&2
+    fi
+    if grep -q $'\r' "$file"; then
+      echo "shell script still contains CRLF after normalization: $file" >&2
+      exit 1
+    fi
+  done < <(find "$root" -type f -name '*.sh' -print0)
+}
+
 copy_powershell_utf8_bom() {
   local source_file="$1"
   local target_file="$2"
@@ -223,6 +248,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec node "$DIR/dist/index.js"
 EOF
   chmod +x "$COORD_BUNDLE_ROOT/run-coordinator.sh"
+  normalize_shell_scripts_lf "$COORD_BUNDLE_ROOT"
   if command -v npm >/dev/null 2>&1; then
     (cd "$COORD_BUNDLE_ROOT" && npm install --omit=dev --no-audit --no-fund --package-lock=false)
   else

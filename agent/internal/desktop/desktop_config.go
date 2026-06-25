@@ -21,6 +21,7 @@ type DesktopConfig struct {
 	LaunchProfile  DesktopLaunchProfile `json:"launchProfile,omitempty"`
 	JavaPath       string               `json:"javaPath,omitempty"`
 	Group          DesktopGroupConfig   `json:"group,omitempty"`
+	GroupName      string               `json:"groupName,omitempty"`
 	RelayTarget    string               `json:"relayTarget,omitempty"`
 	UI             DesktopUIConfig      `json:"ui"`
 }

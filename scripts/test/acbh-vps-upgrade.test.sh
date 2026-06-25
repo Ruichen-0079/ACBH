@@ -115,6 +115,18 @@ if [ -f "$STATE_FILE/health.fail" ]; then
     exit 22
   fi
 fi
+if [ -f "$STATE_FILE/health.delay" ]; then
+  delay="$(cat "$STATE_FILE/health.delay")"
+  started_file="$STATE_FILE/health.delay.started"
+  if [ ! -f "$started_file" ]; then
+    date +%s > "$started_file"
+  fi
+  started="$(cat "$started_file")"
+  now="$(date +%s)"
+  if [ $((now - started)) -lt "$delay" ]; then
+    exit 22
+  fi
+fi
 version="$(cat "$STATE_FILE/health.version" 2>/dev/null || echo "0.0.0")"
 if [[ "$url" == *"/health" ]]; then
   printf '{"ok":true,"service":"acbh-coordinator","version":"%s"}\n' "$version"
@@ -435,6 +447,68 @@ test_paths_with_spaces() {
   teardown_test_env
 }
 
+test_health_delayed_upgrade_success() {
+  local failures_before=$TESTS_FAILED
+  setup_test_env
+  run_install
+  local bundle_old="$TEST_ROOT/bundle-old"
+  local bundle_new="$TEST_ROOT/bundle-new"
+  write_bundle "$bundle_old" "v0.3.5-hotfix1" "0.3.5-hotfix1"
+  write_bundle "$bundle_new" "v0.4.0-alpha2" "0.4.0-alpha2"
+  printf '0.3.5-hotfix1\n' > "$ACBH_MOCK_STATE_FILE/health.version"
+  run_upgrade "$bundle_old"
+  printf '8\n' > "$ACBH_MOCK_STATE_FILE/health.delay"
+  rm -f "$ACBH_MOCK_STATE_FILE/health.delay.started"
+  printf '0.4.0-alpha2\n' > "$ACBH_MOCK_STATE_FILE/health.version"
+  run_upgrade "$bundle_new"
+  assert_current_release "v0.4.0-alpha2"
+  finish_test "health delayed upgrade success" "$failures_before"
+  teardown_test_env
+}
+
+test_rollback_delayed_health_success() {
+  local failures_before=$TESTS_FAILED
+  setup_test_env
+  run_install
+  local bundle_a="$TEST_ROOT/bundle-a"
+  local bundle_b="$TEST_ROOT/bundle-b"
+  write_bundle "$bundle_a" "v0.4.0-alpha1" "0.4.0-alpha1"
+  write_bundle "$bundle_b" "v0.4.0-alpha2" "0.4.0-alpha2"
+  printf '0.4.0-alpha1\n' > "$ACBH_MOCK_STATE_FILE/health.version"
+  run_upgrade "$bundle_a"
+  printf '0.4.0-alpha2\n' > "$ACBH_MOCK_STATE_FILE/health.version"
+  run_upgrade "$bundle_b"
+  printf '8\n' > "$ACBH_MOCK_STATE_FILE/health.delay"
+  rm -f "$ACBH_MOCK_STATE_FILE/health.delay.started"
+  printf '0.4.0-alpha1\n' > "$ACBH_MOCK_STATE_FILE/health.version"
+  bash "$REPO_SCRIPTS/acbh-vps-rollback.sh" "v0.4.0-alpha1"
+  assert_current_release "v0.4.0-alpha1"
+  finish_test "rollback delayed health success" "$failures_before"
+  teardown_test_env
+}
+
+test_port_timeout_upgrade_rollback() {
+  local failures_before=$TESTS_FAILED
+  setup_test_env
+  run_install
+  local bundle_old="$TEST_ROOT/bundle-old"
+  local bundle_new="$TEST_ROOT/bundle-new"
+  write_bundle "$bundle_old" "v0.3.5-hotfix1" "0.3.5-hotfix1"
+  write_bundle "$bundle_new" "v0.4.0-alpha2" "0.4.0-alpha2"
+  printf '0.3.5-hotfix1\n' > "$ACBH_MOCK_STATE_FILE/health.version"
+  run_upgrade "$bundle_old"
+  rm -f "$ACBH_MOCK_STATE_FILE/health.fail" "$ACBH_MOCK_STATE_FILE/health.fail.count"
+  printf '0.4.0-alpha2\n' > "$ACBH_MOCK_STATE_FILE/health.version"
+  touch "$ACBH_MOCK_STATE_FILE/ports.down"
+  if run_upgrade "$bundle_new" 2>/dev/null; then
+    fail_test "port timeout should abort upgrade"
+  else
+    assert_current_release "v0.3.5-hotfix1"
+  fi
+  finish_test "port timeout rollback" "$failures_before"
+  teardown_test_env
+}
+
 test_malicious_version_rejection() {
   local failures_before=$TESTS_FAILED
   setup_test_env
@@ -477,6 +551,9 @@ main() {
   run_test test_systemd_unit_generation
   run_test test_idempotent_upgrade
   run_test test_paths_with_spaces
+  run_test test_health_delayed_upgrade_success
+  run_test test_rollback_delayed_health_success
+  run_test test_port_timeout_upgrade_rollback
   run_test test_malicious_version_rejection
 
   echo

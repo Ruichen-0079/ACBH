@@ -24,6 +24,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/coordinator"
 	"github.com/Ruichen-0079/ACBH/agent/internal/mcimport"
+	"github.com/Ruichen-0079/ACBH/agent/internal/mcserver"
 	"github.com/Ruichen-0079/ACBH/agent/internal/worldbackup"
 )
 
@@ -148,30 +149,45 @@ type SetupGroupResult struct {
 	GroupID    string       `json:"groupId"`
 	HostID     string       `json:"hostId"`
 	MemberID   string       `json:"memberId"`
+	InviteID   string       `json:"inviteId,omitempty"`
 	InviteCode string       `json:"inviteCode,omitempty"`
 	ExpiresAt  string       `json:"expiresAt,omitempty"`
+	OneTime    bool         `json:"oneTime,omitempty"`
 	Message    string       `json:"message"`
+	ErrorCode  string       `json:"errorCode,omitempty"`
 }
 
 type InviteListResult struct {
 	OK      bool                       `json:"ok"`
 	Invites []coordinator.PublicInvite `json:"invites"`
 	Message string                     `json:"message"`
+	ErrorCode string                   `json:"errorCode,omitempty"`
 }
 
 type RevokeInviteResult struct {
-	OK       bool   `json:"ok"`
-	InviteID string `json:"inviteId"`
-	Message  string `json:"message"`
+	OK        bool   `json:"ok"`
+	InviteID  string `json:"inviteId"`
+	Message   string `json:"message"`
+	ErrorCode string `json:"errorCode,omitempty"`
+}
+
+type PartialFailureDetail struct {
+	MinecraftStopped       bool   `json:"minecraftStopped"`
+	WorldSnapshotPublished bool   `json:"worldSnapshotPublished"`
+	RelayStopped           bool   `json:"relayStopped"`
+	HeartbeatStopped       bool   `json:"heartbeatStopped"`
+	Message                string `json:"message,omitempty"`
 }
 
 type AutoServerResult struct {
-	OK        bool         `json:"ok"`
-	State     DesktopState `json:"state"`
-	Message   string       `json:"message"`
-	Steps     []string     `json:"steps"`
-	Warnings  []string     `json:"warnings,omitempty"`
-	ErrorCode string       `json:"errorCode,omitempty"`
+	OK             bool                  `json:"ok"`
+	State          DesktopState          `json:"state"`
+	Message        string                `json:"message"`
+	Steps          []string              `json:"steps"`
+	Warnings       []string              `json:"warnings,omitempty"`
+	ErrorCode      string                `json:"errorCode,omitempty"`
+	PartialFailure *PartialFailureDetail `json:"partialFailure,omitempty"`
+	StartTimeout   string                `json:"startTimeout,omitempty"`
 }
 
 type EnvironmentPackageManifest struct {
@@ -551,6 +567,7 @@ func SetupCreateGroup(ctx context.Context, opts Options, groupName string, displ
 	_ = syncDesktopConfig(opts, func(cfg *DesktopConfig) {
 		cfg.Mode = firstNonEmpty(setup.Mode, "remote-public")
 		cfg.CoordinatorURL = coordinatorURL
+		cfg.GroupName = groupName
 		cfg.Group = DesktopGroupConfig{GroupID: created.GroupID, MemberID: joined.MemberID, HostID: registered.HostID, Role: "owner"}
 		cfg.UI.LastCompletedStep = maxInt(cfg.UI.LastCompletedStep, 2)
 	})
@@ -634,43 +651,47 @@ func SetupCreateInvite(ctx context.Context, opts Options, expiresSeconds int, on
 	opts = withDefaults(opts)
 	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
 	if err != nil {
-		return SetupGroupResult{OK: false, State: StateUnconfigured, Message: "请先创建或加入服务器组。"}, nil
+		return SetupGroupResult{OK: false, State: StateUnconfigured, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
 	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
 	if accessKey == "" {
-		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "当前设备不是 owner，不能生成邀请码。"}, nil
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "当前设备不是 owner，不能生成邀请码。", ErrorCode: "invite_permission_denied"}, nil
 	}
 	if expiresSeconds <= 0 {
 		expiresSeconds = 30 * 60
 	}
 	client, err := coordinator.NewClient(cfg.CoordinatorURL)
 	if err != nil {
-		return SetupGroupResult{}, err
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
 	}
 	invite, err := client.CreateInvite(ctx, cfg.GroupID, coordinator.CreateInviteRequest{AccessKey: accessKey, ExpiresInSeconds: expiresSeconds, OneTime: oneTime})
 	if err != nil {
-		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "生成邀请码失败。"}, nil
+		return SetupGroupResult{OK: false, State: StateError, GroupID: cfg.GroupID, Message: "生成邀请码失败。", ErrorCode: "invite_create_failed"}, nil
 	}
-	return SetupGroupResult{OK: true, State: StateBootstrapReady, GroupID: cfg.GroupID, InviteCode: invite.InviteCode, ExpiresAt: invite.ExpiresAt, Message: "邀请码已生成，仅显示一次。"}, nil
+	return SetupGroupResult{
+		OK: true, State: StateBootstrapReady, GroupID: cfg.GroupID,
+		InviteID: invite.InviteID, InviteCode: invite.InviteCode, ExpiresAt: invite.ExpiresAt, OneTime: invite.OneTime,
+		Message: "邀请码已生成，仅显示一次。",
+	}, nil
 }
 
 func SetupListInvites(ctx context.Context, opts Options) (InviteListResult, error) {
 	opts = withDefaults(opts)
 	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
 	if err != nil {
-		return InviteListResult{OK: false, Message: "请先创建或加入服务器组。"}, nil
+		return InviteListResult{OK: false, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
 	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
 	if accessKey == "" {
-		return InviteListResult{OK: false, Message: "当前设备不是 owner，不能查看邀请码。"}, nil
+		return InviteListResult{OK: false, Message: "当前设备不是 owner，不能查看邀请码。", ErrorCode: "invite_permission_denied"}, nil
 	}
 	client, err := coordinator.NewClient(cfg.CoordinatorURL)
 	if err != nil {
-		return InviteListResult{}, err
+		return InviteListResult{OK: false, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
 	}
 	list, err := client.ListInvites(ctx, cfg.GroupID, coordinator.ListInvitesRequest{AccessKey: accessKey})
 	if err != nil {
-		return InviteListResult{OK: false, Message: "读取邀请码列表失败。"}, nil
+		return InviteListResult{OK: false, Message: "读取邀请码列表失败。", ErrorCode: "invite_list_failed"}, nil
 	}
 	return InviteListResult{OK: true, Invites: list.Invites, Message: "邀请码列表已读取。"}, nil
 }
@@ -679,19 +700,19 @@ func SetupRevokeInvite(ctx context.Context, opts Options, inviteID string) (Revo
 	opts = withDefaults(opts)
 	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
 	if err != nil {
-		return RevokeInviteResult{OK: false, Message: "请先创建或加入服务器组。"}, nil
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "请先创建或加入服务器组。", ErrorCode: "not_configured"}, nil
 	}
 	accessKey, _ := NewDefaultSecretStore(opts).Get("accessKey")
 	if accessKey == "" {
-		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "当前设备不是 owner，不能撤销邀请码。"}, nil
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "当前设备不是 owner，不能撤销邀请码。", ErrorCode: "invite_permission_denied"}, nil
 	}
 	client, err := coordinator.NewClient(cfg.CoordinatorURL)
 	if err != nil {
-		return RevokeInviteResult{}, err
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "无法连接 Coordinator。", ErrorCode: "coordinator_unreachable"}, nil
 	}
 	revoked, err := client.RevokeInvite(ctx, cfg.GroupID, coordinator.RevokeInviteRequest{AccessKey: accessKey, InviteID: inviteID})
 	if err != nil {
-		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "撤销邀请码失败。"}, nil
+		return RevokeInviteResult{OK: false, InviteID: inviteID, Message: "撤销邀请码失败。", ErrorCode: "invite_revoke_failed"}, nil
 	}
 	return RevokeInviteResult{OK: true, InviteID: revoked.InviteID, Message: "邀请码已撤销。"}, nil
 }
@@ -861,10 +882,11 @@ func serverConfigFromSetup(opts Options, setup SetupState) agentconfig.ServerCon
 		}
 		opts = withDefaults(opts)
 		return agentconfig.ServerConfig{
-			Dir:         setup.ServerDir,
-			Command:     mcimport.SuggestedCommand(entry),
-			LogDir:      filepath.Join(opts.AppDataDir, "logs", "minecraft"),
-			StopTimeout: (30 * time.Second).String(),
+			Dir:          setup.ServerDir,
+			Command:      mcimport.SuggestedCommand(entry),
+			LogDir:       filepath.Join(opts.AppDataDir, "logs", "minecraft"),
+			StopTimeout:  (30 * time.Second).String(),
+			StartTimeout: agentconfig.DefaultServerStartTimeout.String(),
 		}
 	}
 	if report, err := mcimport.Inspect(setup.ServerDir); err == nil {
@@ -872,19 +894,21 @@ func serverConfigFromSetup(opts Options, setup SetupState) agentconfig.ServerCon
 	}
 	opts = withDefaults(opts)
 	return agentconfig.ServerConfig{
-		Dir:         setup.ServerDir,
-		LogDir:      filepath.Join(opts.AppDataDir, "logs", "minecraft"),
-		StopTimeout: (30 * time.Second).String(),
+		Dir:          setup.ServerDir,
+		LogDir:       filepath.Join(opts.AppDataDir, "logs", "minecraft"),
+		StopTimeout:  (30 * time.Second).String(),
+		StartTimeout: agentconfig.DefaultServerStartTimeout.String(),
 	}
 }
 
 func serverConfigFromReport(opts Options, report mcimport.Report) agentconfig.ServerConfig {
 	opts = withDefaults(opts)
 	return agentconfig.ServerConfig{
-		Dir:         report.ServerDir,
-		Command:     report.SuggestedCommand,
-		LogDir:      filepath.Join(opts.AppDataDir, "logs", "minecraft"),
-		StopTimeout: (30 * time.Second).String(),
+		Dir:          report.ServerDir,
+		Command:      report.SuggestedCommand,
+		LogDir:       filepath.Join(opts.AppDataDir, "logs", "minecraft"),
+		StopTimeout:  (30 * time.Second).String(),
+		StartTimeout: agentconfig.DefaultServerStartTimeout.String(),
 	}
 }
 
@@ -1274,7 +1298,15 @@ func StartAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 		}
 		return res, nil
 	}
-	if err := waitForMinecraftPort(ctx, cfg.Server.Dir, 30*time.Second); err != nil {
+	startTimeout, startTimeoutErr := cfg.Server.ResolvedStartTimeout()
+	if startTimeoutErr != nil {
+		res.State = StateError
+		res.Message = startTimeoutErr.Error()
+		res.ErrorCode = "invalid_start_timeout"
+		return res, nil
+	}
+	res.StartTimeout = startTimeout.String()
+	if err := waitForMinecraftPort(ctx, opts, cfg, startTimeout); err != nil {
 		res.State = StateError
 		res.Message = "Minecraft 本地端口未就绪：" + err.Error()
 		res.ErrorCode = "minecraft_health_failed"
@@ -1393,29 +1425,13 @@ func CreateStoppedWorldSnapshot(ctx context.Context, opts Options) (WorldSnapsho
 	if err != nil {
 		return WorldSnapshotPublishResult{}, err
 	}
-	bySHA := map[string]worldbackup.ChangedFile{}
-	for _, changed := range snapshot.Plan.ChangedFiles {
-		if _, ok := bySHA[changed.SHA256]; !ok {
-			bySHA[changed.SHA256] = changed
-		}
+	bySHA := worldbackup.IndexChangedFilesBySHA(snapshot.Plan.ChangedFiles)
+	uploadFn := func(ctx context.Context, sha256 string, content io.Reader, size int64) error {
+		_, err := client.UploadWorldObjectStream(ctx, auth, sha256, content, size)
+		return err
 	}
-	for _, object := range planned.MissingObjects {
-		changed, ok := bySHA[object.SHA256]
-		if !ok {
-			return WorldSnapshotPublishResult{}, fmt.Errorf("coordinator requested unknown object %s", object.SHA256)
-		}
-		file, err := os.Open(changed.LocalPath)
-		if err != nil {
-			return WorldSnapshotPublishResult{}, err
-		}
-		_, uploadErr := client.UploadWorldObjectStream(ctx, auth, object.SHA256, file, object.Size)
-		closeErr := file.Close()
-		if uploadErr != nil {
-			return WorldSnapshotPublishResult{}, uploadErr
-		}
-		if closeErr != nil {
-			return WorldSnapshotPublishResult{}, closeErr
-		}
+	if err := worldbackup.UploadMissingObjects(ctx, uploadFn, planned.MissingObjects, bySHA); err != nil {
+		return WorldSnapshotPublishResult{}, err
 	}
 	commit, err := client.CommitWorldBackup(ctx, cfg.GroupID, coordinator.WorldBackupCommitRequest{
 		HostID:         cfg.HostID,
@@ -1482,16 +1498,36 @@ func localWorldExists(serverDir string) bool {
 	return false
 }
 
-func waitForMinecraftPort(ctx context.Context, serverDir string, timeout time.Duration) error {
+func waitForMinecraftPort(ctx context.Context, opts Options, cfg agentconfig.Config, timeout time.Duration) error {
+	opts = withDefaults(opts)
+	serverDir := cfg.Server.Dir
 	port := "25565"
 	if report, err := mcimport.Inspect(serverDir); err == nil {
 		if p := strings.TrimSpace(report.Properties["server-port"]); p != "" {
 			port = p
 		}
 	}
+	command := strings.TrimSpace(cfg.Server.Command)
+	logDir := strings.TrimSpace(cfg.Server.LogDir)
+	if logDir == "" {
+		logDir = filepath.Join(opts.AppDataDir, "logs", "minecraft")
+	}
+	logPath := filepath.Join(logDir, "server-stdout.log")
+	runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
+		if status, err := mcserver.GetStatus(runtimeDir); err == nil {
+			pid := status.State.SupervisorPID
+			if pid == 0 {
+				pid = status.State.PID
+			}
+			if pid > 0 && !status.Running {
+				tail := readRecentLogSummary(logPath, 2048)
+				return fmt.Errorf("进程已退出（PID %d）；最近日志摘要：%s", pid, tail)
+			}
+		}
 		dialer := net.Dialer{Timeout: 500 * time.Millisecond}
 		conn, err := dialer.DialContext(ctx, "tcp", "127.0.0.1:"+port)
 		if err == nil {
@@ -1502,13 +1538,37 @@ func waitForMinecraftPort(ctx context.Context, serverDir string, timeout time.Du
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(750 * time.Millisecond):
 		}
 	}
 	if lastErr != nil {
-		return lastErr
+		return fmt.Errorf(
+			"等待 127.0.0.1:%s 超时（%s）；服务端命令：%s；最近日志：%s；最后错误：%v",
+			port, timeout, firstNonEmpty(command, "(未配置)"), logPath, lastErr,
+		)
 	}
-	return fmt.Errorf("timeout waiting for 127.0.0.1:%s", port)
+	return fmt.Errorf(
+		"等待 127.0.0.1:%s 超时（%s）；服务端命令：%s；最近日志：%s",
+		port, timeout, firstNonEmpty(command, "(未配置)"), logPath,
+	)
+}
+
+func readRecentLogSummary(path string, maxBytes int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "(日志不可用)"
+	}
+	if len(data) > maxBytes {
+		data = data[len(data)-maxBytes:]
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return "(日志为空)"
+	}
+	if len(text) > 512 {
+		return text[len(text)-512:]
+	}
+	return text
 }
 
 func StopAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
@@ -1550,12 +1610,41 @@ func StopAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 	}
 	res.State = "SyncingWorld"
 	res.Steps = append(res.Steps, "正在创建世界差量快照", "正在上传变化的世界对象")
+	relayStopped := false
+	heartbeatStopped := false
 	backup, err := CreateStoppedWorldSnapshot(ctx, opts)
 	if err != nil {
 		res.State = StateError
 		res.OK = false
-		res.Message = "发布 world snapshot 失败：" + err.Error()
+		res.Message = "Minecraft 已停止，但世界快照未发布：" + err.Error()
 		res.ErrorCode = "world_backup_failed"
+		res.PartialFailure = &PartialFailureDetail{
+			MinecraftStopped:       true,
+			WorldSnapshotPublished: false,
+			Message:                err.Error(),
+		}
+		res.State = "StoppingRelay"
+		res.Steps = append(res.Steps, "正在停止公网中转")
+		if _, relayErr := StopRelayHost(opts); relayErr != nil {
+			res.Warnings = append(res.Warnings, "停止 relay 失败："+relayErr.Error())
+		} else {
+			relayStopped = true
+		}
+		if _, daemonErr := StopDaemon(opts); daemonErr != nil {
+			res.Warnings = append(res.Warnings, "停止心跳后台失败："+daemonErr.Error())
+		} else {
+			heartbeatStopped = true
+			res.Steps = append(res.Steps, "心跳后台已停止")
+		}
+		res.PartialFailure.RelayStopped = relayStopped
+		res.PartialFailure.HeartbeatStopped = heartbeatStopped
+		if relayStopped && heartbeatStopped {
+			res.PartialFailure.Message += "；Relay 与 heartbeat 收尾已完成。"
+		} else if relayStopped {
+			res.PartialFailure.Message += "；Relay 已停止，heartbeat 收尾未完成。"
+		} else if heartbeatStopped {
+			res.PartialFailure.Message += "；heartbeat 已停止，Relay 收尾未完成。"
+		}
 		return res, nil
 	}
 	res.Steps = append(res.Steps, "世界快照已发布："+backup.SnapshotID)
@@ -1563,10 +1652,13 @@ func StopAuto(ctx context.Context, opts Options) (AutoServerResult, error) {
 	res.Steps = append(res.Steps, "正在停止公网中转")
 	if _, err := StopRelayHost(opts); err != nil {
 		res.Warnings = append(res.Warnings, "停止 relay 失败："+err.Error())
+	} else {
+		relayStopped = true
 	}
 	if _, err := StopDaemon(opts); err != nil {
 		res.Warnings = append(res.Warnings, "停止心跳后台失败："+err.Error())
 	} else {
+		heartbeatStopped = true
 		res.Steps = append(res.Steps, "心跳后台已停止")
 	}
 	res.State = "ReleasingLease"
@@ -1647,7 +1739,13 @@ func ServerAutoStatus(ctx context.Context, opts Options) (map[string]any, error)
 	if st.MCServerRunning {
 		state = string(StateRunning)
 	}
-	return map[string]any{"ok": true, "state": state, "status": st}, nil
+	startTimeout := agentconfig.DefaultServerStartTimeout.String()
+	if cfg, cfgErr := loadDesktopConfig(opts); cfgErr == nil {
+		if resolved, err := cfg.Server.ResolvedStartTimeout(); err == nil {
+			startTimeout = resolved.String()
+		}
+	}
+	return map[string]any{"ok": true, "state": state, "status": st, "startTimeout": startTimeout}, nil
 }
 
 func atomicWriteProbe(dir string) error {

@@ -232,29 +232,13 @@ func publishWorldSnapshot(ctx context.Context, opts Options, wb WorldBackupOptio
 	if err != nil {
 		return WorldBackupCreateResult{}, err
 	}
-	bySHA := map[string]worldbackup.ChangedFile{}
-	for _, changed := range snapshot.Plan.ChangedFiles {
-		if _, ok := bySHA[changed.SHA256]; !ok {
-			bySHA[changed.SHA256] = changed
-		}
+	bySHA := worldbackup.IndexChangedFilesBySHA(snapshot.Plan.ChangedFiles)
+	uploadFn := func(ctx context.Context, sha256 string, content io.Reader, size int64) error {
+		_, err := client.UploadWorldObjectStream(ctx, auth, sha256, content, size)
+		return err
 	}
-	for _, object := range planned.MissingObjects {
-		changed, ok := bySHA[object.SHA256]
-		if !ok {
-			return WorldBackupCreateResult{}, fmt.Errorf("coordinator requested unknown object %s", object.SHA256)
-		}
-		file, err := os.Open(changed.LocalPath)
-		if err != nil {
-			return WorldBackupCreateResult{}, fmt.Errorf("open changed file %s: %w", changed.Path, err)
-		}
-		_, uploadErr := client.UploadWorldObjectStream(ctx, auth, object.SHA256, file, object.Size)
-		closeErr := file.Close()
-		if uploadErr != nil {
-			return WorldBackupCreateResult{}, uploadErr
-		}
-		if closeErr != nil {
-			return WorldBackupCreateResult{}, closeErr
-		}
+	if err := worldbackup.UploadMissingObjects(ctx, uploadFn, planned.MissingObjects, bySHA); err != nil {
+		return WorldBackupCreateResult{}, err
 	}
 	commit, err := client.CommitWorldBackup(ctx, cfg.GroupID, coordinator.WorldBackupCommitRequest{
 		HostID:         cfg.HostID,

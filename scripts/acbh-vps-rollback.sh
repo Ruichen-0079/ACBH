@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=./acbh-vps-lib.sh
+# shellcheck disable=SC1091  # acbh-vps-lib.sh is co-located; SCRIPT_DIR supports bundle relocation.
 . "$SCRIPT_DIR/acbh-vps-lib.sh"
 
 TARGET_VERSION=""
@@ -29,6 +29,8 @@ EOF
       ;;
   esac
 done
+
+acbh_vps_log "install dir: $ACBH_INSTALL_DIR"
 
 acbh_vps_require_root
 acbh_vps_ensure_layout

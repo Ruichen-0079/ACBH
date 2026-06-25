@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=./acbh-vps-lib.sh
+# shellcheck disable=SC1091  # acbh-vps-lib.sh is co-located; SCRIPT_DIR supports bundle relocation.
 . "$SCRIPT_DIR/acbh-vps-lib.sh"
 
 PUBLIC_HOST=""
@@ -117,8 +117,16 @@ else
 fi
 
 if [ -L "$(acbh_vps_current_link)" ] || [ -d "$(acbh_vps_current_link)" ]; then
-  "$ACBH_CURL_CMD" -fsS "http://127.0.0.1:${ACBH_COORDINATOR_PORT}/health" >/dev/null && acbh_vps_log "/health ok" || acbh_vps_log "Warning: /health failed"
-  "$ACBH_CURL_CMD" -fsS "http://127.0.0.1:${ACBH_COORDINATOR_PORT}/v1/bootstrap/manifest" >/dev/null && acbh_vps_log "bootstrap manifest ok" || acbh_vps_log "Warning: bootstrap manifest failed"
+  if "$ACBH_CURL_CMD" -fsS "http://127.0.0.1:${ACBH_COORDINATOR_PORT}/health" >/dev/null; then
+    acbh_vps_log "/health ok"
+  else
+    acbh_vps_log "Warning: /health failed"
+  fi
+  if "$ACBH_CURL_CMD" -fsS "http://127.0.0.1:${ACBH_COORDINATOR_PORT}/v1/bootstrap/manifest" >/dev/null; then
+    acbh_vps_log "bootstrap manifest ok"
+  else
+    acbh_vps_log "Warning: bootstrap manifest failed"
+  fi
 fi
 
 echo
