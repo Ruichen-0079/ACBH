@@ -534,6 +534,7 @@ func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {
 			"stderrLog": status.State.StderrLog,
 		}
 	} else if status.Stale {
+		resp["running"] = false
 		resp["stale"] = true
 		resp["unknown"] = status.Unknown
 		resp["reason"] = status.Reason

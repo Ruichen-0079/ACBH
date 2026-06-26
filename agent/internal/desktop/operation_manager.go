@@ -227,6 +227,16 @@ func (m *OperationManager) Cancel(operationID string) bool {
 	return true
 }
 
+func (m *OperationManager) Get(operationID string) (OperationSnapshot, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	op := m.operations[operationID]
+	if op == nil {
+		return OperationSnapshot{}, false
+	}
+	return op.snapshot, true
+}
+
 func (m *OperationManager) Summary() OperationSummary {
 	m.mu.Lock()
 	defer m.mu.Unlock()
