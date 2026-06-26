@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,7 +31,7 @@ func TestDesktopRuntimeRejectsMaliciousLocalhostMutations(t *testing.T) {
 	base := runtimeBaseURL(t, rt.URL)
 	client := &http.Client{Timeout: 3 * time.Second}
 
-	req, err := http.NewRequest(http.MethodPost, base+"/api/environment/check", bytes.NewReader([]byte(`{}`)))
+	req, err := http.NewRequest(http.MethodPost, base+"/api/status/refresh", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +73,7 @@ func TestDesktopRuntimeAcceptsSameOriginJSONMutationAndOperationLookup(t *testin
 	}
 	defer closeRuntimeForTest(rt, cancel)
 	base := runtimeBaseURL(t, rt.URL)
-	req, err := http.NewRequest(http.MethodPost, base+"/api/environment/check", bytes.NewReader([]byte(`{}`)))
+	req, err := http.NewRequest(http.MethodPost, base+"/api/status/refresh", bytes.NewReader([]byte(`{}`)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,17 +85,20 @@ func TestDesktopRuntimeAcceptsSameOriginJSONMutationAndOperationLookup(t *testin
 		t.Fatalf("same-origin request: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("same-origin status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("same-origin status = %d, want 202", resp.StatusCode)
 	}
-	var snap OperationSnapshot
-	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+	var accepted struct {
+		OperationID string         `json:"operationId"`
+		State       OperationState `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&accepted); err != nil {
 		t.Fatalf("decode operation: %v", err)
 	}
-	if snap.OperationID == "" {
+	if accepted.OperationID == "" || accepted.State == "" {
 		t.Fatal("missing operation id")
 	}
-	req, err = http.NewRequest(http.MethodGet, base+"/api/operations/"+snap.OperationID, nil)
+	req, err = http.NewRequest(http.MethodGet, base+"/api/operations/"+accepted.OperationID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +110,157 @@ func TestDesktopRuntimeAcceptsSameOriginJSONMutationAndOperationLookup(t *testin
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("operation lookup status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestDesktopRuntimeRequestReturnDoesNotCancelOperation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	appData, cleanup := runtimeTestAppData(t)
+	defer cleanup()
+	rt, err := StartDesktopRuntime(ctx, Options{AppDataDir: appData}, RuntimeOptions{})
+	if err != nil {
+		cancel()
+		t.Fatalf("StartDesktopRuntime() error = %v", err)
+	}
+	defer closeRuntimeForTest(rt, cancel)
+	base := runtimeBaseURL(t, rt.URL)
+	req, err := http.NewRequest(http.MethodPost, base+"/api/status/refresh", bytes.NewReader([]byte(`{}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-ACBH-Desktop-Session", rt.session)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", base)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	var accepted struct {
+		OperationID string `json:"operationId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&accepted); err != nil {
+		t.Fatalf("decode accepted: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", resp.StatusCode)
+	}
+	snap := waitRuntimeOperation(t, rt, accepted.OperationID)
+	if snap.State == OperationCancelled || snap.CurrentStage == "cancelled" {
+		t.Fatalf("operation was cancelled after handler returned: %#v", snap)
+	}
+	if snap.State != OperationWarning && snap.State != OperationSucceeded {
+		t.Fatalf("state = %s, want success or warning", snap.State)
+	}
+}
+
+func TestOperationManagerTerminalStagesAndIdempotency(t *testing.T) {
+	manager := NewOperationManager(context.Background(), Options{AppDataDir: t.TempDir()})
+	cases := []struct {
+		name  string
+		data  any
+		err   error
+		state OperationState
+		stage string
+	}{
+		{name: "success", data: map[string]string{"ok": "true"}, state: OperationSucceeded, stage: "completed"},
+		{name: "warning", data: struct {
+			Warnings []string `json:"warnings"`
+		}{Warnings: []string{"warn"}}, state: OperationWarning, stage: "completed_with_warnings"},
+		{name: "failure", data: map[string]string{"ok": "false"}, err: errors.New("boom"), state: OperationFailed, stage: "failed"},
+	}
+	for _, tc := range cases {
+		snap, err := manager.Start(OperationOptions{Name: tc.name, MutexClass: tc.name, Timeout: time.Second}, func(ctx OperationContext) (any, error) {
+			return tc.data, tc.err
+		})
+		if err != nil {
+			t.Fatalf("Start(%s): %v", tc.name, err)
+		}
+		done := waitManagerOperation(t, manager, snap.OperationID)
+		if done.State != tc.state || done.CurrentStage != tc.stage {
+			t.Fatalf("%s state/stage = %s/%s, want %s/%s", tc.name, done.State, done.CurrentStage, tc.state, tc.stage)
+		}
+	}
+
+	first, err := manager.Start(OperationOptions{Name: "idem", MutexClass: "idem", Timeout: time.Second, IdempotencyKey: "same"}, func(ctx OperationContext) (any, error) {
+		return "once", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Start(OperationOptions{Name: "idem", MutexClass: "idem", Timeout: time.Second, IdempotencyKey: "same"}, func(ctx OperationContext) (any, error) {
+		t.Fatal("idempotent operation ran twice")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.OperationID != first.OperationID {
+		t.Fatalf("idempotent operation id = %s, want %s", second.OperationID, first.OperationID)
+	}
+	_ = waitManagerOperation(t, manager, first.OperationID)
+}
+
+func TestOperationManagerCancelCloseTimeoutAndHistory(t *testing.T) {
+	root, cancelRoot := context.WithCancel(context.Background())
+	defer cancelRoot()
+	manager := NewOperationManager(root, Options{AppDataDir: t.TempDir()})
+	cancelSnap, err := manager.Start(OperationOptions{Name: "cancel", MutexClass: "cancel", Timeout: time.Second, Cancellable: true}, func(ctx OperationContext) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := manager.Cancel(cancelSnap.OperationID); !result.OK || result.NewState != OperationCancelling {
+		t.Fatalf("Cancel() = %#v, want cancelling", result)
+	}
+	cancelDone := waitManagerOperation(t, manager, cancelSnap.OperationID)
+	if cancelDone.State != OperationCancelled || cancelDone.CurrentStage != "cancelled" {
+		t.Fatalf("cancel state/stage = %s/%s", cancelDone.State, cancelDone.CurrentStage)
+	}
+
+	timeoutSnap, err := manager.Start(OperationOptions{Name: "timeout", MutexClass: "timeout", Timeout: 10 * time.Millisecond}, func(ctx OperationContext) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeoutDone := waitManagerOperation(t, manager, timeoutSnap.OperationID)
+	if timeoutDone.State != OperationTimedOut || timeoutDone.CurrentStage != "timed_out" {
+		t.Fatalf("timeout state/stage = %s/%s", timeoutDone.State, timeoutDone.CurrentStage)
+	}
+
+	closeRoot, closeCancel := context.WithCancel(context.Background())
+	closeManager := NewOperationManager(closeRoot, Options{AppDataDir: t.TempDir()})
+	closeSnap, err := closeManager.Start(OperationOptions{Name: "close", MutexClass: "close", Timeout: time.Minute, Cancellable: true}, func(ctx OperationContext) (any, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeCancel()
+	if err := closeManager.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	closeDone := waitManagerOperation(t, closeManager, closeSnap.OperationID)
+	if closeDone.State != OperationCancelled || closeDone.CurrentStage != "cancelled" {
+		t.Fatalf("close state/stage = %s/%s", closeDone.State, closeDone.CurrentStage)
+	}
+
+	for i := 0; i < 110; i++ {
+		snap, err := manager.Start(OperationOptions{Name: "history", MutexClass: fmt.Sprintf("history-%d", i), Timeout: time.Second}, func(ctx OperationContext) (any, error) {
+			return nil, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = waitManagerOperation(t, manager, snap.OperationID)
+	}
+	if got := len(manager.Summary().Operations); got > 100 {
+		t.Fatalf("history length = %d, want <= 100", got)
 	}
 }
 
@@ -165,6 +321,27 @@ func runtimeBaseURL(t *testing.T, raw string) string {
 	u.RawQuery = ""
 	u.Path = ""
 	return strings.TrimRight(u.String(), "/")
+}
+
+func waitRuntimeOperation(t *testing.T, rt *DesktopRuntime, operationID string) OperationSnapshot {
+	t.Helper()
+	return waitManagerOperation(t, rt.Manager, operationID)
+}
+
+func waitManagerOperation(t *testing.T, manager *OperationManager, operationID string) OperationSnapshot {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if snap, ok := manager.Get(operationID); ok && isTerminalState(snap.State) {
+			return snap
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if snap, ok := manager.Get(operationID); ok {
+		t.Fatalf("operation %s did not finish; last state=%s stage=%s", operationID, snap.State, snap.CurrentStage)
+	}
+	t.Fatalf("operation %s not found", operationID)
+	return OperationSnapshot{}
 }
 
 func runtimeTestAppData(t *testing.T) (string, func()) {

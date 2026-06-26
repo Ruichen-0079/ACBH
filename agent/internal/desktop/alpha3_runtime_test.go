@@ -17,8 +17,8 @@ import (
 
 func TestOperationManagerTimeoutProducesSingleTerminalResult(t *testing.T) {
 	opts := Options{AppDataDir: t.TempDir()}
-	manager := NewOperationManager(opts)
-	snap, err := manager.Start(context.Background(), OperationOptions{
+	manager := NewOperationManager(context.Background(), opts)
+	snap, err := manager.Start(OperationOptions{
 		Name: "slow", MutexClass: "test", Timeout: 15 * time.Millisecond, Cancellable: true,
 	}, func(ctx OperationContext) (any, error) {
 		<-ctx.Done()
@@ -47,8 +47,8 @@ func TestOperationManagerTimeoutProducesSingleTerminalResult(t *testing.T) {
 
 func TestOperationManagerImmediateCancelProducesSingleTerminalResult(t *testing.T) {
 	opts := Options{AppDataDir: t.TempDir()}
-	manager := NewOperationManager(opts)
-	snap, err := manager.Start(context.Background(), OperationOptions{
+	manager := NewOperationManager(context.Background(), opts)
+	snap, err := manager.Start(OperationOptions{
 		Name: "cancel", MutexClass: "test", Timeout: 5 * time.Second, Cancellable: true,
 	}, func(ctx OperationContext) (any, error) {
 		<-ctx.Done()
@@ -57,8 +57,8 @@ func TestOperationManagerImmediateCancelProducesSingleTerminalResult(t *testing.
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if !manager.Cancel(snap.OperationID) {
-		t.Fatal("Cancel() = false, want true")
+	if result := manager.Cancel(snap.OperationID); !result.OK {
+		t.Fatalf("Cancel() = %#v, want ok", result)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
