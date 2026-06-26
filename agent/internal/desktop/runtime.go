@@ -29,6 +29,7 @@ type DesktopRuntime struct {
 	server   *http.Server
 	listener net.Listener
 	session  string
+	cancel   context.CancelFunc
 }
 
 func StartDesktopRuntime(ctx context.Context, opts Options, runtimeOpts RuntimeOptions) (*DesktopRuntime, error) {
@@ -36,9 +37,10 @@ func StartDesktopRuntime(ctx context.Context, opts Options, runtimeOpts RuntimeO
 	if runtimeOpts.ListenAddr == "" {
 		runtimeOpts.ListenAddr = "127.0.0.1:0"
 	}
-	manager := NewOperationManager(opts)
+	runtimeCtx, runtimeCancel := context.WithCancel(ctx)
+	manager := NewOperationManager(runtimeCtx, opts)
 	mux := http.NewServeMux()
-	rt := &DesktopRuntime{Manager: manager, session: randomSessionToken()}
+	rt := &DesktopRuntime{Manager: manager, session: randomSessionToken(), cancel: runtimeCancel}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -111,7 +113,14 @@ func StartDesktopRuntime(ctx context.Context, opts Options, runtimeOpts RuntimeO
 		if !decodeBody(w, r, &body) {
 			return
 		}
-		writeJSON(w, map[string]any{"ok": manager.Cancel(body.OperationID)})
+		writeJSON(w, manager.Cancel(body.OperationID))
+	})
+	api("/api/operations/clear-completed", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "cleared": manager.ClearCompleted()})
 	})
 	registerOperationEndpoint(api, manager, "/api/bootstrap", OperationOptions{
 		Name: "Bootstrap", MutexClass: "bootstrap", Cancellable: true, Timeout: 90 * time.Second,
@@ -238,17 +247,18 @@ func StartDesktopRuntime(ctx context.Context, opts Options, runtimeOpts RuntimeO
 	rt.URL = "http://" + ln.Addr().String() + "/?session=" + url.QueryEscape(rt.session)
 	rt.server = &http.Server{Handler: mux}
 	go func() {
-		<-ctx.Done()
+		<-runtimeCtx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = rt.server.Shutdown(shutdownCtx)
+		_ = manager.Close(shutdownCtx)
 	}()
 	go func() {
 		if err := rt.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			manager.appendSummary("runtime", "server_error", "DesktopRuntime", err.Error())
 		}
 	}()
-	_, _ = manager.Start(ctx, OperationOptions{
+	_, _ = manager.Start(OperationOptions{
 		Name: "Bootstrap", MutexClass: "bootstrap", Cancellable: true, Timeout: 90 * time.Second, Coalesce: true,
 	}, func(opCtx OperationContext) (any, error) {
 		return RunBootstrap(opCtx, opts)
@@ -268,6 +278,7 @@ func RunDesktopRuntime(ctx context.Context, opts Options, runtimeOpts RuntimeOpt
 		_, _ = fmt.Fprintf(out, "ACBH Desktop: %s\n", rt.URL)
 	}
 	<-ctx.Done()
+	_ = rt.Close(context.Background())
 	return nil
 }
 
@@ -284,13 +295,25 @@ func registerOperationEndpoint(register routeRegistrar, manager *OperationManage
 }
 
 func startAndWrite(w http.ResponseWriter, r *http.Request, manager *OperationManager, opts OperationOptions, fn OperationFunc) {
-	snap, err := manager.Start(r.Context(), opts, fn)
+	if opts.IdempotencyKey == "" {
+		opts.IdempotencyKey = idempotencyKeyFromRequest(r)
+	}
+	snap, err := manager.Start(opts, fn)
 	if err != nil {
 		w.WriteHeader(http.StatusConflict)
 		writeJSON(w, map[string]any{"ok": false, "errorCode": "operation_conflict", "message": err.Error()})
 		return
 	}
-	writeJSON(w, snap)
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]any{
+		"accepted":       !isTerminalState(snap.State),
+		"operationId":    snap.OperationID,
+		"name":           snap.Name,
+		"state":          snap.State,
+		"currentStage":   snap.CurrentStage,
+		"traceId":        snap.TraceID,
+		"terminalResult": snap.Result,
+	})
 }
 
 func decodeBody(w http.ResponseWriter, r *http.Request, out any) bool {
@@ -331,6 +354,28 @@ func openBrowser(rawURL string) error {
 		cmd = exec.Command("xdg-open", rawURL)
 	}
 	return cmd.Start()
+}
+
+func (rt *DesktopRuntime) Close(ctx context.Context) error {
+	if rt.cancel != nil {
+		rt.cancel()
+	}
+	if rt.server != nil {
+		_ = rt.server.Shutdown(ctx)
+	}
+	if rt.Manager != nil {
+		return rt.Manager.Close(ctx)
+	}
+	return nil
+}
+
+func idempotencyKeyFromRequest(r *http.Request) string {
+	for _, name := range []string{"Idempotency-Key", "X-Idempotency-Key"} {
+		if value := strings.TrimSpace(r.Header.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (rt *DesktopRuntime) secureAPI(mux *http.ServeMux) routeRegistrar {
@@ -437,7 +482,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 </style>
 </head>
 <body>
-<header><h1>ACBH Desktop v0.4.0-alpha4</h1><div id="busy">启动中</div></header>
+<header><h1>ACBH Desktop v0.4.0-alpha5</h1><div id="busy">启动中</div></header>
 <main>
 <nav>
 <button data-tab="wizard" class="active">首次配置</button>
@@ -454,17 +499,20 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 </div>
 </section>
 <section id="server"><div class="grid"><div class="panel"><h2>目录与启动项</h2><label>服务器目录</label><input id="serverDir" placeholder="C:\Minecraft\Server"><label>启动文件</label><input id="launchPath" placeholder="server.jar 或 start.bat"><div class="toolbar"><button onclick="serverInspect()">检测目录</button><button onclick="selectLaunch()">选择启动项</button><button onclick="serverPreflight()">预检</button></div><div id="serverState" class="status"></div></div><div class="panel"><h2>控制</h2><div class="toolbar"><button onclick="post('/api/server/start')">启动</button><button onclick="post('/api/server/stop')">停止</button><button onclick="post('/api/status/refresh')">刷新</button></div><div id="serverRunState" class="status"></div></div></div></section>
-<section id="backup"><div class="grid"><div class="panel"><h2>备份 Profile</h2><label>Profile ID</label><input id="profileId" value="manual"><label>名称</label><input id="profileName" value="手动选择目录"><label>需备份文件夹，每行一个</label><textarea id="backupRoots" placeholder="C:\Minecraft\Server\world"></textarea><label>排除规则</label><textarea id="excludePatterns">session.lock
-*.tmp
-*.log</textarea><div class="toolbar"><button onclick="saveProfile()">保存 Profile</button><button onclick="loadProfiles()">刷新 Profile</button></div><div id="profileState" class="status"></div></div><div class="panel"><h2>快照</h2><div class="toolbar"><button onclick="profileScan()">扫描</button><button onclick="profileCreate()">创建快照</button><button onclick="profileRestore()">恢复最新</button><button onclick="post('/api/world/status')">远端状态</button></div><div id="backupState" class="status"></div></div></div><div class="panel"><h2>Profiles</h2><table id="profilesTable"></table></div></section>
-<section id="ops"><div class="toolbar"><button onclick="refresh()">刷新</button></div><table id="opsTable"></table><div id="lastResult" class="status"></div></section>
+<section id="backup"><div class="grid"><div class="panel"><h2>备份策略</h2><label>Profile ID</label><input id="profileId" value="minecraft-migratable"><label>名称</label><input id="profileName" value="Minecraft 可迁移服务端"><label>预设</label><select id="backupPreset"><option value="minecraft-migratable">Minecraft 可迁移服务端（推荐）</option><option value="minecraft-core">Minecraft 核心存档</option><option value="minecraft-offline-mirror">Minecraft 完整离线镜像</option><option value="custom">自定义</option></select><div class="toolbar"><button onclick="analyzeServer()">自动分析服务端</button><button onclick="usePreset()">使用预设</button><button onclick="addManualRoot('file')">添加文件</button><button onclick="addManualRoot('directory')">添加目录</button></div><label>需备份文件/文件夹，每行一个；可用 file: 或 dir: 前缀</label><textarea id="backupRoots" placeholder="dir:C:\Minecraft\Server\world&#10;file:C:\Minecraft\Server\server.properties"></textarea><label>排除规则</label><textarea id="excludePatterns">logs/**
+crash-reports/**
+debug/**
+*.log
+*.tmp</textarea><div class="toolbar"><button onclick="saveProfile()">保存 Profile</button><button onclick="loadProfiles()">刷新 Profile</button></div><div id="profileState" class="status"></div></div><div class="panel"><h2>快照与同步</h2><label>恢复目标目录</label><input id="restoreTarget" placeholder="下载到新目录时填写"><div class="toolbar"><button onclick="profileScan()">扫描</button><button onclick="profileCreate()">创建并上传</button><button onclick="profileRestore()">恢复最新</button><button onclick="profileDownload()">下载到新目录</button><button onclick="profileSync()">同步到本地</button><button onclick="post('/api/world/status')">远端状态</button></div><div id="backupState" class="status"></div></div></div><div class="panel"><h2>Profiles</h2><table id="profilesTable"></table></div></section>
+<section id="ops"><div class="toolbar"><button onclick="refresh()">刷新</button><button onclick="clearCompleted()">清理已完成</button><select id="opsFilter" onchange="refresh()"><option value="active">正在运行</option><option value="failed">失败</option><option value="cancelled">已取消</option><option value="all">全部</option></select></div><table id="opsTable"></table><div id="lastResult" class="status"></div></section>
 <section id="diagnostics"><div class="toolbar"><button onclick="loadDiagnostics()">复制诊断摘要</button></div><div id="diagOut" class="status"></div></section>
 </main>
 <script>
 const tabs=document.querySelectorAll('nav button');tabs.forEach(b=>b.onclick=()=>{tabs.forEach(x=>x.classList.remove('active'));document.querySelectorAll('section').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.getElementById(b.dataset.tab).classList.add('active')});
 async function api(path,opts){const r=await fetch(path,opts);const j=await r.json().catch(()=>({ok:false,message:r.statusText}));if(!r.ok)throw j;return j}
-async function post(path,body={}){try{const j=await api(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});showOperation(j,path);setTimeout(refresh,500);return j}catch(e){showError(path,e)}}
-async function put(path,body={}){try{const j=await api(path,{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify(body)});showOperation(j,path);return j}catch(e){showError(path,e)}}
+const tracked=new Map();
+async function post(path,body={}){try{const j=await api(path,{method:'POST',headers:{'content-type':'application/json','Idempotency-Key':idempotencyKey(path,body)},body:JSON.stringify(body)});showOperation(j,path);trackOperation(j.operationId,path);refresh();return j}catch(e){showError(path,e)}}
+async function put(path,body={}){try{const j=await api(path,{method:'PUT',headers:{'content-type':'application/json','Idempotency-Key':idempotencyKey(path,body)},body:JSON.stringify(body)});showOperation(j,path);trackOperation(j.operationId,path);refresh();return j}catch(e){showError(path,e)}}
 function networkTest(){post('/api/network/test',{host:host.value,coordinatorPort:coordPort.value,publicGamePort:gamePort.value})}
 function networkSave(){put('/api/config/network',{host:host.value,coordinatorPort:coordPort.value,publicGamePort:gamePort.value})}
 function groupCreate(){post('/api/group/create',{groupName:groupName.value,displayName:displayName.value,coordinatorUrl:groupUrl.value})}
@@ -473,19 +521,35 @@ async function whoami(){try{const j=await api('/api/group/whoami');groupState.in
 function serverInspect(){post('/api/server/inspect',{path:serverDir.value})}
 function selectLaunch(){post('/api/server/select-launch-entry',{path:launchPath.value})}
 function serverPreflight(){post('/api/server/preflight')}
-async function saveProfile(){const roots=backupRoots.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean).map((p,i)=>({rootId:'root-'+(i+1),displayName:p.split(/[\\\/]/).pop()||('root-'+(i+1)),kind:'manual-folder',sourcePath:p,restorePath:p,required:true,consistencyGroup:'manual',excludePatterns:excludePatterns.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean),followSymlinks:false}));await api('/api/backup/profiles',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({profileId:profileId.value,name:profileName.value,roots})}).then(j=>{profileState.innerHTML='已保存 '+esc(j.profiles.length)+' 个 profile';loadProfiles()}).catch(e=>showError('/api/backup/profiles',e))}
-function profileScan(){post('/api/backup/profiles/'+encodeURIComponent(profileId.value)+'/scan')}
-function profileCreate(){post('/api/backup/profiles/'+encodeURIComponent(profileId.value)+'/create')}
-function profileRestore(){post('/api/backup/profiles/'+encodeURIComponent(profileId.value)+'/restore',{snapshotId:'latest'})}
-async function loadProfiles(){try{const j=await api('/api/backup/profiles');profilesTable.innerHTML='<tr><th>ID</th><th>名称</th><th>Roots</th></tr>'+(j.profiles||[]).map(p=>'<tr><td>'+esc(p.profileId)+'</td><td>'+esc(p.name)+'</td><td>'+esc((p.roots||[]).map(r=>r.displayName).join(', '))+'</td></tr>').join('')}catch(e){showError('/api/backup/profiles',e)}}
+function analyzeServer(){post('/api/backup/analyze-server',{serverDir:serverDir.value})}
+function usePreset(){post('/api/backup/analyze-server',{serverDir:serverDir.value,preset:backupPreset.value})}
+function addManualRoot(kind){const label=kind==='file'?'文件路径':'目录路径';const p=prompt(label);if(!p)return;backupPreset.value='custom';backupRoots.value+=(backupRoots.value.trim()?'\n':'')+(kind==='file'?'file:':'dir:')+p.trim()}
+async function saveProfile(){const roots=parseBackupRoots();const profile={schemaVersion:2,profileId:profileId.value,name:profileName.value,preset:backupPreset.value,serverDir:serverDir.value,excludeGlobs:excludePatterns.value.split(/\r?\n/).map(x=>x.trim()).filter(Boolean),followSymlinks:false,roots};await api('/api/backup/profiles',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(profile)}).then(j=>{profileState.innerHTML='已保存 '+esc(j.profiles.length)+' 个 profile';loadProfiles()}).catch(e=>showError('/api/backup/profiles',e))}
+function parseBackupRoots(){return backupRoots.value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean).map((line,i)=>{let kind='directory',p=line;if(/^file:/i.test(line)){kind='file';p=line.replace(/^file:/i,'').trim()}else if(/^dir:/i.test(line)){kind='directory';p=line.replace(/^dir:/i,'').trim()}const base=p.split(/[\\\/]/).pop()||('root-'+(i+1));return {rootId:'root-'+(i+1),displayName:base,kind,sourcePath:p,restorePath:p,required:true,enabled:true,pendingIfMissing:false,consistencyGroup:'manual',excludePatterns:[],followSymlinks:false}})}
+function profileScan(){post('/api/backup/scan',{profileId:profileId.value})}
+function profileCreate(){post('/api/backup/create',{profileId:profileId.value,requestId:'create:'+profileId.value})}
+function profileRestore(){post('/api/backup/restore',{profileId:profileId.value,snapshotId:'latest',strategy:'ask_on_conflict'})}
+function profileDownload(){post('/api/backup/restore',{profileId:profileId.value,snapshotId:'latest',strategy:'download_to_new_directory',targetDir:restoreTarget.value})}
+function profileSync(){post('/api/backup/sync',{profileId:profileId.value,snapshotId:'latest',strategy:'remote_overwrite'})}
+async function loadProfiles(){try{const j=await api('/api/backup/profiles');profilesTable.innerHTML='<tr><th>ID</th><th>名称</th><th>Preset</th><th>Roots</th></tr>'+(j.profiles||[]).map(p=>'<tr><td>'+esc(p.profileId)+'</td><td>'+esc(p.name)+'</td><td>'+esc(p.preset||'')+'</td><td>'+esc((p.roots||[]).map(r=>(r.enabled===false?'☐ ':'☑ ')+r.displayName).join(', '))+'</td></tr>').join('')}catch(e){showError('/api/backup/profiles',e)}}
 async function loadConfig(){try{const j=await api('/api/config');const d=j.desktop||{},s=j.setup||{},a=j.agent||{};host.value=d.publicEntry?d.publicEntry.split(':')[0]:'';groupUrl.value=d.coordinatorUrl||s.coordinatorUrl||a.coordinatorUrl||'';serverDir.value=d.lastServerDir||(a.server&&a.server.dir)||'';profileState.innerHTML='配置已读取';}catch(e){showError('/api/config',e)}}
-async function refresh(){try{const j=await api('/api/status');busy.textContent=j.operations.busy?'处理中':'就绪';serverRunState.innerHTML=statusLine(j.status);renderOps(j.operations.operations)}catch(e){busy.textContent='未授权'}}
-function renderOps(ops){ops=ops||[];opsTable.innerHTML='<tr><th>操作</th><th>状态</th><th>阶段</th><th>结果</th></tr>'+ops.slice(0,30).map(o=>'<tr><td>'+esc(o.name)+'</td><td><span class="pill">'+esc(o.state)+'</span></td><td>'+esc(o.currentStage||'')+'</td><td>'+esc(o.terminalResult?o.terminalResult.outcome:'')+'</td></tr>').join('')}
+async function refresh(){try{const j=await api('/api/status');busy.textContent=j.operations.busy?'处理中':'就绪';serverRunState.innerHTML=statusLine(j.status);renderOps(j.operations.operations);(j.operations.operations||[]).filter(o=>!isTerminal(o.state)).forEach(o=>trackOperation(o.operationId,''))}catch(e){busy.textContent='未授权'}}
+function renderOps(ops){ops=filterOps(ops||[]).slice(0,20);opsTable.innerHTML='<tr><th>操作</th><th>状态</th><th>阶段</th><th>结果</th></tr>'+ops.map(o=>'<tr><td>'+esc(labelOp(o.name))+'</td><td><span class="pill">'+esc(labelState(o.state))+'</span></td><td>'+esc(o.currentStage||'')+'</td><td>'+esc(o.terminalResult?o.terminalResult.outcome:'')+'</td></tr>').join('')}
 async function loadDiagnostics(){try{const j=await api('/api/diagnostics/summary');const text='AppData: '+j.appDataDir+'<br>Log: '+j.debugLog+'<br>Operations: '+(j.operations.operations||[]).length;diagOut.innerHTML=text;try{await navigator.clipboard.writeText(JSON.stringify(j,null,2))}catch{}}catch(e){showError('/api/diagnostics/summary',e)}}
-function showOperation(j,path){lastResult.innerHTML=kv(j);if(path.includes('network'))networkState.innerHTML=kv(j);else if(path.includes('group'))groupState.innerHTML=kv(j);else if(path.includes('server'))serverState.innerHTML=kv(j);else if(path.includes('backup')||path.includes('world'))backupState.innerHTML=kv(j)}
+function showOperation(j,path){if(j.terminalResult&&j.terminalResult.data&&path.includes('analyze-server'))applyAnalysis(j.terminalResult.data);lastResult.innerHTML=kv(j);if(path.includes('network'))networkState.innerHTML=kv(j);else if(path.includes('group'))groupState.innerHTML=kv(j);else if(path.includes('server')&&!path.includes('backup'))serverState.innerHTML=kv(j);else if(path.includes('backup')||path.includes('world'))backupState.innerHTML=kv(j)}
 function showError(path,e){const msg=esc(e.message||e.errorCode||'请求失败');lastResult.innerHTML=msg;if(path.includes('network'))networkState.innerHTML=msg;else if(path.includes('group'))groupState.innerHTML=msg;else if(path.includes('server'))serverState.innerHTML=msg;else if(path.includes('backup'))backupState.innerHTML=msg}
-function kv(o){if(o.operationId)return '操作已排队：'+esc(o.name)+' / '+esc(o.operationId); if(o.terminalResult)return kv(o.terminalResult); const rows=[]; for(const k of Object.keys(o||{}).slice(0,8)){const v=o[k]; if(typeof v!=='object')rows.push('<b>'+esc(k)+'</b>: '+esc(v))} return rows.join('<br>')||'完成'}
+function kv(o){if(o.operationId&&!o.terminalResult)return '操作已接收：'+esc(labelOp(o.name))+' / '+esc(o.operationId); if(o.terminalResult)return kv(o.terminalResult); const rows=[]; for(const k of Object.keys(o||{}).slice(0,8)){const v=o[k]; if(typeof v!=='object')rows.push('<b>'+esc(k)+'</b>: '+esc(v))} return rows.join('<br>')||'完成'}
+function applyAnalysis(a){const p=a.recommendedProfile||{};if(p.profileId){profileId.value=p.profileId;profileName.value=p.name||p.profileId;backupPreset.value=p.preset||a.recommendedPreset||'minecraft-migratable';backupRoots.value=(p.roots||[]).map(r=>(r.kind==='file'?'file:':'dir:')+r.sourcePath).join('\n');excludePatterns.value=(p.excludeGlobs||[]).join('\n');profileState.innerHTML='已应用推荐策略：'+esc(p.name||p.profileId)}backupState.innerHTML='Loader '+esc(a.loader||'')+' '+esc(a.loaderVersion||'')+' · Minecraft '+esc(a.minecraftVersion||'')+' · world '+(a.worldPending?'待生成':'已存在')}
 function statusLine(s){return 'Agent '+esc(s.agentStatus||'unknown')+' · Server '+esc(s.minecraftServerStatus||'unknown')+' · '+esc(s.serverDir||'未选择服务器目录')}
+function trackOperation(id,path){if(!id||tracked.has(id))return;tracked.set(id,path);pollOperation(id,path)}
+async function pollOperation(id,path){for(;;){await sleep(700);try{const op=await api('/api/operations/'+encodeURIComponent(id));refresh();if(isTerminal(op.state)){tracked.delete(id);showOperation(op,path);return}}catch(e){tracked.delete(id);return}}}
+function isTerminal(s){return ['succeeded','success_with_warnings','partial_failure','failed','cancelled','timed_out'].includes(String(s))}
+function filterOps(ops){const f=(opsFilter&&opsFilter.value)||'active';if(f==='all')return ops;if(f==='active')return ops.filter(o=>!isTerminal(o.state));if(f==='failed')return ops.filter(o=>['failed','partial_failure','timed_out'].includes(String(o.state)));if(f==='cancelled')return ops.filter(o=>o.state==='cancelled');return ops}
+async function clearCompleted(){await post('/api/operations/clear-completed',{});refresh()}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
+function idempotencyKey(path,body){const stable=JSON.stringify(body||{});return 'ui:'+path+':'+stable}
+function labelOp(name){return ({Bootstrap:'初始化',EnvironmentCheck:'环境检查',RefreshStatus:'刷新状态',ConfigureNetwork:'保存公网配置',SaveNetworkConfig:'保存公网配置',TestNetworkConfig:'测试公网服务器',CreateGroup:'创建 Group',JoinGroup:'加入 Group',WorldBackupCreate:'创建备份',BackupAnalyzeServer:'分析服务端',BackupProfileCreate:'创建备份',BackupProfileResume:'继续上传',BackupProfilePull:'拉取快照',BackupProfileRestore:'恢复备份',BackupProfileSync:'同步到本地',BackupProfilePin:'固定快照',BackupProfileDelete:'删除快照',BackupProfileScan:'扫描备份范围'}[name]||name||'操作')}
+function labelState(s){return ({queued:'排队中',running:'运行中',cancelling:'取消中',succeeded:'成功',success_with_warnings:'有警告',partial_failure:'部分失败',failed:'失败',cancelled:'已取消',timed_out:'超时'}[s]||s)}
 function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 loadConfig();loadProfiles();refresh();setInterval(refresh,1500);
 </script>

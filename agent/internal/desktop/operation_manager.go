@@ -21,6 +21,7 @@ type OperationState string
 const (
 	OperationQueued         OperationState = "queued"
 	OperationRunning        OperationState = "running"
+	OperationCancelling     OperationState = "cancelling"
 	OperationSucceeded      OperationState = "succeeded"
 	OperationWarning        OperationState = "success_with_warnings"
 	OperationPartialFailure OperationState = "partial_failure"
@@ -60,11 +61,12 @@ type OperationSummary struct {
 }
 
 type OperationOptions struct {
-	Name        string
-	MutexClass  string
-	Cancellable bool
-	Timeout     time.Duration
-	Coalesce    bool
+	Name           string
+	MutexClass     string
+	Cancellable    bool
+	Timeout        time.Duration
+	Coalesce       bool
+	IdempotencyKey string
 }
 
 type OperationContext struct {
@@ -88,30 +90,60 @@ var (
 )
 
 type OperationManager struct {
+	rootContext context.Context
+	rootCancel  context.CancelFunc
+	wg          sync.WaitGroup
 	mu          sync.Mutex
 	opts        Options
 	operations  map[string]*managedOperation
 	mutexOwners map[string]string
+	idempotency map[string]idempotencyRecord
 	logPath     string
+	closed      bool
 }
 
 type managedOperation struct {
 	snapshot OperationSnapshot
 	cancel   context.CancelFunc
 	once     sync.Once
+	done     chan struct{}
+	idemKey  string
 }
 
-func NewOperationManager(opts Options) *OperationManager {
+type idempotencyRecord struct {
+	OperationID string            `json:"operationId"`
+	Snapshot    OperationSnapshot `json:"snapshot"`
+	UpdatedAt   time.Time         `json:"updatedAt"`
+}
+
+type CancelResult struct {
+	OK            bool           `json:"ok"`
+	OperationID   string         `json:"operationId,omitempty"`
+	PreviousState OperationState `json:"previousState,omitempty"`
+	NewState      OperationState `json:"newState,omitempty"`
+	Message       string         `json:"message,omitempty"`
+}
+
+func NewOperationManager(rootContext context.Context, opts Options) *OperationManager {
 	opts = withDefaults(opts)
-	return &OperationManager{
+	if rootContext == nil {
+		rootContext = context.Background()
+	}
+	ctx, cancel := context.WithCancel(rootContext)
+	m := &OperationManager{
+		rootContext: ctx,
+		rootCancel:  cancel,
 		opts:        opts,
 		operations:  map[string]*managedOperation{},
 		mutexOwners: map[string]string{},
+		idempotency: map[string]idempotencyRecord{},
 		logPath:     filepath.Join(opts.AppDataDir, "logs", "desktop-debug.log"),
 	}
+	m.loadIdempotency()
+	return m
 }
 
-func (m *OperationManager) Start(parent context.Context, opOpts OperationOptions, fn OperationFunc) (OperationSnapshot, error) {
+func (m *OperationManager) Start(opOpts OperationOptions, fn OperationFunc) (OperationSnapshot, error) {
 	if opOpts.Name == "" {
 		return OperationSnapshot{}, errors.New("operation name is required")
 	}
@@ -121,8 +153,23 @@ func (m *OperationManager) Start(parent context.Context, opOpts OperationOptions
 	if opOpts.MutexClass == "" {
 		opOpts.MutexClass = "default"
 	}
-	if parent == nil {
-		parent = context.Background()
+	idemKey := m.normalizeIdempotencyKey(opOpts)
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return OperationSnapshot{}, errors.New("operation manager is closed")
+	}
+	if idemKey != "" {
+		if record, ok := m.idempotency[idemKey]; ok {
+			if op := m.operations[record.OperationID]; op != nil {
+				snap := op.snapshot
+				m.mu.Unlock()
+				return snap, nil
+			}
+			m.mu.Unlock()
+			return record.Snapshot, nil
+		}
 	}
 	now := time.Now().UTC()
 	op := &managedOperation{
@@ -137,11 +184,12 @@ func (m *OperationManager) Start(parent context.Context, opOpts OperationOptions
 			Timeout:      opOpts.Timeout.String(),
 			TraceID:      "tr_" + randomHex(12),
 		},
+		done:    make(chan struct{}),
+		idemKey: idemKey,
 	}
-	ctx, cancel := context.WithTimeout(parent, opOpts.Timeout)
+	ctx, cancel := context.WithTimeout(m.rootContext, opOpts.Timeout)
 	op.cancel = cancel
 
-	m.mu.Lock()
 	if ownerID := m.mutexOwners[opOpts.MutexClass]; ownerID != "" {
 		if opOpts.Coalesce {
 			if owner := m.operations[ownerID]; owner != nil {
@@ -157,6 +205,11 @@ func (m *OperationManager) Start(parent context.Context, opOpts OperationOptions
 	}
 	m.operations[op.snapshot.OperationID] = op
 	m.mutexOwners[opOpts.MutexClass] = op.snapshot.OperationID
+	if idemKey != "" {
+		m.idempotency[idemKey] = idempotencyRecord{OperationID: op.snapshot.OperationID, Snapshot: op.snapshot, UpdatedAt: now}
+	}
+	m.pruneLocked()
+	m.wg.Add(1)
 	m.mu.Unlock()
 
 	m.appendSummary(op.snapshot.TraceID, "queued", op.snapshot.Name, "")
@@ -165,7 +218,11 @@ func (m *OperationManager) Start(parent context.Context, opOpts OperationOptions
 }
 
 func (m *OperationManager) run(ctx context.Context, cancel context.CancelFunc, op *managedOperation, fn OperationFunc) {
-	defer cancel()
+	defer func() {
+		cancel()
+		close(op.done)
+		m.wg.Done()
+	}()
 
 	m.update(op.snapshot.OperationID, func(s *OperationSnapshot) {
 		s.State = OperationRunning
@@ -216,15 +273,28 @@ func (m *OperationManager) run(ctx context.Context, cancel context.CancelFunc, o
 	m.complete(op.snapshot.OperationID, env)
 }
 
-func (m *OperationManager) Cancel(operationID string) bool {
+func (m *OperationManager) Cancel(operationID string) CancelResult {
 	m.mu.Lock()
 	op := m.operations[operationID]
-	m.mu.Unlock()
-	if op == nil || op.cancel == nil || !op.snapshot.Cancellable {
-		return false
+	if op == nil {
+		m.mu.Unlock()
+		return CancelResult{OK: false, OperationID: operationID, Message: "operation not found"}
 	}
+	previous := op.snapshot.State
+	if isTerminalState(previous) {
+		m.mu.Unlock()
+		return CancelResult{OK: false, OperationID: operationID, PreviousState: previous, NewState: previous, Message: "operation already finished"}
+	}
+	if op.cancel == nil || !op.snapshot.Cancellable {
+		m.mu.Unlock()
+		return CancelResult{OK: false, OperationID: operationID, PreviousState: previous, NewState: previous, Message: "operation is not cancellable"}
+	}
+	op.snapshot.State = OperationCancelling
+	op.snapshot.CurrentStage = "cancelling"
+	next := op.snapshot.State
+	m.mu.Unlock()
 	op.cancel()
-	return true
+	return CancelResult{OK: true, OperationID: operationID, PreviousState: previous, NewState: next}
 }
 
 func (m *OperationManager) Get(operationID string) (OperationSnapshot, bool) {
@@ -245,7 +315,7 @@ func (m *OperationManager) Summary() OperationSummary {
 	for _, op := range m.operations {
 		snap := op.snapshot
 		ops = append(ops, snap)
-		if snap.State == OperationQueued || snap.State == OperationRunning {
+		if snap.State == OperationQueued || snap.State == OperationRunning || snap.State == OperationCancelling {
 			busy = true
 		}
 	}
@@ -266,26 +336,36 @@ func (m *OperationManager) complete(operationID string, env Envelope) {
 		now := time.Now().UTC()
 		op.snapshot.CompletedAt = &now
 		op.snapshot.Result = &env
-		op.snapshot.CurrentStage = "completed"
 		switch env.Outcome {
 		case OutcomeSuccess:
 			op.snapshot.State = OperationSucceeded
+			op.snapshot.CurrentStage = "completed"
 		case OutcomeSuccessWithWarnings:
 			op.snapshot.State = OperationWarning
+			op.snapshot.CurrentStage = "completed_with_warnings"
 		case OutcomePartialFailure:
 			op.snapshot.State = OperationPartialFailure
+			op.snapshot.CurrentStage = "partial_failure"
 		case OutcomeCancelled:
 			op.snapshot.State = OperationCancelled
+			op.snapshot.CurrentStage = "cancelled"
 		case OutcomeTimedOut:
 			op.snapshot.State = OperationTimedOut
+			op.snapshot.CurrentStage = "timed_out"
 		default:
 			op.snapshot.State = OperationFailed
+			op.snapshot.CurrentStage = "failed"
 		}
 		delete(m.mutexOwners, op.snapshot.MutexClass)
+		if op.idemKey != "" {
+			m.idempotency[op.idemKey] = idempotencyRecord{OperationID: operationID, Snapshot: op.snapshot, UpdatedAt: now}
+		}
+		m.pruneLocked()
 	})
 	snap := op.snapshot
 	m.mu.Unlock()
 
+	m.saveIdempotency()
 	m.appendSummary(snap.TraceID, "finish", snap.Name, string(env.Outcome)+" "+env.ErrorCode+" "+env.Message)
 	m.appendDebug(env)
 }
@@ -294,7 +374,134 @@ func (m *OperationManager) update(operationID string, update func(*OperationSnap
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if op := m.operations[operationID]; op != nil {
+		if isTerminalState(op.snapshot.State) {
+			return
+		}
 		update(&op.snapshot)
+	}
+}
+
+func (m *OperationManager) Close(ctx context.Context) error {
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		m.rootCancel()
+		for _, op := range m.operations {
+			if !isTerminalState(op.snapshot.State) && op.cancel != nil {
+				op.cancel()
+			}
+		}
+	}
+	m.mu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		<-done
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *OperationManager) ClearCompleted() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cleared := 0
+	for id, op := range m.operations {
+		if isTerminalState(op.snapshot.State) {
+			delete(m.operations, id)
+			cleared++
+		}
+	}
+	return cleared
+}
+
+func (m *OperationManager) normalizeIdempotencyKey(opts OperationOptions) string {
+	key := strings.TrimSpace(opts.IdempotencyKey)
+	if key == "" {
+		return ""
+	}
+	return opts.Name + ":" + key
+}
+
+func (m *OperationManager) pruneLocked() {
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	for key, record := range m.idempotency {
+		if record.UpdatedAt.Before(cutoff) {
+			delete(m.idempotency, key)
+		}
+	}
+	if len(m.operations) <= 100 {
+		return
+	}
+	ops := make([]*managedOperation, 0, len(m.operations))
+	for _, op := range m.operations {
+		ops = append(ops, op)
+	}
+	sort.Slice(ops, func(i, j int) bool { return ops[i].snapshot.StartedAt.Before(ops[j].snapshot.StartedAt) })
+	for _, op := range ops {
+		if len(m.operations) <= 100 {
+			return
+		}
+		if isTerminalState(op.snapshot.State) {
+			delete(m.operations, op.snapshot.OperationID)
+		}
+	}
+}
+
+func (m *OperationManager) idempotencyPath() string {
+	return filepath.Join(m.opts.AppDataDir, "desktop-idempotency.json")
+}
+
+func (m *OperationManager) loadIdempotency() {
+	var doc struct {
+		Records map[string]idempotencyRecord `json:"records"`
+	}
+	if err := loadJSON(m.idempotencyPath(), &doc); err != nil || doc.Records == nil {
+		return
+	}
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	for key, record := range doc.Records {
+		if !record.UpdatedAt.Before(cutoff) {
+			m.idempotency[key] = record
+		}
+	}
+}
+
+func (m *OperationManager) saveIdempotency() {
+	m.mu.Lock()
+	records := make(map[string]idempotencyRecord, len(m.idempotency))
+	for key, record := range m.idempotency {
+		record.Snapshot = redactOperationSnapshot(record.Snapshot)
+		records[key] = record
+	}
+	m.mu.Unlock()
+	_ = saveJSON(m.idempotencyPath(), struct {
+		Records map[string]idempotencyRecord `json:"records"`
+	}{Records: records})
+}
+
+func redactOperationSnapshot(s OperationSnapshot) OperationSnapshot {
+	if s.Result != nil {
+		env := redactEnvelope(*s.Result)
+		s.Result = &env
+	}
+	return s
+}
+
+func isTerminalState(state OperationState) bool {
+	switch state {
+	case OperationSucceeded, OperationWarning, OperationPartialFailure, OperationFailed, OperationCancelled, OperationTimedOut:
+		return true
+	default:
+		return false
 	}
 }
 

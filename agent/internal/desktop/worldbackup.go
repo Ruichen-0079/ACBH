@@ -42,14 +42,21 @@ type WorldBackupStatusResult struct {
 }
 
 type WorldBackupCreateResult struct {
-	OK               bool   `json:"ok"`
-	SnapshotID       string `json:"snapshotId"`
-	MissingObjects   int    `json:"missingObjects"`
-	LogicalSize      int64  `json:"logicalSize"`
-	UploadedSize     int64  `json:"uploadedSize"`
-	ChangedFileCount int    `json:"changedFileCount"`
-	DeletedFileCount int    `json:"deletedFileCount"`
-	IndexPath        string `json:"indexPath,omitempty"`
+	OK               bool     `json:"ok"`
+	SnapshotID       string   `json:"snapshotId"`
+	ProfileID        string   `json:"profileId,omitempty"`
+	RootCount        int      `json:"rootCount,omitempty"`
+	FileCount        int      `json:"fileCount,omitempty"`
+	MissingObjects   int      `json:"missingObjects"`
+	PendingRootCount int      `json:"pendingRootCount,omitempty"`
+	LogicalSize      int64    `json:"logicalSize"`
+	UploadedSize     int64    `json:"uploadedSize"`
+	DeduplicatedSize int64    `json:"deduplicatedSize,omitempty"`
+	ChangedFileCount int      `json:"changedFileCount"`
+	DeletedFileCount int      `json:"deletedFileCount"`
+	Consistent       bool     `json:"consistent"`
+	Warnings         []string `json:"warnings,omitempty"`
+	IndexPath        string   `json:"indexPath,omitempty"`
 }
 
 type WorldBackupActionResult struct {
@@ -152,6 +159,7 @@ func WorldBackupCreate(ctx context.Context, opts Options, wb WorldBackupOptions,
 		UploadedSize:     published.UploadedSize,
 		ChangedFileCount: published.ChangedFileCount,
 		DeletedFileCount: published.DeletedFileCount,
+		Consistent:       true,
 		IndexPath:        worldbackup.IndexPath(withDefaults(opts).AppDataDir),
 	}, nil
 }
@@ -291,6 +299,7 @@ func publishWorldSnapshot(ctx context.Context, opts Options, wb WorldBackupOptio
 		UploadedSize:     snapshot.Manifest.UploadedSize,
 		ChangedFileCount: snapshot.Manifest.ChangedFileCount,
 		DeletedFileCount: snapshot.Manifest.DeletedFileCount,
+		Consistent:       snapshot.Manifest.Consistent,
 		IndexPath:        worldbackup.IndexPath(opts.AppDataDir),
 	}, nil
 }
