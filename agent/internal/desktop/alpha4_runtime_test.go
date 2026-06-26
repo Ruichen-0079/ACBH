@@ -156,6 +156,9 @@ func TestDesktopRuntimeRequestReturnDoesNotCancelOperation(t *testing.T) {
 
 func TestOperationManagerTerminalStagesAndIdempotency(t *testing.T) {
 	manager := NewOperationManager(context.Background(), Options{AppDataDir: t.TempDir()})
+	defer func() {
+		_ = manager.Close(context.Background())
+	}()
 	cases := []struct {
 		name  string
 		data  any
@@ -205,6 +208,9 @@ func TestOperationManagerCancelCloseTimeoutAndHistory(t *testing.T) {
 	root, cancelRoot := context.WithCancel(context.Background())
 	defer cancelRoot()
 	manager := NewOperationManager(root, Options{AppDataDir: t.TempDir()})
+	defer func() {
+		_ = manager.Close(context.Background())
+	}()
 	cancelSnap, err := manager.Start(OperationOptions{Name: "cancel", MutexClass: "cancel", Timeout: time.Second, Cancellable: true}, func(ctx OperationContext) (any, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
