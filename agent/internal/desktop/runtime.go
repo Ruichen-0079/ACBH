@@ -482,7 +482,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{border-bottom:1px
 </style>
 </head>
 <body>
-<header><h1>ACBH Desktop v0.4.0-alpha4</h1><div id="busy">启动中</div></header>
+<header><h1>ACBH Desktop v0.4.0-alpha5</h1><div id="busy">启动中</div></header>
 <main>
 <nav>
 <button data-tab="wizard" class="active">首次配置</button>
