@@ -9,7 +9,7 @@ import type {
   HostTunnelPresence,
 } from "./network.js";
 
-export type MemberRole = "owner" | "member";
+export type MemberRole = "owner" | "admin" | "member";
 
 export type HostStatus = "online" | "standby" | "hosting" | "unhealthy" | "offline";
 
@@ -125,6 +125,28 @@ export type TakeoverPollResponse = {
         takeoverToken?: string;
       })
     | null;
+};
+
+export type HostLeaseStatus = {
+  groupId: string;
+  hostId: string;
+  currentHostId: string | null;
+  currentHostIdMatches: boolean;
+  leaseValid: boolean;
+  leaseExpiresAt: string | null;
+  leaseRemaining: number;
+  generation: number;
+  serverTime: string;
+  heartbeatActive: boolean;
+};
+
+export type WhoAmIResponse = {
+  groupId: string;
+  memberId: string;
+  hostId: string;
+  role: MemberRole;
+  credentialKind: "host_token";
+  lease: HostLeaseStatus;
 };
 
 export type GroupState = {
@@ -592,12 +614,13 @@ export class InMemoryCoordinatorStore {
 
   createInvite(input: {
     groupId: string;
-    accessKey: string;
+    accessKey?: string;
+    hostId?: string;
+    hostToken?: string;
     expiresInSeconds?: number;
     oneTime?: boolean;
   }): { inviteId: string; inviteCode: string; groupId: string; expiresAt: string; oneTime: boolean } {
-    const group = this.requireGroup(input.groupId);
-    this.verifyAccessKey(group, input.accessKey);
+    const group = this.requireInviteManager(input);
     const ttlSeconds = Math.max(60, Math.min(input.expiresInSeconds ?? 30 * 60, 30 * 24 * 3600));
     const now = this.now();
     const inviteId = createId("inv");
@@ -618,9 +641,8 @@ export class InMemoryCoordinatorStore {
     return { inviteId, inviteCode, groupId: input.groupId, expiresAt, oneTime: input.oneTime ?? true };
   }
 
-  revokeInvite(input: { groupId: string; accessKey: string; inviteId: string }): { ok: true; inviteId: string } {
-    const group = this.requireGroup(input.groupId);
-    this.verifyAccessKey(group, input.accessKey);
+  revokeInvite(input: { groupId: string; accessKey?: string; hostId?: string; hostToken?: string; inviteId: string }): { ok: true; inviteId: string } {
+    const group = this.requireInviteManager(input);
     const invite = group.invites.get(input.inviteId);
     if (!invite) {
       throw new StoreError(404, "Invite does not exist");
@@ -631,9 +653,8 @@ export class InMemoryCoordinatorStore {
     return { ok: true, inviteId: input.inviteId };
   }
 
-  listInvites(input: { groupId: string; accessKey: string }): { invites: PublicInvite[] } {
-    const group = this.requireGroup(input.groupId);
-    this.verifyAccessKey(group, input.accessKey);
+  listInvites(input: { groupId: string; accessKey?: string; hostId?: string; hostToken?: string }): { invites: PublicInvite[] } {
+    const group = this.requireInviteManager(input);
     return {
       invites: Array.from(group.invites.values()).map((invite) => ({
         inviteId: invite.inviteId,
@@ -746,6 +767,62 @@ export class InMemoryCoordinatorStore {
 
     this.triggerMutation();
     return { ok: true, hostId: host.hostId, status: host.status };
+  }
+
+  whoami(input: { groupId: string; hostId: string; hostToken: string }): WhoAmIResponse {
+    const { group, host, member } = this.requireAuthenticatedHost(input);
+    return {
+      groupId: group.groupId,
+      memberId: member.memberId,
+      hostId: host.hostId,
+      role: member.role,
+      credentialKind: "host_token",
+      lease: this.hostLeaseStatusFor(group, host),
+    };
+  }
+
+  getHostLeaseStatus(input: { groupId: string; hostId: string; hostToken: string }): HostLeaseStatus {
+    const { group, host } = this.requireAuthenticatedHost(input);
+    return this.hostLeaseStatusFor(group, host);
+  }
+
+  ensureActiveLease(input: {
+    groupId: string;
+    hostId: string;
+    hostToken: string;
+    generation?: number;
+  }): { ok: true; renewed: boolean; lease: HostLeaseStatus; message: string } {
+    const { group, host } = this.requireAuthenticatedHost(input);
+    const now = this.now();
+    const nowIso = now.toISOString();
+    const currentHost = group.currentHostId === null ? null : group.hosts.get(group.currentHostId);
+    const currentLeaseFresh = currentHost !== undefined && currentHost !== null && isFresh(currentHost.lastHeartbeatAt, now, this.heartbeatTimeoutMs);
+
+    if (group.currentHostId === host.hostId && currentLeaseFresh) {
+      if (input.generation !== undefined && input.generation !== group.currentHostGeneration) {
+        throw new StoreError(409, "Host generation is stale; current host may have changed", "stale_host_generation");
+      }
+      host.lastHeartbeatAt = nowIso;
+      host.updatedAt = nowIso;
+      group.updatedAt = nowIso;
+      this.triggerMutation();
+      return { ok: true, renewed: false, lease: this.hostLeaseStatusFor(group, host), message: "lease is active" };
+    }
+
+    if (group.currentHostId !== null && group.currentHostId !== host.hostId && currentLeaseFresh) {
+      throw new StoreError(409, "Current host lease is held by another host", "lease_held_by_other_host");
+    }
+
+    group.currentHostId = host.hostId;
+    group.currentHostGeneration += 1;
+    host.lastHeartbeatAt = nowIso;
+    if (host.status === "offline" || host.status === "unhealthy") {
+      host.status = "standby";
+    }
+    host.updatedAt = nowIso;
+    group.updatedAt = nowIso;
+    this.triggerMutation();
+    return { ok: true, renewed: true, lease: this.hostLeaseStatusFor(group, host), message: "lease renewed" };
   }
 
   getGroupState(groupId: string): GroupState {
@@ -1435,7 +1512,7 @@ export class InMemoryCoordinatorStore {
     const artifact = this.findLatestArtifact(group, artifactKind);
 
     if (!artifact) {
-      throw new StoreError(404, "No available artifact exists for this kind");
+      throw new StoreError(404, "No available artifact exists for this kind", "artifact_empty");
     }
 
     return artifact;
@@ -1650,6 +1727,75 @@ export class InMemoryCoordinatorStore {
     if (!verifySecret(accessKey, group.accessKeyHash)) {
       throw new StoreError(401, "Invalid access key");
     }
+  }
+
+  private requireAuthenticatedHost(input: {
+    groupId: string;
+    hostId: string;
+    hostToken: string;
+  }): { group: GroupRecord; host: HostRecord; member: MemberRecord } {
+    const group = this.requireGroup(input.groupId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+    const member = group.members.get(host.memberId);
+    if (!member) {
+      throw new StoreError(409, "Host member identity does not exist in group", "identity_mismatch");
+    }
+    return { group, host, member };
+  }
+
+  private requireInviteManager(input: {
+    groupId: string;
+    accessKey?: string;
+    hostId?: string;
+    hostToken?: string;
+  }): GroupRecord {
+    const group = this.requireGroup(input.groupId);
+    if (input.accessKey !== undefined && input.accessKey !== "") {
+      this.verifyAccessKey(group, input.accessKey);
+      return group;
+    }
+    if (!input.hostId || !input.hostToken) {
+      throw new StoreError(401, "Invite management requires authenticated owner/admin identity", "invite_auth_required");
+    }
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+    const member = group.members.get(host.memberId);
+    if (!member) {
+      throw new StoreError(409, "Host member identity does not exist in group", "identity_mismatch");
+    }
+    if (member.role !== "owner" && member.role !== "admin") {
+      throw new StoreError(403, "Invite management requires owner/admin role", "invite_permission_denied");
+    }
+    return group;
+  }
+
+  private hostLeaseStatusFor(group: GroupRecord, host: HostRecord): HostLeaseStatus {
+    const now = this.now();
+    const heartbeatActive = isFresh(host.lastHeartbeatAt, now, this.heartbeatTimeoutMs);
+    const currentHostIdMatches = group.currentHostId === host.hostId;
+    const leaseValid = currentHostIdMatches && heartbeatActive;
+    let leaseExpiresAt: string | null = null;
+    let leaseRemaining = 0;
+    if (host.lastHeartbeatAt !== null) {
+      const expiresAtMs = Date.parse(host.lastHeartbeatAt) + this.heartbeatTimeoutMs;
+      if (Number.isFinite(expiresAtMs)) {
+        leaseExpiresAt = new Date(expiresAtMs).toISOString();
+        leaseRemaining = Math.max(0, expiresAtMs - now.getTime());
+      }
+    }
+    return {
+      groupId: group.groupId,
+      hostId: host.hostId,
+      currentHostId: group.currentHostId,
+      currentHostIdMatches,
+      leaseValid,
+      leaseExpiresAt,
+      leaseRemaining,
+      generation: group.currentHostGeneration,
+      serverTime: now.toISOString(),
+      heartbeatActive,
+    };
   }
 
   private findLatestArtifact(group: GroupRecord, artifactKind: ArtifactKind): ArtifactMetadata | undefined {

@@ -29,6 +29,7 @@ type WorldBackupOptions struct {
 
 type WorldBackupStatusResult struct {
 	OK                    bool                             `json:"ok"`
+	State                 string                           `json:"state"`
 	IndexPath             string                           `json:"indexPath"`
 	IndexExists           bool                             `json:"indexExists"`
 	LocalLatestSnapshotID string                           `json:"localLatestSnapshotId,omitempty"`
@@ -89,6 +90,7 @@ func WorldBackupStatus(ctx context.Context, opts Options) (WorldBackupStatusResu
 	opts = withDefaults(opts)
 	result := WorldBackupStatusResult{
 		OK:        true,
+		State:     "unknown",
 		IndexPath: worldbackup.IndexPath(opts.AppDataDir),
 	}
 	idx, indexExists, indexErr := worldbackup.LoadIndex(opts.AppDataDir)
@@ -110,15 +112,25 @@ func WorldBackupStatus(ctx context.Context, opts Options) (WorldBackupStatusResu
 	_ = cfg
 
 	if remote, err := client.GetLatestWorldBackup(ctx, auth, false); err != nil {
-		result.RemoteLatestError = err.Error()
+		if coordinator.IsAPIErrorCode(err, "artifact_empty") || strings.Contains(err.Error(), "No available artifact exists for this kind") {
+			result.State = "empty"
+		} else {
+			result.RemoteLatestError = err.Error()
+		}
 	} else {
 		meta := remote.Metadata
 		result.RemoteLatest = &meta
+		result.State = "available"
 	}
 	if list, err := client.ListWorldBackups(ctx, auth); err != nil {
-		result.ListError = err.Error()
+		if result.State != "empty" {
+			result.ListError = err.Error()
+		}
 	} else {
 		result.HistoryCount = len(list.Snapshots)
+		if result.HistoryCount == 0 && result.RemoteLatest == nil {
+			result.State = "empty"
+		}
 	}
 	return result, nil
 }
@@ -165,9 +177,26 @@ func publishWorldSnapshot(ctx context.Context, opts Options, wb WorldBackupOptio
 		return WorldBackupCreateResult{}, fmt.Errorf("cannot verify current host state before publishing world snapshot: %w", err)
 	}
 	if status.CurrentHostID == nil || *status.CurrentHostID != cfg.HostID {
-		return WorldBackupCreateResult{}, errors.New("not_current_host: only the current host may publish world snapshots")
+		ensured, ensureErr := client.EnsureActiveLease(ctx, auth, nil)
+		if ensureErr != nil {
+			return WorldBackupCreateResult{}, fmt.Errorf("ensure_active_lease_failed: %w", ensureErr)
+		}
+		if !ensured.Lease.LeaseValid {
+			return WorldBackupCreateResult{}, errors.New("lease_expired: active host lease is required before publishing world snapshots")
+		}
+		generation := ensured.Lease.Generation
+		status.CurrentHostGeneration = generation
+		status.CurrentHostID = &cfg.HostID
 	}
 	generation := status.CurrentHostGeneration
+	ensured, err := client.EnsureActiveLease(ctx, auth, &generation)
+	if err != nil {
+		return WorldBackupCreateResult{}, fmt.Errorf("ensure_active_lease_failed: %w", err)
+	}
+	if !ensured.Lease.LeaseValid {
+		return WorldBackupCreateResult{}, errors.New("lease_expired: active host lease is required before publishing world snapshots")
+	}
+	generation = ensured.Lease.Generation
 	snapshotID := wb.SnapshotID
 	if snapshotID == "" {
 		snapshotID = "ws_" + time.Now().UTC().Format("20060102_150405")
@@ -206,6 +235,8 @@ func publishWorldSnapshot(ctx context.Context, opts Options, wb WorldBackupOptio
 	var parent *worldbackup.Manifest
 	if latest, err := client.GetLatestWorldBackup(ctx, auth, false); err == nil {
 		parent = &latest.Manifest
+	} else if !coordinator.IsAPIErrorCode(err, "artifact_empty") && !strings.Contains(err.Error(), "No available artifact exists for this kind") {
+		return WorldBackupCreateResult{}, err
 	}
 	snapshot, err := worldbackup.BuildSnapshot(worldbackup.ScanOptions{
 		ServerDir:      scanServerDir,

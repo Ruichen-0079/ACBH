@@ -63,6 +63,10 @@ type Status struct {
 	LatestArtifactKind    string `json:"latestArtifactKind,omitempty"`
 	CurrentHostID         string `json:"currentHostId,omitempty"`
 	IsCurrentHost         *bool  `json:"isCurrentHost,omitempty"`
+	LeaseValid            bool   `json:"leaseValid"`
+	LeaseExpiresAt        string `json:"leaseExpiresAt,omitempty"`
+	LeaseRemaining        int64  `json:"leaseRemaining"`
+	HeartbeatActive       bool   `json:"heartbeatActive"`
 	CurrentHostGeneration int    `json:"currentHostGeneration,omitempty"`
 	LastError             string `json:"lastError,omitempty"`
 
@@ -271,6 +275,20 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 		v := canPush.CanPush
 		status.IsCurrentHost = &v
 	}
+	if cfg, cfgErr := loadDesktopConfig(opts); cfgErr == nil && cfg.GroupID != "" && cfg.HostID != "" && cfg.HostToken != "" {
+		if client, clientErr := coordinator.NewClient(cfg.CoordinatorURL); clientErr == nil {
+			if lease, leaseErr := client.GetLeaseStatus(ctx, coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}); leaseErr == nil {
+				status.LeaseValid = lease.LeaseValid
+				status.LeaseExpiresAt = lease.LeaseExpiresAt
+				status.LeaseRemaining = lease.LeaseRemaining
+				status.HeartbeatActive = lease.HeartbeatActive
+				status.CurrentHostGeneration = lease.Generation
+				status.CurrentHostID = lease.CurrentHostID
+				v := lease.LeaseValid
+				status.IsCurrentHost = &v
+			}
+		}
+	}
 
 	// populate hotfix3 required fields (keep old fields too for compat)
 	status.Mode = "local-private"
@@ -450,17 +468,21 @@ func createPrivateIdentity(
 	if err != nil {
 		return agentconfig.Config{}, false, err
 	}
-	joined, err := client.JoinGroup(ctx, created.GroupID, coordinator.JoinGroupRequest{
-		AccessKey:   created.AccessKey,
-		DisplayName: opts.DisplayName,
-	})
-	if err != nil {
-		return agentconfig.Config{}, false, err
+	memberID := created.OwnerMemberID
+	if memberID == "" {
+		joined, err := client.JoinGroup(ctx, created.GroupID, coordinator.JoinGroupRequest{
+			AccessKey:   created.AccessKey,
+			DisplayName: opts.DisplayName,
+		})
+		if err != nil {
+			return agentconfig.Config{}, false, err
+		}
+		memberID = joined.MemberID
 	}
 	registered, err := client.RegisterHost(ctx, coordinator.RegisterHostRequest{
 		GroupID:      created.GroupID,
 		AccessKey:    created.AccessKey,
-		MemberID:     joined.MemberID,
+		MemberID:     memberID,
 		DeviceName:   opts.DeviceName,
 		Platform:     runtime.GOOS,
 		AgentVersion: agentconfig.AgentVersion,
@@ -471,7 +493,7 @@ func createPrivateIdentity(
 	cfg := agentconfig.Config{
 		CoordinatorURL: fmt.Sprintf("http://%s:%s", opts.Host, opts.Port),
 		GroupID:        created.GroupID,
-		MemberID:       joined.MemberID,
+		MemberID:       memberID,
 		HostID:         registered.HostID,
 		HostToken:      registered.HostToken,
 		DisplayName:    opts.DisplayName,

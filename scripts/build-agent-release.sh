@@ -196,12 +196,10 @@ if [ -f "$DIST_DIR/acbh-desktop-windows-amd64.exe" ]; then
   BUNDLE_PARENT="$(mktemp -d)"
   BUNDLE_ROOT="$BUNDLE_PARENT/$BUNDLE_NAME"
   rm -rf "$DIST_DIR/$BUNDLE_NAME" "$DIST_DIR/$BUNDLE_NAME.zip"
-  mkdir -p "$BUNDLE_ROOT/scripts"
   mkdir -p "$BUNDLE_ROOT/docs"
   mkdir -p "$BUNDLE_ROOT/resources"
   cp "$DIST_DIR/acbh-desktop-windows-amd64.exe" "$BUNDLE_ROOT/"
   cp "$DIST_DIR/acbh-agent-windows-amd64.exe" "$BUNDLE_ROOT/"
-  copy_powershell_utf8_bom "$REPO_ROOT/scripts/acbh-desktop-gui.ps1" "$BUNDLE_ROOT/scripts/acbh-desktop-gui.ps1"
   cp -R "$REPO_ROOT/docs/zh-CN" "$BUNDLE_ROOT/docs/"
   cp "$REPO_ROOT/RELEASE_NOTES_${VERSION}.md" "$BUNDLE_ROOT/" 2>/dev/null || \
     cp "$REPO_ROOT/RELEASE_NOTES_v0.3.3-simple-desktop-flow.md" "$BUNDLE_ROOT/" 2>/dev/null || true

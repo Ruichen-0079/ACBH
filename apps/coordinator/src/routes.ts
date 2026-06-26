@@ -43,6 +43,18 @@ const bootstrapPackageDefinitions = [
   },
 ] as const;
 
+const protocolVersion = 2;
+const minimumClientProtocol = 1;
+const coordinatorCapabilities = [
+  "desktop_protocol_v2",
+  "world_backup_v1",
+  "world_backup_resume",
+  "invite_management_v1",
+  "public_relay_v1",
+  "lease_renew_v1",
+  "bootstrap_packages_v1",
+] as const;
+
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(120),
   ownerName: z.string().trim().min(1).max(80),
@@ -62,18 +74,24 @@ const joinGroupSchema = z.object({
 });
 
 const createInviteSchema = z.object({
-  accessKey: z.string().min(1),
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
   expiresInSeconds: z.number().int().positive().optional(),
   oneTime: z.boolean().optional(),
 });
 
 const revokeInviteSchema = z.object({
-  accessKey: z.string().min(1),
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
   inviteId: z.string().min(1),
 });
 
 const listInviteSchema = z.object({
-  accessKey: z.string().min(1),
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
 });
 
 const joinInviteSchema = z.object({
@@ -136,6 +154,10 @@ const electionAuthSchema = z.object({
   groupId: z.string().min(1),
   hostId: z.string().min(1),
   hostToken: z.string().min(1),
+});
+
+const leaseEnsureSchema = electionAuthSchema.extend({
+  generation: z.number().int().nonnegative().optional(),
 });
 
 const electionRunSchema = electionAuthSchema.extend({
@@ -314,6 +336,20 @@ export async function registerRoutes(
       ok: true,
       service: "acbh-coordinator",
       version: coordinatorVersion(),
+      protocolVersion,
+      minimumClientProtocol,
+      capabilities: [...coordinatorCapabilities],
+    };
+  });
+
+  app.get("/v1/capabilities", async () => {
+    return {
+      coordinatorVersion: coordinatorVersion(),
+      protocolVersion,
+      minimumClientProtocol,
+      capabilities: [...coordinatorCapabilities],
+      serverTime: new Date().toISOString(),
+      authenticationMode: "host_token_or_owner_access_key",
     };
   });
 
@@ -836,6 +872,8 @@ export async function registerRoutes(
       store.createInvite({
         groupId: params.groupId,
         accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
         expiresInSeconds: body.expiresInSeconds,
         oneTime: body.oneTime,
       }),
@@ -852,6 +890,8 @@ export async function registerRoutes(
       store.listInvites({
         groupId: params.groupId,
         accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
       }),
     );
   });
@@ -866,6 +906,8 @@ export async function registerRoutes(
       store.revokeInvite({
         groupId: params.groupId,
         accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
         inviteId: body.inviteId,
       }),
     );
@@ -908,6 +950,62 @@ export async function registerRoutes(
     }
 
     return handleStoreCall(reply, () => store.updateHeartbeat(body));
+  });
+
+  app.get("/v1/groups/:groupId/whoami", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const auth = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!auth.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "host_auth_required",
+        message: "Host authentication headers are required",
+        issues: auth.error.issues,
+      });
+    }
+    return handleStoreCall(reply, () => store.whoami({ groupId: params.groupId, ...auth.data }));
+  });
+
+  app.get("/v1/groups/:groupId/lease/status", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const auth = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!auth.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "host_auth_required",
+        message: "Host authentication headers are required",
+        issues: auth.error.issues,
+      });
+    }
+    return handleStoreCall(reply, () => store.getHostLeaseStatus({ groupId: params.groupId, ...auth.data }));
+  });
+
+  app.post("/v1/groups/:groupId/lease/ensure-active", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    const body = parseBody(leaseEnsureSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    if (params.groupId !== body.groupId) {
+      return reply.code(400).send({
+        error: "Bad Request",
+        code: "group_mismatch",
+        message: "Request groupId must match route groupId",
+      });
+    }
+    return handleStoreCall(reply, () => store.ensureActiveLease(body));
   });
 
   app.post("/v1/groups/:groupId/election/run", async (request, reply) => {
@@ -1553,6 +1651,8 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
 
 function statusText(statusCode: number): string {
   switch (statusCode) {
+    case 400:
+      return "Bad Request";
     case 401:
       return "Unauthorized";
     case 403:

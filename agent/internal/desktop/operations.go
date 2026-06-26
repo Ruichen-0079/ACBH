@@ -495,6 +495,14 @@ func CanPush(ctx context.Context, opts Options) (CanPushResult, error) {
 		result.Reason = "当前本地主机不是 current host，不能上传同步制品 push。"
 		return result, nil
 	}
+	if lease, leaseErr := client.GetLeaseStatus(ctx, coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}); leaseErr == nil {
+		result.CurrentHostGeneration = lease.Generation
+		if !lease.LeaseValid {
+			result.Reason = "当前 Host lease 已过期，不能上传同步制品 push。"
+			result.NextStep = "请先重新申请主机资格或等待桌面端自动续租。"
+			return result, nil
+		}
+	}
 	result.CanPush = true
 	result.Reason = "当前本地主机是 current host，可以上传同步制品 push。"
 	result.NextStep = "可以点击上传同步制品 push。"
