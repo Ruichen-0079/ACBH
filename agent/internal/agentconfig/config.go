@@ -33,11 +33,16 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Dir          string `json:"dir,omitempty"`
-	Command      string `json:"command,omitempty"`
-	LogDir       string `json:"logDir,omitempty"`
-	StopTimeout  string `json:"stopTimeout,omitempty"`
-	StartTimeout string `json:"startTimeout,omitempty"`
+	Dir          string   `json:"dir,omitempty"`
+	LaunchType   string   `json:"launchType,omitempty"`
+	LaunchPath   string   `json:"launchPath,omitempty"`
+	Command      string   `json:"command,omitempty"`
+	JavaPath     string   `json:"javaPath,omitempty"`
+	WorkingDir   string   `json:"workingDir,omitempty"`
+	StartArgs    []string `json:"startArgs,omitempty"`
+	LogDir       string   `json:"logDir,omitempty"`
+	StopTimeout  string   `json:"stopTimeout,omitempty"`
+	StartTimeout string   `json:"startTimeout,omitempty"`
 }
 
 func (s ServerConfig) ResolvedStartTimeout() (time.Duration, error) {

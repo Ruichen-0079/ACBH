@@ -46,7 +46,9 @@ const bootstrapPackageDefinitions = [
 const protocolVersion = 2;
 const minimumClientProtocol = 1;
 const coordinatorCapabilities = [
+  "capabilities_v1",
   "desktop_protocol_v2",
+  "group_whoami_v1",
   "world_backup_v1",
   "world_backup_resume",
   "invite_management_v1",
@@ -950,6 +952,56 @@ export async function registerRoutes(
     }
 
     return handleStoreCall(reply, () => store.updateHeartbeat(body));
+  });
+
+  app.get("/v1/groups/:groupId/members", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const auth = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!auth.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "host_auth_required",
+        message: "Host authentication headers are required",
+        issues: auth.error.issues,
+      });
+    }
+    return handleStoreCall(reply, () => {
+      store.verifyHost({ groupId: params.groupId, ...auth.data });
+      const state = store.getGroupState(params.groupId);
+      const hostByMember = new Map(state.hosts.map((host) => [host.memberId, host]));
+      const currentHostID = state.currentHostId ?? null;
+      const members = state.members.map((member) => {
+        const host = hostByMember.get(member.memberId);
+        const isCurrentHost = currentHostID !== null && host?.hostId === currentHostID;
+        return {
+          memberId: member.memberId,
+          displayName: member.displayName,
+          role: member.role,
+          hostId: host?.hostId ?? "",
+          deviceName: host?.deviceName ?? "",
+          platform: host?.platform ?? "",
+          status: host?.status ?? "",
+          isLocal: host?.hostId === auth.data.hostId,
+          isCurrentHost,
+          lastHeartbeatAt: host?.lastHeartbeatAt ?? null,
+          leaseValid: isCurrentHost,
+          leaseRemaining: 0,
+          createdAt: member.createdAt,
+        };
+      });
+      return {
+        groupId: state.groupId,
+        groupName: state.name,
+        currentHostId: currentHostID,
+        members,
+      };
+    });
   });
 
   app.get("/v1/groups/:groupId/whoami", async (request, reply) => {

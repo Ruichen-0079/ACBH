@@ -184,10 +184,17 @@ func publishWorldSnapshot(ctx context.Context, opts Options, wb WorldBackupOptio
 	if err != nil {
 		return WorldBackupCreateResult{}, fmt.Errorf("cannot verify current host state before publishing world snapshot: %w", err)
 	}
+	gate, gateErr := ProbeCoordinatorCapabilities(ctx, cfg.CoordinatorURL)
+	if gateErr != nil && !coordinator.IsCoordinatorVersionMismatch(gateErr) {
+		return WorldBackupCreateResult{}, gateErr
+	}
+	if !gate.BackupUploadEnabled {
+		return WorldBackupCreateResult{}, unsupportedCapabilityError("lease_renew_v1")
+	}
 	if status.CurrentHostID == nil || *status.CurrentHostID != cfg.HostID {
-		ensured, ensureErr := client.EnsureActiveLease(ctx, auth, nil)
+		ensured, ensureErr := ensureActiveLeaseIfSupported(ctx, client, auth, nil, &gate)
 		if ensureErr != nil {
-			return WorldBackupCreateResult{}, fmt.Errorf("ensure_active_lease_failed: %w", ensureErr)
+			return WorldBackupCreateResult{}, ensureErr
 		}
 		if !ensured.Lease.LeaseValid {
 			return WorldBackupCreateResult{}, errors.New("lease_expired: active host lease is required before publishing world snapshots")
@@ -197,9 +204,9 @@ func publishWorldSnapshot(ctx context.Context, opts Options, wb WorldBackupOptio
 		status.CurrentHostID = &cfg.HostID
 	}
 	generation := status.CurrentHostGeneration
-	ensured, err := client.EnsureActiveLease(ctx, auth, &generation)
+	ensured, err := ensureActiveLeaseIfSupported(ctx, client, auth, &generation, &gate)
 	if err != nil {
-		return WorldBackupCreateResult{}, fmt.Errorf("ensure_active_lease_failed: %w", err)
+		return WorldBackupCreateResult{}, err
 	}
 	if !ensured.Lease.LeaseValid {
 		return WorldBackupCreateResult{}, errors.New("lease_expired: active host lease is required before publishing world snapshots")

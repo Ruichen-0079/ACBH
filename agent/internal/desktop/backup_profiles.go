@@ -715,7 +715,14 @@ func BackupProfileCreate(ctx context.Context, opts Options, profileID string) (W
 	if err != nil {
 		return WorldBackupCreateResult{}, err
 	}
-	ensured, err := client.EnsureActiveLease(ctx, auth, nil)
+	gate, gateErr := ProbeCoordinatorCapabilities(ctx, cfg.CoordinatorURL)
+	if gateErr != nil && !coordinator.IsCoordinatorVersionMismatch(gateErr) {
+		return WorldBackupCreateResult{}, gateErr
+	}
+	if !gate.BackupUploadEnabled {
+		return WorldBackupCreateResult{}, unsupportedCapabilityError("lease_renew_v1")
+	}
+	ensured, err := ensureActiveLeaseIfSupported(ctx, client, auth, nil, &gate)
 	if err != nil {
 		return WorldBackupCreateResult{}, err
 	}
