@@ -443,12 +443,7 @@ func pickerHandler(kind string) http.HandlerFunc {
 			methodNotAllowed(w)
 			return
 		}
-		var body struct {
-			Title  string   `json:"title"`
-			Filter string   `json:"filter"`
-			Path   string   `json:"path"`
-			Paths  []string `json:"paths"`
-		}
+		var body PickerRequest
 		if !decodeBody(w, r, &body) {
 			return
 		}
@@ -456,23 +451,24 @@ func pickerHandler(kind string) http.HandlerFunc {
 			writeJSON(w, map[string]any{"ok": true, "kind": kind, "path": body.Path, "paths": body.Paths})
 			return
 		}
+		filter := pickerFilterFromRequest(body)
 		switch kind {
 		case "folder":
-			path, err := PickFolder(body.Title)
+			path, err := PickFolderIn(body.Title, body.InitialDir)
 			if err != nil {
 				writeJSON(w, map[string]any{"ok": false, "errorCode": pickerErrorCode(err), "message": err.Error()})
 				return
 			}
 			writeJSON(w, map[string]any{"ok": true, "kind": kind, "path": path})
 		case "file":
-			path, err := PickFile(body.Title, body.Filter)
+			path, err := PickFileIn(body.Title, filter, body.InitialDir)
 			if err != nil {
 				writeJSON(w, map[string]any{"ok": false, "errorCode": pickerErrorCode(err), "message": err.Error()})
 				return
 			}
 			writeJSON(w, map[string]any{"ok": true, "kind": kind, "path": path})
 		case "files":
-			paths, err := PickFiles(body.Title, body.Filter)
+			paths, err := PickFilesIn(body.Title, filter, body.InitialDir)
 			if err != nil {
 				writeJSON(w, map[string]any{"ok": false, "errorCode": pickerErrorCode(err), "message": err.Error()})
 				return
