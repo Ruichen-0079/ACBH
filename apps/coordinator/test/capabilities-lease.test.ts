@@ -21,6 +21,29 @@ test("capabilities and health expose alpha3 protocol metadata", async () => {
   }
 });
 
+test("members endpoint returns group members for authenticated host", async () => {
+  const app = await buildApp({ logger: false });
+  try {
+    const owner = await createRegisteredHost(app, "Owner");
+    const members = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${owner.groupId}/members`,
+      headers: {
+        "x-acbh-host-id": owner.hostId,
+        "x-acbh-host-token": owner.hostToken,
+      },
+    });
+    assert.equal(members.statusCode, 200, members.body);
+    const body = members.json<{ groupName: string; members: Array<{ role: string; isLocal: boolean }> }>();
+    assert.equal(body.groupName, "Alpha3");
+    assert.equal(body.members.length >= 1, true);
+    assert.equal(body.members[0]?.role, "owner");
+    assert.equal(body.members[0]?.isLocal, true);
+  } finally {
+    await app.close();
+  }
+});
+
 test("whoami and ensure-active lease use authenticated host identity", async () => {
   const app = await buildApp({ logger: false });
   try {

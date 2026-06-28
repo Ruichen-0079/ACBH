@@ -178,6 +178,29 @@ type WhoAmIResponse struct {
 	Lease          HostLeaseStatus `json:"lease"`
 }
 
+type GroupMemberInfo struct {
+	MemberID    string  `json:"memberId"`
+	DisplayName string  `json:"displayName"`
+	Role        string  `json:"role"`
+	HostID      string  `json:"hostId,omitempty"`
+	DeviceName  string  `json:"deviceName,omitempty"`
+	Platform    string  `json:"platform,omitempty"`
+	Status      string  `json:"status,omitempty"`
+	IsLocal     bool    `json:"isLocal"`
+	IsCurrentHost bool  `json:"isCurrentHost"`
+	LastHeartbeatAt *string `json:"lastHeartbeatAt,omitempty"`
+	LeaseValid  bool    `json:"leaseValid"`
+	LeaseRemaining int64 `json:"leaseRemaining,omitempty"`
+	CreatedAt   string  `json:"createdAt,omitempty"`
+}
+
+type ListGroupMembersResponse struct {
+	GroupID       string            `json:"groupId"`
+	GroupName     string            `json:"groupName"`
+	CurrentHostID *string           `json:"currentHostId,omitempty"`
+	Members       []GroupMemberInfo `json:"members"`
+}
+
 type HostLeaseStatus struct {
 	GroupID              string `json:"groupId"`
 	HostID               string `json:"hostId"`
@@ -434,6 +457,35 @@ func IsAPIErrorCode(err error, code string) bool {
 	return errors.As(err, &apiErr) && apiErr.Code == code
 }
 
+func IsRouteNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.Code == "route_not_found")
+}
+
+func IsUnsupportedCapability(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == "unsupported_capability" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unsupported_capability")
+}
+
+func IsCoordinatorVersionMismatch(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == "coordinator_version_mismatch" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "coordinator_version_mismatch")
+}
+
+func IsCoordinatorCapabilityRouteMissing(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) && apiErr.Code == "coordinator_capability_route_missing" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "coordinator_capability_route_missing")
+}
+
 func NewClient(baseURL string) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.Parse(baseURL)
@@ -538,6 +590,12 @@ func (c *Client) SendHeartbeat(ctx context.Context, req HeartbeatRequest) (Heart
 func (c *Client) WhoAmI(ctx context.Context, auth ArtifactAuth) (WhoAmIResponse, error) {
 	var out WhoAmIResponse
 	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/whoami", auth, &out)
+	return out, err
+}
+
+func (c *Client) ListGroupMembers(ctx context.Context, auth ArtifactAuth) (ListGroupMembersResponse, error) {
+	var out ListGroupMembersResponse
+	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/members", auth, &out)
 	return out, err
 }
 
@@ -1074,16 +1132,32 @@ func (c *Client) get(ctx context.Context, path string, auth ArtifactAuth, out an
 
 func responseError(statusCode int, body []byte) error {
 	var apiErr apiError
-	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
-		return &APIError{StatusCode: statusCode, Code: apiErr.Code, Message: apiErr.Message, Body: string(body)}
+	if err := json.Unmarshal(body, &apiErr); err == nil && (apiErr.Message != "" || apiErr.Error != "") {
+		code := apiErr.Code
+		if code == "" && statusCode == http.StatusNotFound {
+			code = "route_not_found"
+		}
+		message := apiErr.Message
+		if message == "" {
+			message = apiErr.Error
+		}
+		return &APIError{StatusCode: statusCode, Code: code, Message: message, Body: string(body)}
 	}
 
 	text := strings.TrimSpace(string(body))
 	if text == "" {
-		return &APIError{StatusCode: statusCode}
+		code := ""
+		if statusCode == http.StatusNotFound {
+			code = "route_not_found"
+		}
+		return &APIError{StatusCode: statusCode, Code: code}
 	}
 
-	return &APIError{StatusCode: statusCode, Message: text, Body: text}
+	code := ""
+	if statusCode == http.StatusNotFound {
+		code = "route_not_found"
+	}
+	return &APIError{StatusCode: statusCode, Code: code, Message: text, Body: text}
 }
 
 func ValidStatus(status string) bool {

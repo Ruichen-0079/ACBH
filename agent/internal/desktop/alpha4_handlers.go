@@ -23,7 +23,17 @@ func registerAlpha4Endpoints(register routeRegistrar, manager *OperationManager,
 			if cfg, err := agentconfig.Load(filepath.Join(withDefaults(opts).AppDataDir, agentconfig.FileName)); err == nil {
 				agentCfg = &cfg
 			}
-			writeJSON(w, map[string]any{"desktop": desktopCfg, "setup": setup, "agent": agentCfg, "version": agentconfig.AgentVersion})
+			serverPayload, _ := LoadServerConfigPayload(opts)
+			gate := CoordinatorFeatureGate{}
+			if agentCfg != nil && strings.TrimSpace(agentCfg.CoordinatorURL) != "" {
+				if probed, err := ProbeCoordinatorCapabilities(r.Context(), agentCfg.CoordinatorURL); err == nil || coordinator.IsCoordinatorVersionMismatch(err) {
+					gate = probed
+				}
+			}
+			writeJSON(w, map[string]any{
+				"desktop": desktopCfg, "setup": setup, "agent": agentCfg, "server": serverPayload,
+				"featureGate": gate, "version": agentconfig.AgentVersion,
+			})
 		default:
 			methodNotAllowed(w)
 		}
@@ -64,6 +74,32 @@ func registerAlpha4Endpoints(register routeRegistrar, manager *OperationManager,
 			return TestNetworkConfig(ctx, opts, body.Host, body.CoordinatorPort, body.PublicGamePort)
 		})
 	})
+	register("/api/group/current", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		out, err := CurrentGroupStatus(r.Context(), opts)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"ok": false, "errorCode": "group_status_failed", "message": err.Error()})
+			return
+		}
+		writeJSON(w, out)
+	})
+	register("/api/group/members", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		out, err := ListCurrentGroupMembers(r.Context(), opts)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"ok": false, "errorCode": "members_failed", "message": err.Error()})
+			return
+		}
+		writeJSON(w, out)
+	})
 	register("/api/group/create", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
@@ -73,11 +109,16 @@ func registerAlpha4Endpoints(register routeRegistrar, manager *OperationManager,
 			GroupName      string `json:"groupName"`
 			DisplayName    string `json:"displayName"`
 			CoordinatorURL string `json:"coordinatorUrl"`
+			RequestID      string `json:"requestId"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
 		}
-		startAndWrite(w, r, manager, OperationOptions{Name: "CreateGroup", MutexClass: "config", Timeout: 60 * time.Second}, func(ctx OperationContext) (any, error) {
+		idem := firstNonEmpty(body.RequestID, r.Header.Get("Idempotency-Key"))
+		startAndWrite(w, r, manager, OperationOptions{Name: "CreateGroup", MutexClass: "config", Timeout: 60 * time.Second, IdempotencyKey: idem}, func(ctx OperationContext) (any, error) {
+			if err := guardGroupMutation(opts, "create"); err != nil {
+				return SetupGroupResult{OK: false, State: StateError, ErrorCode: "group_already_configured", Message: err.Error()}, nil
+			}
 			return SetupCreateGroup(ctx, opts, body.GroupName, body.DisplayName, body.CoordinatorURL)
 		})
 	})
@@ -90,12 +131,26 @@ func registerAlpha4Endpoints(register routeRegistrar, manager *OperationManager,
 			InviteCode     string `json:"inviteCode"`
 			DisplayName    string `json:"displayName"`
 			CoordinatorURL string `json:"coordinatorUrl"`
+			RequestID      string `json:"requestId"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
 		}
-		startAndWrite(w, r, manager, OperationOptions{Name: "JoinGroup", MutexClass: "config", Timeout: 60 * time.Second}, func(ctx OperationContext) (any, error) {
+		idem := firstNonEmpty(body.RequestID, r.Header.Get("Idempotency-Key"))
+		startAndWrite(w, r, manager, OperationOptions{Name: "JoinGroup", MutexClass: "config", Timeout: 60 * time.Second, IdempotencyKey: idem}, func(ctx OperationContext) (any, error) {
+			if err := guardGroupMutation(opts, "join"); err != nil {
+				return SetupGroupResult{OK: false, State: StateError, ErrorCode: "group_already_configured", Message: err.Error()}, nil
+			}
 			return SetupJoinGroup(ctx, opts, body.InviteCode, body.DisplayName, body.CoordinatorURL)
+		})
+	})
+	register("/api/group/reset-local", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		startAndWrite(w, r, manager, OperationOptions{Name: "ResetLocalGroup", MutexClass: "config", Timeout: 30 * time.Second}, func(ctx OperationContext) (any, error) {
+			return ResetLocalGroup(opts)
 		})
 	})
 	register("/api/group/whoami", func(w http.ResponseWriter, r *http.Request) {
@@ -175,17 +230,26 @@ func registerAlpha4Endpoints(register routeRegistrar, manager *OperationManager,
 		})
 	})
 	register("/api/config/server", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut {
+		switch r.Method {
+		case http.MethodGet:
+			payload, err := LoadServerConfigPayload(opts)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				writeJSON(w, map[string]any{"ok": false, "message": err.Error()})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "server": payload})
+		case http.MethodPut:
+			var body ServerConfigPayload
+			if !decodeBody(w, r, &body) {
+				return
+			}
+			startAndWrite(w, r, manager, OperationOptions{Name: "SaveServerConfig", MutexClass: "config", Timeout: 30 * time.Second}, func(ctx OperationContext) (any, error) {
+				return SaveServerConfigValidated(opts, body, ctx.TraceID)
+			})
+		default:
 			methodNotAllowed(w)
-			return
 		}
-		var body agentconfig.ServerConfig
-		if !decodeBody(w, r, &body) {
-			return
-		}
-		startAndWrite(w, r, manager, OperationOptions{Name: "SaveServerConfig", MutexClass: "config", Timeout: 30 * time.Second}, func(ctx OperationContext) (any, error) {
-			return SaveServerConfig(opts, body)
-		})
 	})
 	register("/api/server/preflight", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -196,9 +260,9 @@ func registerAlpha4Endpoints(register routeRegistrar, manager *OperationManager,
 			return ServerPreflight(opts)
 		})
 	})
-	register("/api/picker/folder", pickerUnsupported("folder"))
-	register("/api/picker/files", pickerUnsupported("files"))
-	register("/api/picker/file", pickerUnsupported("file"))
+	register("/api/picker/folder", pickerHandler("folder"))
+	register("/api/picker/files", pickerHandler("files"))
+	register("/api/picker/file", pickerHandler("file"))
 	registerBackupTopLevelEndpoints(register, manager, opts)
 	register("/api/backup/profiles", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -373,15 +437,17 @@ func ServerPreflight(opts Options) (InspectServerSetupResult, error) {
 	return InspectServerForSetup(opts, cfg.Server.Dir)
 }
 
-func pickerUnsupported(kind string) http.HandlerFunc {
+func pickerHandler(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w)
 			return
 		}
 		var body struct {
-			Path  string   `json:"path"`
-			Paths []string `json:"paths"`
+			Title  string   `json:"title"`
+			Filter string   `json:"filter"`
+			Path   string   `json:"path"`
+			Paths  []string `json:"paths"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
@@ -390,8 +456,42 @@ func pickerUnsupported(kind string) http.HandlerFunc {
 			writeJSON(w, map[string]any{"ok": true, "kind": kind, "path": body.Path, "paths": body.Paths})
 			return
 		}
-		writeJSON(w, map[string]any{"ok": false, "errorCode": "native_picker_unavailable", "message": "当前 Go runtime 未启用原生文件选择器；请手动粘贴路径。"})
+		switch kind {
+		case "folder":
+			path, err := PickFolder(body.Title)
+			if err != nil {
+				writeJSON(w, map[string]any{"ok": false, "errorCode": pickerErrorCode(err), "message": err.Error()})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "kind": kind, "path": path})
+		case "file":
+			path, err := PickFile(body.Title, body.Filter)
+			if err != nil {
+				writeJSON(w, map[string]any{"ok": false, "errorCode": pickerErrorCode(err), "message": err.Error()})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "kind": kind, "path": path})
+		case "files":
+			paths, err := PickFiles(body.Title, body.Filter)
+			if err != nil {
+				writeJSON(w, map[string]any{"ok": false, "errorCode": pickerErrorCode(err), "message": err.Error()})
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "kind": kind, "paths": paths})
+		default:
+			http.NotFound(w, r)
+		}
 	}
+}
+
+func pickerErrorCode(err error) string {
+	if !pickerAvailable() {
+		return "native_picker_unavailable"
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "cancel") {
+		return "picker_cancelled"
+	}
+	return "picker_failed"
 }
 
 func parseProfileRoute(raw string) (string, string, bool) {

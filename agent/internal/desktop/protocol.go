@@ -36,14 +36,24 @@ type Envelope struct {
 }
 
 func SuccessEnvelope(traceID string, startedAt time.Time, data any) Envelope {
-	warnings := extractStringSliceField(data, "Warnings")
+	warnings := sanitizeWarningMessages(extractStringSliceField(data, "Warnings"))
 	outcome := OutcomeSuccess
 	if len(warnings) > 0 {
 		outcome = OutcomeSuccessWithWarnings
 	}
+	if explicitOutcome, ok := extractOutcomeField(data); ok {
+		outcome = explicitOutcome
+	}
+	ok := true
+	if value, hasOK := extractBoolField(data, "OK"); hasOK {
+		ok = value
+	}
+	if outcome == OutcomeFailure || outcome == OutcomePartialFailure || outcome == OutcomeCancelled || outcome == OutcomeTimedOut {
+		ok = false
+	}
 	return Envelope{
 		SchemaVersion: DesktopProtocolVersion,
-		OK:            true,
+		OK:            ok,
 		Outcome:       outcome,
 		Message:       extractStringField(data, "Message"),
 		Warnings:      warnings,
@@ -79,6 +89,31 @@ func envelopeFromResult(traceID string, startedAt time.Time, data any, err error
 	if err != nil {
 		return FailureEnvelope(traceID, startedAt, OutcomeFailure, inferErrorCode(err), err)
 	}
+	if explicitOutcome, hasOutcome := extractOutcomeField(data); hasOutcome {
+		ok, hasOK := extractBoolField(data, "OK")
+		if !hasOK {
+			ok = explicitOutcome == OutcomeSuccess || explicitOutcome == OutcomeSuccessWithWarnings
+		}
+		env := Envelope{
+			SchemaVersion: DesktopProtocolVersion,
+			OK:            ok,
+			Outcome:       explicitOutcome,
+			ErrorCode:     extractStringField(data, "ErrorCode"),
+			Message:       extractStringField(data, "Message"),
+			Warnings:      sanitizeWarningMessages(extractStringSliceField(data, "Warnings")),
+			Data:          data,
+			TraceID:       traceID,
+			StartedAt:     startedAt,
+			CompletedAt:   time.Now().UTC(),
+		}
+		if env.Outcome == OutcomeFailure || env.Outcome == OutcomePartialFailure || env.Outcome == OutcomeCancelled || env.Outcome == OutcomeTimedOut {
+			env.OK = false
+		}
+		if env.Outcome == OutcomeSuccess || env.Outcome == OutcomeSuccessWithWarnings {
+			env.OK = true
+		}
+		return env
+	}
 	ok, hasOK := extractBoolField(data, "OK")
 	if hasOK && !ok {
 		code := extractStringField(data, "ErrorCode")
@@ -95,7 +130,7 @@ func envelopeFromResult(traceID string, startedAt time.Time, data any, err error
 			Outcome:       OutcomeFailure,
 			ErrorCode:     code,
 			Message:       msg,
-			Warnings:      extractStringSliceField(data, "Warnings"),
+			Warnings:      sanitizeWarningMessages(extractStringSliceField(data, "Warnings")),
 			Data:          data,
 			TraceID:       traceID,
 			StartedAt:     startedAt,
@@ -115,6 +150,12 @@ func inferErrorCode(err error) string {
 		return "cancelled"
 	case strings.Contains(text, "deadline exceeded"), strings.Contains(text, "timed out"), strings.Contains(text, "timeout"):
 		return "timed_out"
+	case strings.Contains(text, "coordinator_capability_route_missing"):
+		return "coordinator_capability_route_missing"
+	case strings.Contains(text, "coordinator_version_mismatch"):
+		return "coordinator_version_mismatch"
+	case strings.Contains(text, "route_not_found"), strings.Contains(text, "(404"):
+		return "route_not_found"
 	case strings.Contains(text, "unsupported_capability"):
 		return "unsupported_capability"
 	case strings.Contains(text, "identity_mismatch"):
@@ -124,6 +165,48 @@ func inferErrorCode(err error) string {
 	default:
 		return "operation_failed"
 	}
+}
+
+func extractOutcomeField(data any) (OperationOutcome, bool) {
+	if data == nil {
+		return "", false
+	}
+	v := reflect.Indirect(reflect.ValueOf(data))
+	if !v.IsValid() || v.Kind() != reflect.Struct {
+		return "", false
+	}
+	f := v.FieldByName("Outcome")
+	if !f.IsValid() || f.Kind() != reflect.String {
+		return "", false
+	}
+	outcome := OperationOutcome(f.String())
+	if outcome == "" {
+		return "", false
+	}
+	return outcome, true
+}
+
+func sanitizeWarningMessages(warnings []string) []string {
+	if len(warnings) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(warnings))
+	for _, warning := range warnings {
+		warning = strings.TrimSpace(warning)
+		if warning == "" {
+			continue
+		}
+		lower := strings.ToLower(warning)
+		if strings.Contains(lower, `"outcome":"failure"`) || strings.Contains(lower, `"outcome": "failure"`) {
+			continue
+		}
+		if strings.Contains(lower, "operation_failed") && strings.Contains(lower, "404") {
+			out = append(out, leaseUpgradeMessage())
+			continue
+		}
+		out = append(out, warning)
+	}
+	return out
 }
 
 func extractStringField(data any, name string) string {
