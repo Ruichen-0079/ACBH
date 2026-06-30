@@ -2,6 +2,36 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildApp } from "../src/app.js";
 
+test("capabilities expose full alpha6 capability set", async () => {
+  const app = await buildApp({ logger: false });
+  try {
+    const caps = await app.inject({ method: "GET", url: "/v1/capabilities" });
+    assert.equal(caps.statusCode, 200);
+    const body = caps.json<{
+      protocolVersion: number;
+      capabilities: string[];
+      authenticationMode: string;
+    }>();
+    assert.equal(body.protocolVersion, 2);
+    assert.equal(body.authenticationMode, "host_token_or_owner_access_key");
+    for (const capability of [
+      "capabilities_v1",
+      "desktop_protocol_v2",
+      "world_backup_resume",
+      "public_relay_v1",
+      "bootstrap_packages_v1",
+      "invite_management_v1",
+      "lease_renew_v1",
+      "world_backup_v1",
+      "group_whoami_v1",
+    ]) {
+      assert.equal(body.capabilities.includes(capability), true, `missing capability ${capability}`);
+    }
+  } finally {
+    await app.close();
+  }
+});
+
 test("capabilities and health expose alpha3 protocol metadata", async () => {
   const app = await buildApp({ logger: false });
   try {

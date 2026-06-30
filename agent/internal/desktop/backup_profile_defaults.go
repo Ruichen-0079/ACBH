@@ -144,6 +144,7 @@ func BackupProfileSummaryForServer(opts Options, serverDir string) (map[string]a
 		"ok": true, "serverDir": abs, "worldPath": ensure.WorldPath, "levelName": ensure.LevelName,
 		"worldPending": ensure.WorldPending, "profileId": ensure.Profile.ProfileID,
 		"profileName": ensure.Profile.Name, "preset": ensure.Profile.Preset,
+		"excludeGlobs": ensure.Profile.ExcludeGlobs,
 		"message": ensure.Message, "created": ensure.Created, "migrated": ensure.Migrated,
 		"previousServerDir": ensure.PreviousDir, "roots": roots,
 	}, nil

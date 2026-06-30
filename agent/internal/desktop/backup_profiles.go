@@ -744,6 +744,8 @@ func BackupProfileCreate(ctx context.Context, opts Options, profileID string) (W
 		return WorldBackupCreateResult{}, errors.New("lease_expired: active host lease is required before publishing backup profiles")
 	}
 	generation := ensured.Lease.Generation
+	stopLeaseRenew := StartLeaseRenewLoop(ctx, client, auth, &generation, &gate, 0)
+	defer stopLeaseRenew()
 	progressContext(ctx, "scanning", "扫描备份文件", 0, 0)
 	files, roots, warnings, err := scanBackupProfileSources(profile)
 	if err != nil {
@@ -1247,24 +1249,98 @@ func safeProfileTarget(root, rel string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rootReal := rootAbs
-	if resolved, err := filepath.EvalSymlinks(rootAbs); err == nil {
-		rootReal = resolved
-	}
-	parentReal, err := resolveExistingParent(filepath.Dir(targetAbs))
-	if err != nil {
-		return "", err
-	}
-	if !underDesktopRoot(rootReal, parentReal) {
-		return "", fmt.Errorf("restore path %s escapes root through symlink", rel)
-	}
-	if resolved, err := filepath.EvalSymlinks(targetAbs); err == nil && !underDesktopRoot(rootReal, resolved) {
-		return "", fmt.Errorf("restore path %s escapes root through symlink", rel)
-	}
 	if !underDesktopRoot(rootAbs, targetAbs) {
 		return "", fmt.Errorf("restore path %s escapes root", rel)
 	}
+	if err := walkExistingProfileParentChain(rootAbs, targetAbs, rel); err != nil {
+		return "", err
+	}
 	return targetAbs, nil
+}
+
+func walkExistingProfileParentChain(rootAbs, targetAbs, rel string) error {
+	rootAbs = filepath.Clean(rootAbs)
+	targetAbs = filepath.Clean(targetAbs)
+	parent := filepath.Dir(targetAbs)
+	relativeParent, err := filepath.Rel(rootAbs, parent)
+	if err != nil {
+		return fmt.Errorf("restore path %s escapes root: %w", rel, err)
+	}
+	current := rootAbs
+	components := []string{}
+	if relativeParent != "." {
+		components = strings.Split(relativeParent, string(filepath.Separator))
+	}
+	for _, component := range components {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		if _, err := os.Lstat(current); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err := validateProfileRestorePathComponent(current, rootAbs, rel); err != nil {
+			return err
+		}
+	}
+	if relativeParent == "." {
+		if _, err := os.Lstat(rootAbs); err == nil {
+			if err := validateProfileRestorePathComponent(rootAbs, rootAbs, rel); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return validateExistingProfileTarget(targetAbs, rootAbs, rel)
+}
+
+func validateProfileRestorePathComponent(path, rootAbs, rel string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	reparsePoint, err := profilePathHasReparsePoint(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || reparsePoint {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("restore path %s escapes root through symlink", rel)
+		}
+		if !underDesktopRoot(rootAbs, resolved) {
+			return fmt.Errorf("restore path %s escapes root through symlink", rel)
+		}
+		return nil
+	}
+	if !underDesktopRoot(rootAbs, path) {
+		return fmt.Errorf("restore path %s escapes root", rel)
+	}
+	return nil
+}
+
+func validateExistingProfileTarget(targetAbs, rootAbs, rel string) error {
+	info, err := os.Lstat(targetAbs)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	reparsePoint, err := profilePathHasReparsePoint(targetAbs)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || reparsePoint {
+		return fmt.Errorf("restore path %s escapes root through symlink", rel)
+	}
+	if !underDesktopRoot(rootAbs, targetAbs) {
+		return fmt.Errorf("restore path %s escapes root", rel)
+	}
+	return nil
 }
 
 func underDesktopRoot(root, candidate string) bool {

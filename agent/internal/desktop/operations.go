@@ -97,10 +97,21 @@ type TakeoverStatus struct {
 }
 
 type ManagedServerState struct {
-	Running bool   `json:"running"`
-	Stale   bool   `json:"stale"`
-	Reason  string `json:"reason,omitempty"`
-	PID     int    `json:"pid,omitempty"`
+	Running       bool   `json:"running"`
+	Stale         bool   `json:"stale"`
+	Reason        string `json:"reason,omitempty"`
+	PID           int    `json:"pid,omitempty"`
+	LockPath      string `json:"lockPath,omitempty"`
+	SupervisorPID int    `json:"supervisorPid,omitempty"`
+	CommandLine   string `json:"commandLine,omitempty"`
+}
+
+type ManagedServerRepairResult struct {
+	OK           bool   `json:"ok"`
+	Repaired     bool   `json:"repaired"`
+	RemovedState bool   `json:"removedState"`
+	RemovedLock  bool   `json:"removedLock"`
+	Message      string `json:"message,omitempty"`
 }
 
 type StartServerResult struct {
@@ -587,15 +598,104 @@ func LatestManifest(opts Options) (ManifestInfo, error) {
 
 func ManagedServerStatus(opts Options) (ManagedServerState, error) {
 	opts = withDefaults(opts)
-	status, err := mcserver.GetStatus(filepath.Join(opts.AppDataDir, "runtime"))
+	runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+	status, err := mcserver.GetStatus(runtimeDir)
 	if err != nil {
 		return ManagedServerState{}, err
 	}
-	out := ManagedServerState{Running: status.Running, Stale: status.Stale, Reason: status.Reason}
+	out := ManagedServerState{
+		Running:  status.Running,
+		Stale:    status.Stale,
+		Reason:   status.Reason,
+		LockPath: mcserver.LockPath(runtimeDir),
+	}
 	if status.State.PID > 0 {
 		out.PID = status.State.PID
+		out.SupervisorPID = status.State.SupervisorPID
+		out.CommandLine = strings.TrimSpace(firstNonEmpty(status.State.Command, mcserver.DisplayCommand(status.State.CommandArgv)))
+	} else if status.Lock.PID > 0 {
+		out.PID = status.Lock.PID
 	}
 	return out, nil
+}
+
+func ManagedServerRepairState(opts Options) (ManagedServerRepairResult, error) {
+	opts = withDefaults(opts)
+	cfg, err := loadDesktopConfig(opts)
+	if err != nil {
+		return ManagedServerRepairResult{}, err
+	}
+	runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+	result, err := mcserver.RepairState(runtimeDir, cfg.Server.Dir)
+	if err != nil {
+		return ManagedServerRepairResult{}, err
+	}
+	out := ManagedServerRepairResult{
+		OK:           true,
+		Repaired:     result.Repaired,
+		RemovedState: result.RemovedState,
+		RemovedLock:  result.RemovedLock,
+	}
+	if result.Repaired {
+		out.Message = "服务器状态已修复。"
+	} else {
+		out.Message = "无需修复服务器状态。"
+	}
+	return out, nil
+}
+
+func DesktopServerStatus(opts Options) (map[string]any, error) {
+	managed, err := ManagedServerStatus(opts)
+	if err != nil {
+		return nil, err
+	}
+	opts = withDefaults(opts)
+	status, err := mcserver.GetStatus(filepath.Join(opts.AppDataDir, "runtime"))
+	if err != nil {
+		return nil, err
+	}
+	resp := map[string]any{
+		"ok": true, "running": managed.Running, "lockPath": managed.LockPath,
+	}
+	if managed.SupervisorPID > 0 {
+		resp["supervisorPid"] = managed.SupervisorPID
+	}
+	if managed.CommandLine != "" {
+		resp["commandLine"] = managed.CommandLine
+	}
+	if status.Running {
+		resp["state"] = map[string]any{
+			"pid": status.State.PID, "supervisorPid": status.State.SupervisorPID,
+			"status": status.State.Status, "serverDir": status.State.ServerDir,
+			"command": firstNonEmpty(status.State.Command, managed.CommandLine),
+			"startedAt": status.State.StartedAt, "stdoutLog": status.State.StdoutLog,
+			"stderrLog": status.State.StderrLog,
+		}
+		return resp, nil
+	}
+	if status.Stale {
+		resp["stale"] = true
+		resp["unknown"] = status.Unknown
+		resp["reason"] = status.Reason
+		if status.State.PID > 0 {
+			resp["state"] = map[string]any{
+				"pid": status.State.PID, "supervisorPid": status.State.SupervisorPID,
+				"status": status.State.Status, "serverDir": status.State.ServerDir,
+				"command": firstNonEmpty(status.State.Command, managed.CommandLine),
+			}
+		} else if status.Lock.PID > 0 {
+			resp["lock"] = map[string]any{
+				"pid": status.Lock.PID, "owner": status.Lock.Owner,
+				"serverDir": status.Lock.ServerDir, "createdAt": status.Lock.CreatedAt,
+			}
+		}
+		if managed.PID > 0 {
+			resp["pid"] = managed.PID
+		}
+		return resp, nil
+	}
+	resp["message"] = "server not running"
+	return resp, nil
 }
 
 func loadDesktopConfig(opts Options) (agentconfig.Config, error) {

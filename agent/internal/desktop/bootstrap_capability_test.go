@@ -61,6 +61,86 @@ func TestBootstrapSkipsLeaseWhenCapabilitiesMissing(t *testing.T) {
 	}
 }
 
+func TestBootstrapEnsuresActiveLeaseWhenInvalid(t *testing.T) {
+	ensureCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health", "/v1/capabilities":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true, "coordinatorVersion": "0.4.0-alpha6", "protocolVersion": 2,
+				"minimumClientProtocol": 2,
+				"capabilities": []string{"lease_renew_v1", "world_backup_v1"},
+				"serverTime": time.Now().UTC().Format(time.RFC3339Nano),
+			})
+		case "/v1/groups/grp_test/lease/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"groupId": "grp_test", "hostId": "host_test", "currentHostId": "host_test",
+				"currentHostIdMatches": true, "leaseValid": false, "leaseRemaining": 0,
+				"generation": 3, "serverTime": time.Now().UTC().Format(time.RFC3339Nano),
+				"heartbeatActive": false,
+			})
+		case "/v1/groups/grp_test/lease/ensure-active":
+			ensureCalled = true
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true, "renewed": true,
+				"lease": map[string]any{
+					"groupId": "grp_test", "hostId": "host_test", "currentHostId": "host_test",
+					"currentHostIdMatches": true, "leaseValid": true, "leaseRemaining": 25000,
+					"generation": 4, "serverTime": time.Now().UTC().Format(time.RFC3339Nano),
+					"heartbeatActive": true,
+				},
+				"message": "lease renewed",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	opts := Options{AppDataDir: t.TempDir()}
+	err := agentconfig.Save(filepath.Join(opts.AppDataDir, agentconfig.FileName), agentconfig.Config{
+		CoordinatorURL: server.URL,
+		GroupID:        "grp_test",
+		MemberID:       "mem_test",
+		HostID:         "host_test",
+		HostToken:      "token_test",
+		DisplayName:    "Tester",
+		DeviceName:     "PC",
+		Platform:       "windows",
+		AgentVersion:   agentconfig.AgentVersion,
+	})
+	if err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	result, err := RunBootstrap(OperationContext{Context: context.Background()}, opts)
+	if err != nil {
+		t.Fatalf("RunBootstrap() error = %v", err)
+	}
+	if !ensureCalled {
+		t.Fatal("expected ensure-active when lease status is invalid")
+	}
+	var leaseStep *BootstrapStep
+	for i := range result.Steps {
+		if result.Steps[i].Name == "RefreshLeaseStatus" {
+			leaseStep = &result.Steps[i]
+			break
+		}
+	}
+	if leaseStep == nil {
+		t.Fatalf("missing RefreshLeaseStatus step: %#v", result.Steps)
+	}
+	if leaseStep.State != BootstrapStepOK {
+		t.Fatalf("RefreshLeaseStatus state = %s, want ok: %#v", leaseStep.State, leaseStep)
+	}
+	if leaseStep.ErrorCode != "" {
+		t.Fatalf("RefreshLeaseStatus errorCode = %q, want empty", leaseStep.ErrorCode)
+	}
+	if result.Lease == nil || !result.Lease.LeaseValid || result.Lease.Generation != 4 {
+		t.Fatalf("lease = %#v, want renewed valid lease generation 4", result.Lease)
+	}
+}
+
 func TestBootstrapLeaseRouteMissingUsesCapabilityRouteMissing(t *testing.T) {
 	leaseStatusCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

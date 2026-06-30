@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 AGENT_DIR="$REPO_ROOT/agent"
-DIST_DIR="$REPO_ROOT/dist"
 
 VERSION="${VERSION:-$(git -C "$REPO_ROOT" describe --tags --always --dirty 2>/dev/null || echo "dev")}"
+DIST_DIR="$REPO_ROOT/dist/$VERSION"
 GOOS="${GOOS:-}"
 
 zip_dir() {

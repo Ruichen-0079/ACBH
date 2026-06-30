@@ -247,6 +247,21 @@ func RunBootstrap(ctx OperationContext, opts Options) (BootstrapResult, error) {
 		result.Lease = &lease
 		result.FeatureGate = &featureGate
 		if !lease.LeaseValid {
+			ensured, ensureErr := ensureActiveLeaseIfSupported(stepCtx, client, auth, nil, &featureGate)
+			if ensureErr != nil {
+				if coordinator.IsCoordinatorCapabilityRouteMissing(ensureErr) {
+					result.FeatureGate = &featureGate
+					return ensureErr.Error(), "coordinator_capability_route_missing", nil
+				}
+				return "", "lease_status_failed", ensureErr
+			}
+			result.Lease = &ensured.Lease
+			if ensured.Lease.LeaseValid {
+				if ensured.Renewed {
+					return "Host lease 已续期。", "", nil
+				}
+				return "Host lease 已恢复有效。", "", nil
+			}
 			return "Host lease 当前无效。", "lease_invalid", nil
 		}
 		return "Host lease 有效。", "", nil
