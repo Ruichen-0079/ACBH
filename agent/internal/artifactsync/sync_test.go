@@ -186,6 +186,38 @@ func TestPullWritesFilesUnderOutputDir(t *testing.T) {
 	}
 }
 
+func TestPullWritesTopLevelFileUnderOutputDir(t *testing.T) {
+	outputDir := t.TempDir()
+	content := []byte("server-port=25565\n")
+	m := testManifest(sha256Hex(content))
+	m.Files[0].Path = "server.properties"
+	m.Files[0].Size = int64(len(content))
+	m.Summary.TotalBytes = int64(len(content))
+	client := &fakeClient{
+		manifest: m,
+		objects: map[string][]byte{
+			sha256Hex(content): content,
+		},
+	}
+
+	got, err := Pull(context.Background(), PullOptions{
+		ArtifactKind: manifest.WorldSnapshot,
+		ArtifactID:   "snap_000001",
+		OutputDir:    outputDir,
+		Config:       testConfig(),
+		Client:       client,
+	})
+	if err != nil {
+		t.Fatalf("Pull() error = %v", err)
+	}
+	if got.WrittenFiles != 1 {
+		t.Fatalf("WrittenFiles = %d, want 1", got.WrittenFiles)
+	}
+	if data := readFile(t, outputDir, "server.properties"); string(data) != string(content) {
+		t.Fatalf("restored content = %q", string(data))
+	}
+}
+
 func TestPullRejectsTraversalAndAbsoluteManifestPaths(t *testing.T) {
 	for _, unsafePath := range []string{
 		"../evil",

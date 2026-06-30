@@ -82,6 +82,8 @@ func TestRunAcceptsPullsInOrderStartsHeartbeatsAndCompletes(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	wantCalls := []string{
+		"pull:server-pack:pack_1",
+		"pull:admin-state:admin_1",
 		"pull:world-snapshot:snap_1",
 		"start",
 		"heartbeat:hosting",
@@ -104,7 +106,7 @@ func TestRunFailsAssignmentOnPullOrStartFailure(t *testing.T) {
 		startErr   error
 		wantReason string
 	}{
-		{name: "pull", pullErr: errors.New("download failed"), wantReason: "pull-world-snapshot-failed"},
+		{name: "pull", pullErr: errors.New("download failed"), wantReason: "pull-server-pack-failed"},
 		{name: "start", startErr: errors.New("launch failed"), wantReason: "server-start-failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -118,12 +118,13 @@ func Run(ctx context.Context, opts RunOptions) (RunSummary, error) {
 		return summary, cause
 	}
 
-	kind := manifest.WorldSnapshot
-	artifactID := assignment.LatestArtifactsAtAssignment[string(kind)]
-	if artifactID == "" {
-		summary.Skipped = append(summary.Skipped, kind)
-		fmt.Fprintf(opts.Output, "Skipping %s: no assigned artifact.\n", kind)
-	} else {
+	for _, kind := range []manifest.ArtifactKind{manifest.ServerPack, manifest.AdminState, manifest.WorldSnapshot} {
+		artifactID := assignment.LatestArtifactsAtAssignment[string(kind)]
+		if artifactID == "" {
+			summary.Skipped = append(summary.Skipped, kind)
+			fmt.Fprintf(opts.Output, "Skipping %s: no assigned artifact.\n", kind)
+			continue
+		}
 		fmt.Fprintf(opts.Output, "Restoring %s %s\n", kind, artifactID)
 		if err := opts.Pull(ctx, kind, artifactID, opts.ServerDir, opts.ApplyDeletes); err != nil {
 			return fail("pull-"+string(kind)+"-failed", fmt.Errorf("pull %s: %w", kind, err))
@@ -152,10 +153,11 @@ func Run(ctx context.Context, opts RunOptions) (RunSummary, error) {
 }
 
 func printArtifactPlan(output io.Writer, artifacts map[string]string) {
-	kind := manifest.WorldSnapshot
-	if artifactID := artifacts[string(kind)]; artifactID != "" {
-		fmt.Fprintf(output, "Would restore %s %s\n", kind, artifactID)
-	} else {
-		fmt.Fprintf(output, "Would skip %s: no assigned artifact.\n", kind)
+	for _, kind := range []manifest.ArtifactKind{manifest.ServerPack, manifest.AdminState, manifest.WorldSnapshot} {
+		if artifactID := artifacts[string(kind)]; artifactID != "" {
+			fmt.Fprintf(output, "Would restore %s %s\n", kind, artifactID)
+		} else {
+			fmt.Fprintf(output, "Would skip %s: no assigned artifact.\n", kind)
+		}
 	}
 }

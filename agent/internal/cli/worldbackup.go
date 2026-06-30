@@ -241,14 +241,14 @@ func runWorldBackupCreate(ctx context.Context, cmd *cobra.Command, opts worldBac
 		return errors.New("not_current_host: only the current host may publish world snapshots")
 	}
 	generation := status.CurrentHostGeneration
-	snapshotID := opts.snapshotID
-	if snapshotID == "" {
-		snapshotID = "ws_" + time.Now().UTC().Format("20060102_150405")
+	if _, err := client.EnsureActiveLease(ctx, auth, &generation); err != nil {
+		return fmt.Errorf("renew host lease before world backup: %w", err)
 	}
+	ctx, stopLease := startWorldBackupLeaseKeeper(ctx, client, auth, &generation)
+	defer func() {
+		_ = stopLease()
+	}()
 	consistent := true
-	scanServerDir := serverDir
-	ignoreRulesDir := serverDir
-	var cleanupTxn func()
 	if opts.online {
 		rconPassword := strings.TrimSpace(opts.rconPassword)
 		if rconPassword == "" {
@@ -261,20 +261,19 @@ func runWorldBackupCreate(ctx context.Context, cmd *cobra.Command, opts worldBac
 			consistent = false
 		} else {
 			rconCfg := rcon.Config{Host: opts.rconHost, Port: opts.rconPort, Password: rconPassword, Timeout: opts.rconTimeout}
-			session, err := worldbackup.PrepareOnlineConsistentBackup(ctx, worldbackup.OnlineStagingOptions{
-				ServerDir:     serverDir,
-				AppDataDir:    appDataDir,
-				WorldRoots:    opts.worldRoots,
-				TransactionID: snapshotID,
-				RCON:          rconConfigRunner{cfg: rconCfg},
-			})
-			if err != nil {
-				return err
+			saveOn := false
+			defer func() {
+				if saveOn {
+					_, _ = rcon.Execute(context.Background(), rconCfg, "save-on")
+				}
+			}()
+			if _, err := rcon.Execute(ctx, rconCfg, "save-off"); err != nil {
+				return fmt.Errorf("RCON save-off failed: %w", err)
 			}
-			scanServerDir = session.StagingDir
-			ignoreRulesDir = serverDir
-			cleanupTxn = func() { _ = worldbackup.RemoveTransactionDir(appDataDir, session.TransactionID) }
-			defer cleanupTxn()
+			saveOn = true
+			if _, err := rcon.Execute(ctx, rconCfg, "save-all flush"); err != nil {
+				return fmt.Errorf("RCON save-all flush failed: %w", err)
+			}
 		}
 	}
 
@@ -282,10 +281,13 @@ func runWorldBackupCreate(ctx context.Context, cmd *cobra.Command, opts worldBac
 	if latest, err := client.GetLatestWorldBackup(ctx, auth, false); err == nil {
 		parent = &latest.Manifest
 	}
+	snapshotID := opts.snapshotID
+	if snapshotID == "" {
+		snapshotID = "ws_" + time.Now().UTC().Format("20060102_150405")
+	}
 	snapshot, err := worldbackup.BuildSnapshot(worldbackup.ScanOptions{
-		ServerDir:      scanServerDir,
+		ServerDir:      serverDir,
 		AppDataDir:     appDataDir,
-		IgnoreRulesDir: ignoreRulesDir,
 		WorldRoots:     opts.worldRoots,
 		SnapshotID:     snapshotID,
 		GroupID:        cfg.GroupID,
@@ -309,15 +311,37 @@ func runWorldBackupCreate(ctx context.Context, cmd *cobra.Command, opts worldBac
 		Objects:          snapshot.Plan.Objects,
 	})
 	if err != nil {
+		if leaseErr := stopLease(); leaseErr != nil && errors.Is(err, context.Canceled) {
+			return leaseErr
+		}
 		return err
 	}
-	bySHA := worldbackup.IndexChangedFilesBySHA(snapshot.Plan.ChangedFiles)
-	uploadFn := func(ctx context.Context, sha256 string, content io.Reader, size int64) error {
-		_, err := client.UploadWorldObjectStream(ctx, auth, sha256, content, size)
-		return err
+	bySHA := map[string]worldbackup.ChangedFile{}
+	for _, changed := range snapshot.Plan.ChangedFiles {
+		if _, ok := bySHA[changed.SHA256]; !ok {
+			bySHA[changed.SHA256] = changed
+		}
 	}
-	if err := worldbackup.UploadMissingObjects(ctx, uploadFn, planned.MissingObjects, bySHA); err != nil {
-		return err
+	for _, object := range planned.MissingObjects {
+		changed, ok := bySHA[object.SHA256]
+		if !ok {
+			return fmt.Errorf("coordinator requested unknown object %s", object.SHA256)
+		}
+		file, err := os.Open(changed.LocalPath)
+		if err != nil {
+			return fmt.Errorf("open changed file %s: %w", changed.Path, err)
+		}
+		_, uploadErr := client.UploadWorldObjectStream(ctx, auth, object.SHA256, file, object.Size)
+		closeErr := file.Close()
+		if uploadErr != nil {
+			if leaseErr := stopLease(); leaseErr != nil && errors.Is(uploadErr, context.Canceled) {
+				return leaseErr
+			}
+			return uploadErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
 	}
 	commit, err := client.CommitWorldBackup(ctx, cfg.GroupID, coordinator.WorldBackupCommitRequest{
 		HostID:         cfg.HostID,
@@ -326,7 +350,16 @@ func runWorldBackupCreate(ctx context.Context, cmd *cobra.Command, opts worldBac
 		Manifest:       snapshot.Manifest,
 	})
 	if err != nil {
+		if leaseErr := stopLease(); leaseErr != nil && errors.Is(err, context.Canceled) {
+			return leaseErr
+		}
 		return err
+	}
+	if _, err := client.EnsureActiveLease(ctx, auth, &generation); err != nil {
+		return fmt.Errorf("renew host lease after world backup: %w", err)
+	}
+	if leaseErr := stopLease(); leaseErr != nil {
+		return leaseErr
 	}
 	if err := worldbackup.SaveIndexAtomic(appDataDir, snapshot.Index); err != nil {
 		return err
@@ -374,6 +407,13 @@ func runWorldBackupRestore(ctx context.Context, cmd *cobra.Command, opts worldBa
 	if strings.TrimSpace(serverDir) == "" {
 		return errors.New("server directory is required; pass --server-dir or configure server.dir")
 	}
+	ctx, stopLease, leaseStartErr := startWorldBackupRestoreLeaseKeeper(ctx, client, auth)
+	if leaseStartErr != nil {
+		return leaseStartErr
+	}
+	defer func() {
+		_ = stopLease()
+	}()
 	var remote coordinator.WorldBackupManifestResponse
 	if snapshotID == "latest" {
 		remote, err = client.GetLatestWorldBackup(ctx, auth, opts.consistentOnly)
@@ -397,9 +437,65 @@ func runWorldBackupRestore(ctx context.Context, cmd *cobra.Command, opts worldBa
 		ConsistentOnly: opts.consistentOnly,
 	})
 	if err != nil {
+		if leaseErr := stopLease(); leaseErr != nil && errors.Is(err, context.Canceled) {
+			return leaseErr
+		}
 		return err
 	}
+	if leaseErr := stopLease(); leaseErr != nil {
+		return leaseErr
+	}
 	return printJSON(cmd, summary)
+}
+
+func startWorldBackupRestoreLeaseKeeper(ctx context.Context, client *coordinator.Client, auth coordinator.ArtifactAuth) (context.Context, func() error, error) {
+	status, err := client.GetLeaseStatus(ctx, auth)
+	if err != nil || !status.CurrentHostIDMatches {
+		return ctx, func() error { return nil }, nil
+	}
+	generation := status.Generation
+	if _, err := client.EnsureActiveLease(ctx, auth, &generation); err != nil {
+		return ctx, func() error { return nil }, fmt.Errorf("renew host lease before world backup restore: %w", err)
+	}
+	leaseCtx, stop := startWorldBackupLeaseKeeper(ctx, client, auth, &generation)
+	return leaseCtx, stop, nil
+}
+
+func startWorldBackupLeaseKeeper(ctx context.Context, client *coordinator.Client, auth coordinator.ArtifactAuth, generation *int) (context.Context, func() error) {
+	leaseCtx, cancel := context.WithCancel(ctx)
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := client.EnsureActiveLease(leaseCtx, auth, generation); err != nil {
+					select {
+					case errCh <- fmt.Errorf("renew host lease during world backup: %w", err):
+					default:
+					}
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	stop := func() error {
+		cancel()
+		<-done
+		select {
+		case err := <-errCh:
+			return err
+		default:
+			return nil
+		}
+	}
+	return leaseCtx, stop
 }
 
 func loadWorldBackupContext(opts worldBackupOptions) (
@@ -439,13 +535,3 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
-
-type rconConfigRunner struct {
-	cfg rcon.Config
-}
-
-func (r rconConfigRunner) Execute(ctx context.Context, command string) (string, error) {
-	return rcon.Execute(ctx, r.cfg, command)
-}
-
-

@@ -521,7 +521,7 @@ func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := map[string]any{"ok": true}
+	resp := map[string]any{"ok": true, "running": false, "stale": false}
 	if status.Running {
 		resp["running"] = true
 		resp["state"] = map[string]any{
@@ -534,7 +534,6 @@ func (s *Server) handleServerStatus(w http.ResponseWriter, r *http.Request) {
 			"stderrLog": status.State.StderrLog,
 		}
 	} else if status.Stale {
-		resp["running"] = false
 		resp["stale"] = true
 		resp["unknown"] = status.Unknown
 		resp["reason"] = status.Reason

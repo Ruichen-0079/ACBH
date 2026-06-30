@@ -198,6 +198,27 @@ func TestSelectLaunchProfileRejectsOutsideScript(t *testing.T) {
 	}
 }
 
+func TestSelectLaunchProfileAllowsExplicitAbsoluteOutsideScript(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "server")
+	mkdir(t, dir)
+	outside := filepath.Join(root, "outside.ps1")
+	writeFile(t, outside, "Write-Host outside\n")
+	writeFile(t, filepath.Join(dir, "server.properties"), "server-port=25565\n")
+	writeFile(t, filepath.Join(dir, "eula.txt"), "eula=true\n")
+
+	selected, err := SelectLaunchProfile(dir, outside)
+	if err != nil {
+		t.Fatalf("SelectLaunchProfile() error = %v", err)
+	}
+	if selected.LaunchProfile.ScriptPath != outside {
+		t.Fatalf("ScriptPath = %q, want %q", selected.LaunchProfile.ScriptPath, outside)
+	}
+	if selected.LaunchProfile.WorkingDirectory != dir {
+		t.Fatalf("WorkingDirectory = %q, want %q", selected.LaunchProfile.WorkingDirectory, dir)
+	}
+}
+
 func TestInspectForgeAndNeoForgeMarkers(t *testing.T) {
 	cases := []struct {
 		name string

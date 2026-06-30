@@ -88,6 +88,7 @@ func newDesktopCmd() *cobra.Command {
 		newDesktopStopServerCmd(),
 		newDesktopRelayCmd(),
 		newDesktopRemoteCmd(),
+		newDesktopBackupProfileCmd(),
 		newDesktopDaemonCmd(),
 		newDesktopScanPackCmd(),
 		newDesktopSafeSyncWorldCmd(),
@@ -97,11 +98,61 @@ func newDesktopCmd() *cobra.Command {
 		newDesktopLatestManifestCmd(),
 		newDesktopCanPushCmd(),
 		newDesktopTakeoverStatusCmd(),
-		newDesktopWorldBackupCmd(),
 		newDesktopInspectServerCmd(),
 		newDesktopImportServerCmd(),
 		newDesktopResetCmd(),
 	)
+	return cmd
+}
+
+func newDesktopBackupProfileCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "backup-profile",
+		Short: "读取和保存桌面备份策略 profile",
+	}
+	cmd.AddCommand(newDesktopBackupProfileGetCmd(), newDesktopBackupProfileUsePresetCmd())
+	return cmd
+}
+
+func newDesktopBackupProfileGetCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "get",
+		Short: "读取当前备份策略 profile",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.CurrentBackupProfile(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopBackupProfileUsePresetCmd() *cobra.Command {
+	var opts desktop.Options
+	var presetID string
+	var includeFiles []string
+	var includeDirs []string
+	cmd := &cobra.Command{
+		Use:   "use-preset",
+		Short: "保存备份预设和自定义文件/目录",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.UseBackupPreset(opts, presetID, includeFiles, includeDirs)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&presetID, "preset-id", "minecraft-migratable", "备份预设 ID")
+	cmd.Flags().StringArrayVar(&includeFiles, "include-file", nil, "额外备份文件，可重复")
+	cmd.Flags().StringArrayVar(&includeDirs, "include-dir", nil, "额外备份目录，可重复")
+	addIgnoredJSONFlag(cmd)
 	return cmd
 }
 
@@ -283,11 +334,7 @@ func newDesktopSetupJoinGroupCmd() *cobra.Command {
 		Use:   "join-group",
 		Short: "使用邀请码加入 Group、注册本机并输出纯 JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			code := strings.TrimSpace(inviteCode)
-			if code == "" {
-				code = strings.TrimSpace(os.Getenv("ACBH_INVITE_CODE"))
-			}
-			result, err := desktop.SetupJoinGroup(cmd.Context(), opts, code, displayName, coordinatorURL)
+			result, err := desktop.SetupJoinGroup(cmd.Context(), opts, inviteCode, displayName, coordinatorURL)
 			if err != nil {
 				return err
 			}
@@ -295,10 +342,11 @@ func newDesktopSetupJoinGroupCmd() *cobra.Command {
 		},
 	}
 	addDesktopCommonFlags(cmd, &opts)
-	cmd.Flags().StringVar(&inviteCode, "invite-code", "", "ACBH 邀请码（也可用环境变量 ACBH_INVITE_CODE）")
+	cmd.Flags().StringVar(&inviteCode, "invite-code", "", "ACBH 邀请码")
 	cmd.Flags().StringVar(&displayName, "display-name", "", "本机昵称")
 	cmd.Flags().StringVar(&coordinatorURL, "coordinator-url", "", "公网 Coordinator URL")
 	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("invite-code")
 	return cmd
 }
 
@@ -489,8 +537,10 @@ func newDesktopServerAutoCmd() *cobra.Command {
 		newDesktopServerAutoStatusCmd(),
 		newDesktopServerCandidatesCmd(),
 		newDesktopServerSelectLaunchCmd(),
+		newDesktopServerSelectJavaCmd(),
 		newDesktopServerLaunchProfileCmd(),
 		newDesktopServerClearLaunchProfileCmd(),
+		newDesktopServerRepairStateCmd(),
 	)
 	return cmd
 }
@@ -588,6 +638,27 @@ func newDesktopServerSelectLaunchCmd() *cobra.Command {
 	return cmd
 }
 
+func newDesktopServerSelectJavaCmd() *cobra.Command {
+	var opts desktop.Options
+	var selectedPath string
+	cmd := &cobra.Command{
+		Use:   "select-java",
+		Short: "保存 Minecraft 服务端使用的 Java 路径并输出纯 JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.SelectServerJava(opts, selectedPath)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	cmd.Flags().StringVar(&selectedPath, "path", "", "java.exe 路径")
+	addIgnoredJSONFlag(cmd)
+	_ = cmd.MarkFlagRequired("path")
+	return cmd
+}
+
 func newDesktopServerLaunchProfileCmd() *cobra.Command {
 	var opts desktop.Options
 	cmd := &cobra.Command{
@@ -613,6 +684,24 @@ func newDesktopServerClearLaunchProfileCmd() *cobra.Command {
 		Short: "清除当前 Minecraft 启动文件选择并输出纯 JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			result, err := desktop.ClearLaunchProfile(opts)
+			if err != nil {
+				return err
+			}
+			return printJSON(cmd, result)
+		},
+	}
+	addDesktopCommonFlags(cmd, &opts)
+	addIgnoredJSONFlag(cmd)
+	return cmd
+}
+
+func newDesktopServerRepairStateCmd() *cobra.Command {
+	var opts desktop.Options
+	cmd := &cobra.Command{
+		Use:   "repair-state",
+		Short: "安全修复 Desktop 管理的旧 server.lock/server-state",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := desktop.RepairServerState(opts)
 			if err != nil {
 				return err
 			}
@@ -746,6 +835,10 @@ func newDesktopImportServerCmd() *cobra.Command {
 				Command:     report.SuggestedCommand,
 				LogDir:      filepath.Join(opts.AppDataDir, "logs", "minecraft"),
 				StopTimeout: stopTimeout.String(),
+				LaunchPath:  firstNonEmpty(report.LaunchProfile.ScriptPath, report.LaunchProfile.JarPath),
+				JavaPath:    report.LaunchProfile.JavaPath,
+				WorkingDir:  firstNonEmpty(report.LaunchProfile.WorkingDirectory, report.ServerDir),
+				UpdatedAt:   time.Now().Format(time.RFC3339),
 			}
 			if err := agentconfig.Save(configPath, cfg); err != nil {
 				return err
@@ -1266,186 +1359,6 @@ func newDesktopTakeoverStatusCmd() *cobra.Command {
 	return cmd
 }
 
-func newDesktopWorldBackupCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "world-backup",
-		Short: "世界差量备份管理",
-	}
-	cmd.AddCommand(
-		newDesktopWorldBackupStatusCmd(),
-		newDesktopWorldBackupCreateCmd(),
-		newDesktopWorldBackupListCmd(),
-		newDesktopWorldBackupShowCmd(),
-		newDesktopWorldBackupRestoreCmd(),
-		newDesktopWorldBackupPinCmd(),
-		newDesktopWorldBackupDeleteCmd(),
-		newDesktopWorldBackupResumeCmd(),
-	)
-	return cmd
-}
-
-func newDesktopWorldBackupStatusCmd() *cobra.Command {
-	var opts desktop.Options
-	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "查看世界差量备份状态",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.WorldBackupStatus(cmd.Context(), opts)
-			if err != nil {
-				return err
-			}
-			return printJSON(cmd, result)
-		},
-	}
-	addDesktopCommonFlags(cmd, &opts)
-	addIgnoredJSONFlag(cmd)
-	return cmd
-}
-
-func newDesktopWorldBackupCreateCmd() *cobra.Command {
-	var opts desktop.Options
-	var wb desktop.WorldBackupOptions
-	var online bool
-	var rconPassword string
-	cmd := &cobra.Command{
-		Use:   "create",
-		Short: "创建并发布世界差量快照",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.WorldBackupCreate(cmd.Context(), opts, wb, online, rconPassword)
-			if err != nil {
-				return err
-			}
-			return printJSON(cmd, result)
-		},
-	}
-	addDesktopCommonFlags(cmd, &opts)
-	cmd.Flags().BoolVar(&online, "online", false, "使用 RCON save-off/save-all flush/save-on 进行在线安全备份")
-	cmd.Flags().StringVar(&rconPassword, "rcon-password", "", "Minecraft RCON 密码；建议使用 ACBH_RCON_PASSWORD 环境变量")
-	cmd.Flags().StringVar(&wb.RCONHost, "rcon-host", "127.0.0.1", "Minecraft RCON 地址")
-	cmd.Flags().IntVar(&wb.RCONPort, "rcon-port", 25575, "Minecraft RCON 端口")
-	cmd.Flags().DurationVar(&wb.RCONTimeout, "rcon-timeout", defaultRCONTimeout, "RCON 超时")
-	cmd.Flags().BoolVar(&wb.AllowInconsistent, "allow-inconsistent", false, "在线一致性无法保证时允许创建不一致快照")
-	cmd.Flags().StringArrayVar(&wb.WorldRoots, "world-root", nil, "额外世界根目录（相对 server-dir）；可重复")
-	addIgnoredJSONFlag(cmd)
-	return cmd
-}
-
-func newDesktopWorldBackupListCmd() *cobra.Command {
-	var opts desktop.Options
-	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "列出远程世界快照",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.WorldBackupList(cmd.Context(), opts)
-			if err != nil {
-				return err
-			}
-			return printJSON(cmd, result)
-		},
-	}
-	addDesktopCommonFlags(cmd, &opts)
-	addIgnoredJSONFlag(cmd)
-	return cmd
-}
-
-func newDesktopWorldBackupShowCmd() *cobra.Command {
-	var opts desktop.Options
-	cmd := &cobra.Command{
-		Use:   "show <snapshot-id>",
-		Short: "查看世界快照 manifest",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.WorldBackupShow(cmd.Context(), opts, args[0])
-			if err != nil {
-				return err
-			}
-			return printJSON(cmd, result)
-		},
-	}
-	addDesktopCommonFlags(cmd, &opts)
-	addIgnoredJSONFlag(cmd)
-	return cmd
-}
-
-func newDesktopWorldBackupRestoreCmd() *cobra.Command {
-	var opts desktop.Options
-	var wb desktop.WorldBackupOptions
-	cmd := &cobra.Command{
-		Use:   "restore <latest|snapshot-id>",
-		Short: "恢复世界快照",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.WorldBackupRestore(cmd.Context(), opts, wb, args[0])
-			if err != nil {
-				return err
-			}
-			return printJSON(cmd, result)
-		},
-	}
-	addDesktopCommonFlags(cmd, &opts)
-	cmd.Flags().BoolVar(&wb.ConsistentOnly, "consistent-only", true, "拒绝恢复不一致快照")
-	addIgnoredJSONFlag(cmd)
-	return cmd
-}
-
-func newDesktopWorldBackupPinCmd() *cobra.Command {
-	var opts desktop.Options
-	cmd := &cobra.Command{
-		Use:   "pin <snapshot-id>",
-		Short: "固定世界快照以便保留",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.WorldBackupPin(cmd.Context(), opts, args[0])
-			if err != nil {
-				return err
-			}
-			return printJSON(cmd, result)
-		},
-	}
-	addDesktopCommonFlags(cmd, &opts)
-	addIgnoredJSONFlag(cmd)
-	return cmd
-}
-
-func newDesktopWorldBackupDeleteCmd() *cobra.Command {
-	var opts desktop.Options
-	cmd := &cobra.Command{
-		Use:   "delete <snapshot-id>",
-		Short: "删除未固定且非最新的世界快照",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.WorldBackupDelete(cmd.Context(), opts, args[0])
-			if err != nil {
-				return err
-			}
-			return printJSON(cmd, result)
-		},
-	}
-	addDesktopCommonFlags(cmd, &opts)
-	addIgnoredJSONFlag(cmd)
-	return cmd
-}
-
-func newDesktopWorldBackupResumeCmd() *cobra.Command {
-	var opts desktop.Options
-	var wb desktop.WorldBackupOptions
-	cmd := &cobra.Command{
-		Use:   "resume",
-		Short: "继续未完成的世界差量备份",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			result, err := desktop.WorldBackupResume(cmd.Context(), opts, wb)
-			if err != nil {
-				return err
-			}
-			return printJSON(cmd, result)
-		},
-	}
-	addDesktopCommonFlags(cmd, &opts)
-	cmd.Flags().StringArrayVar(&wb.WorldRoots, "world-root", nil, "额外世界根目录（相对 server-dir）；可重复")
-	addIgnoredJSONFlag(cmd)
-	return cmd
-}
-
 func addDesktopCommonFlags(cmd *cobra.Command, opts *desktop.Options) {
 	cmd.Flags().StringVar(&opts.AppDataDir, "app-data-dir", "", "ACBH 数据目录，默认 %APPDATA%\\ACBH；便携模式使用 exe 同级 data")
 	cmd.Flags().StringVar(&opts.CoordinatorPath, "coordinator", "", "coordinator dist/index.js 路径")
@@ -1603,6 +1516,7 @@ func newServerStartCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "Minecraft server working directory")
+	cmd.Flags().StringVar(&opts.workingDir, "working-dir", "", "Minecraft process working directory")
 	cmd.Flags().StringVar(&opts.command, "command", "", "User-provided server launch command")
 	cmd.Flags().StringVar(&opts.logDir, "log-dir", "", "Directory for server stdout and stderr logs")
 	cmd.Flags().DurationVar(&opts.stopTimeout, "stop-timeout", 0, "Graceful stop timeout before forced kill")
@@ -1670,6 +1584,7 @@ func newServerSuperviseCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			startOpts := mcserver.StartOptions{
 				ServerDir:   opts.serverDir,
+				WorkingDir:  opts.workingDir,
 				Command:     opts.command,
 				CommandArgv: mcserver.DecodeCommandArgv(opts.commandArgv),
 				LogDir:      opts.logDir,
@@ -1683,6 +1598,7 @@ func newServerSuperviseCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&opts.serverDir, "server-dir", "", "")
+	cmd.Flags().StringVar(&opts.workingDir, "working-dir", "", "")
 	cmd.Flags().StringVar(&opts.command, "command", "", "")
 	cmd.Flags().StringVar(&opts.commandArgv, "command-argv", "", "")
 	cmd.Flags().StringVar(&opts.logDir, "log-dir", "", "")
@@ -2079,6 +1995,7 @@ type pullOptions struct {
 
 type serverStartOptions struct {
 	serverDir   string
+	workingDir  string
 	command     string
 	logDir      string
 	stopTimeout time.Duration
@@ -2192,8 +2109,14 @@ func resolveServerStartOptions(opts serverStartOptions) (mcserver.StartOptions, 
 		if opts.serverDir == "" {
 			opts.serverDir = cfg.Server.Dir
 		}
+		if opts.workingDir == "" {
+			opts.workingDir = cfg.Server.WorkingDir
+		}
 		if opts.command == "" {
 			opts.command = cfg.Server.Command
+		}
+		if opts.command == "" && cfg.Server.LaunchPath != "" {
+			opts.command = mcimport.SuggestedCommand(cfg.Server.LaunchPath)
 		}
 		if opts.logDir == "" {
 			opts.logDir = cfg.Server.LogDir
@@ -2219,6 +2142,7 @@ func resolveServerStartOptions(opts serverStartOptions) (mcserver.StartOptions, 
 	}
 	return mcserver.StartOptions{
 		ServerDir:   opts.serverDir,
+		WorkingDir:  opts.workingDir,
 		Command:     opts.command,
 		LogDir:      opts.logDir,
 		RuntimeDir:  filepath.Join(configDir, "runtime"),

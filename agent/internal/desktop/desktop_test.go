@@ -76,56 +76,6 @@ func TestPortableAppDataDir(t *testing.T) {
 	}
 }
 
-func TestBaseStatusUsesConfiguredPublicCoordinatorURL(t *testing.T) {
-	appData := t.TempDir()
-	if err := agentconfig.Save(filepath.Join(appData, agentconfig.FileName), agentconfig.Config{
-		CoordinatorURL: "http://121.40.101.224:6121",
-		GroupID:        "grp_1",
-		MemberID:       "mem_1",
-		HostID:         "host_1",
-		HostToken:      "test-host-token",
-		DisplayName:    "owner",
-		DeviceName:     "pc",
-		Platform:       runtime.GOOS,
-		AgentVersion:   agentconfig.AgentVersion,
-	}); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	status, err := baseStatus(withDefaults(Options{AppDataDir: appData}))
-	if err != nil {
-		t.Fatalf("baseStatus() error = %v", err)
-	}
-	if status.CoordinatorURL != "http://121.40.101.224:6121" {
-		t.Fatalf("CoordinatorURL = %q, want configured public URL", status.CoordinatorURL)
-	}
-}
-
-func TestBaseStatusExplicitHostPortOverridesConfig(t *testing.T) {
-	appData := t.TempDir()
-	if err := agentconfig.Save(filepath.Join(appData, agentconfig.FileName), agentconfig.Config{
-		CoordinatorURL: "http://121.40.101.224:6121",
-		GroupID:        "grp_1",
-		MemberID:       "mem_1",
-		HostID:         "host_1",
-		HostToken:      "test-host-token",
-		DisplayName:    "owner",
-		DeviceName:     "pc",
-		Platform:       runtime.GOOS,
-		AgentVersion:   agentconfig.AgentVersion,
-	}); err != nil {
-		t.Fatalf("Save() error = %v", err)
-	}
-
-	status, err := baseStatus(withDefaults(Options{AppDataDir: appData, Host: "0.0.0.0", Port: "7000"}))
-	if err != nil {
-		t.Fatalf("baseStatus() error = %v", err)
-	}
-	if status.CoordinatorURL != "http://0.0.0.0:7000" {
-		t.Fatalf("CoordinatorURL = %q, want explicit override", status.CoordinatorURL)
-	}
-}
-
 func TestResolveNodeDoesNotUseCorepack(t *testing.T) {
 	tempDir := t.TempDir()
 	nodePath := filepath.Join(tempDir, "node.exe")
@@ -261,6 +211,7 @@ func TestSelectServerLaunchSavesProfile(t *testing.T) {
 		t.Fatalf("write eula: %v", err)
 	}
 	opts := Options{AppDataDir: filepath.Join(tempDir, "data")}
+	writeTestAgentConfig(t, opts.AppDataDir, serverDir)
 	if _, err := InspectServerForSetup(opts, serverDir); err != nil {
 		t.Fatalf("InspectServerForSetup() error = %v", err)
 	}
@@ -271,6 +222,109 @@ func TestSelectServerLaunchSavesProfile(t *testing.T) {
 	if !result.LaunchReady || result.LaunchProfile.JarPath != "server-b.jar" {
 		t.Fatalf("LaunchReady=%v profile=%+v", result.LaunchReady, result.LaunchProfile)
 	}
+	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Server.LaunchPath != "server-b.jar" {
+		t.Fatalf("LaunchPath = %q, want server-b.jar", cfg.Server.LaunchPath)
+	}
+	if cfg.Server.WorkingDir != serverDir {
+		t.Fatalf("WorkingDir = %q, want %q", cfg.Server.WorkingDir, serverDir)
+	}
+	if cfg.Server.UpdatedAt == "" {
+		t.Fatal("UpdatedAt is empty")
+	}
+	javaPath := filepath.Join(tempDir, "java.exe")
+	if err := os.WriteFile(javaPath, []byte("fake java"), 0o700); err != nil {
+		t.Fatalf("write fake java: %v", err)
+	}
+	javaResult, err := SelectServerJava(opts, javaPath)
+	if err != nil {
+		t.Fatalf("SelectServerJava() error = %v", err)
+	}
+	if javaResult["ok"] != true {
+		t.Fatalf("SelectServerJava() = %#v", javaResult)
+	}
+	cfg, err = agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if cfg.Server.JavaPath != javaPath {
+		t.Fatalf("JavaPath = %q, want %q", cfg.Server.JavaPath, javaPath)
+	}
+}
+
+func TestBackupProfilePresetPersistsCustomPathsAndMigratesServerDir(t *testing.T) {
+	tempDir := t.TempDir()
+	serverDir := filepath.Join(tempDir, "server-a")
+	nextServerDir := filepath.Join(tempDir, "server-b")
+	opts := Options{AppDataDir: filepath.Join(tempDir, "data")}
+	writeTestAgentConfig(t, opts.AppDataDir, serverDir)
+
+	result, err := UseBackupPreset(opts, "", []string{"file:server.properties"}, []string{"dir:config"})
+	if err != nil {
+		t.Fatalf("UseBackupPreset() error = %v", err)
+	}
+	if !result.OK || result.Profile.PresetID != "minecraft-migratable" {
+		t.Fatalf("UseBackupPreset() = %#v", result)
+	}
+
+	current, err := CurrentBackupProfile(opts)
+	if err != nil {
+		t.Fatalf("CurrentBackupProfile() error = %v", err)
+	}
+	if !containsString(current.Profile.IncludeFiles, "file:server.properties") {
+		t.Fatalf("IncludeFiles = %#v", current.Profile.IncludeFiles)
+	}
+	if !containsString(current.Profile.IncludeDirs, "dir:config") {
+		t.Fatalf("IncludeDirs = %#v", current.Profile.IncludeDirs)
+	}
+	if current.Profile.UpdatedAt == "" {
+		t.Fatal("profile UpdatedAt is empty")
+	}
+
+	profile := current.Profile
+	migrateBackupProfileServerDir(&profile, nextServerDir)
+	if profile.ServerDir != nextServerDir {
+		t.Fatalf("ServerDir = %q, want %q", profile.ServerDir, nextServerDir)
+	}
+	if !containsString(profile.IncludeFiles, "file:server.properties") || !containsString(profile.IncludeDirs, "dir:config") {
+		t.Fatalf("custom choices lost after migration: %#v", profile)
+	}
+	if !strings.Contains(profile.MigrationNotice, "自定义文件/目录已保留") {
+		t.Fatalf("MigrationNotice = %q", profile.MigrationNotice)
+	}
+}
+
+func writeTestAgentConfig(t *testing.T, appDataDir string, serverDir string) {
+	t.Helper()
+	cfg := agentconfig.Config{
+		CoordinatorURL: "http://127.0.0.1:6121",
+		GroupID:        "grp_test",
+		MemberID:       "mem_test",
+		HostID:         "host_test",
+		HostToken:      "ht_test",
+		DisplayName:    "PlayerA",
+		DeviceName:     "PlayerA-PC",
+		Platform:       runtime.GOOS,
+		AgentVersion:   agentconfig.AgentVersion,
+		Server: agentconfig.ServerConfig{
+			Dir: serverDir,
+		},
+	}
+	if err := agentconfig.Save(filepath.Join(appDataDir, agentconfig.FileName), cfg); err != nil {
+		t.Fatalf("save test config: %v", err)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildPowerShellLaunchArgvHandlesChineseAndSpacePath(t *testing.T) {
@@ -344,29 +398,6 @@ func TestBuildPowerShellLaunchArgvRejectsOutsidePath(t *testing.T) {
 	}
 	if info.ErrorCode != "launch_script_outside_server_dir" {
 		t.Fatalf("info = %+v", info)
-	}
-}
-
-func TestResolveLaunchScriptInsideNormalizesWindowsSeparators(t *testing.T) {
-	serverDir := t.TempDir()
-	nestedDir := filepath.Join(serverDir, "scripts")
-	if err := os.MkdirAll(nestedDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(nestedDir, "run.ps1"), []byte("Write-Host ok\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	resolved, err := resolveLaunchScriptInside(serverDir, `scripts\run.ps1`)
-	if err != nil {
-		t.Fatalf("resolveLaunchScriptInside() error = %v", err)
-	}
-	if resolved != filepath.Join(nestedDir, "run.ps1") {
-		t.Fatalf("resolved = %q, want nested script", resolved)
-	}
-
-	if _, err := resolveLaunchScriptInside(serverDir, `..\outside.ps1`); err == nil {
-		t.Fatal("resolveLaunchScriptInside() accepted Windows-style parent traversal")
 	}
 }
 

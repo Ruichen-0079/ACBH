@@ -6,7 +6,3 @@ dist/
 .DS_Store
 *.log
 coverage/
-world-backup/transactions/
-world-backup/index.json
-mcps/
-agent-tools/

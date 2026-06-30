@@ -40,31 +40,6 @@ copy_private_node_runtime() {
   cp "$node_bin" "$target_dir/runtime/node/node.exe"
 }
 
-normalize_shell_scripts_lf() {
-  local root="$1"
-  local file bom hex has_crlf
-  while IFS= read -r -d '' file; do
-    bom="$(head -c 3 "$file" | od -An -tx1 | tr -d ' \n')"
-    if [ "$bom" = "efbbbf" ]; then
-      echo "shell script has UTF-8 BOM: $file" >&2
-      exit 1
-    fi
-    if grep -q $'\r' "$file"; then
-      has_crlf=1
-      if sed --version >/dev/null 2>&1; then
-        sed -i 's/\r$//' "$file"
-      else
-        perl -pi -e 's/\r$//' "$file"
-      fi
-      echo "normalized CRLF to LF: $file" >&2
-    fi
-    if grep -q $'\r' "$file"; then
-      echo "shell script still contains CRLF after normalization: $file" >&2
-      exit 1
-    fi
-  done < <(find "$root" -type f -name '*.sh' -print0)
-}
-
 copy_powershell_utf8_bom() {
   local source_file="$1"
   local target_file="$2"
@@ -196,10 +171,12 @@ if [ -f "$DIST_DIR/acbh-desktop-windows-amd64.exe" ]; then
   BUNDLE_PARENT="$(mktemp -d)"
   BUNDLE_ROOT="$BUNDLE_PARENT/$BUNDLE_NAME"
   rm -rf "$DIST_DIR/$BUNDLE_NAME" "$DIST_DIR/$BUNDLE_NAME.zip"
+  mkdir -p "$BUNDLE_ROOT/scripts"
   mkdir -p "$BUNDLE_ROOT/docs"
   mkdir -p "$BUNDLE_ROOT/resources"
   cp "$DIST_DIR/acbh-desktop-windows-amd64.exe" "$BUNDLE_ROOT/"
   cp "$DIST_DIR/acbh-agent-windows-amd64.exe" "$BUNDLE_ROOT/"
+  copy_powershell_utf8_bom "$REPO_ROOT/scripts/acbh-desktop-gui.ps1" "$BUNDLE_ROOT/scripts/acbh-desktop-gui.ps1"
   cp -R "$REPO_ROOT/docs/zh-CN" "$BUNDLE_ROOT/docs/"
   cp "$REPO_ROOT/RELEASE_NOTES_${VERSION}.md" "$BUNDLE_ROOT/" 2>/dev/null || \
     cp "$REPO_ROOT/RELEASE_NOTES_v0.3.3-simple-desktop-flow.md" "$BUNDLE_ROOT/" 2>/dev/null || true
@@ -231,13 +208,10 @@ if [ -f "$DIST_DIR/acbh-desktop-windows-amd64.exe" ]; then
   mkdir -p "$COORD_BUNDLE_ROOT/scripts"
   cp "$REPO_ROOT/apps/coordinator/package.json" "$COORD_BUNDLE_ROOT/"
   cp -R "$REPO_ROOT/apps/coordinator/dist/." "$COORD_BUNDLE_ROOT/dist/"
-  cp "$REPO_ROOT/scripts/acbh-vps-lib.sh" "$COORD_BUNDLE_ROOT/scripts/"
   cp "$REPO_ROOT/scripts/install-acbh-vps.sh" "$COORD_BUNDLE_ROOT/scripts/"
   cp "$REPO_ROOT/scripts/acbh-vps-status.sh" "$COORD_BUNDLE_ROOT/scripts/"
   cp "$REPO_ROOT/scripts/acbh-vps-upgrade.sh" "$COORD_BUNDLE_ROOT/scripts/"
-  cp "$REPO_ROOT/scripts/acbh-vps-rollback.sh" "$COORD_BUNDLE_ROOT/scripts/"
   chmod +x "$COORD_BUNDLE_ROOT/scripts/"*.sh
-  printf '%s\n' "$VERSION" > "$COORD_BUNDLE_ROOT/VERSION"
   cp "$DIST_DIR/acbh-runtime-base-windows-amd64.zip" "$COORD_BUNDLE_ROOT/packages/acbh-runtime-base-windows-amd64.zip"
   cat > "$COORD_BUNDLE_ROOT/run-coordinator.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -246,21 +220,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec node "$DIR/dist/index.js"
 EOF
   chmod +x "$COORD_BUNDLE_ROOT/run-coordinator.sh"
-  normalize_shell_scripts_lf "$COORD_BUNDLE_ROOT"
   if command -v npm >/dev/null 2>&1; then
     (cd "$COORD_BUNDLE_ROOT" && npm install --omit=dev --no-audit --no-fund --package-lock=false)
   else
     echo "npm not found; cannot build coordinator linux bundle dependencies" >&2
     exit 1
   fi
-  (
-    cd "$COORD_BUNDLE_ROOT"
-    if command -v sha256sum >/dev/null 2>&1; then
-      find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
-    else
-      find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS
-    fi
-  )
   tar -C "$BUNDLE_PARENT" -czf "$DIST_DIR/$COORD_BUNDLE_NAME.tar.gz" "$COORD_BUNDLE_NAME"
 
   rm -rf "$BUNDLE_PARENT"

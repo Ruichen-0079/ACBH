@@ -126,7 +126,7 @@ h2{font-size:20px;margin-bottom:14px}h3{font-size:16px;margin-bottom:8px;color:v
 <h3 style="margin-top:20px">\u7ec4\u914d\u7f6e</h3>
 <div class="row"><div><label>\u7ec4 ID</label><input id="groupId"/></div><div><label>Access Key</label><input id="accessKey" type="password" autocomplete="off"/><div class="actions"><button class="sm sec" onclick="toggleSecret('accessKey')">\u77ed\u6682\u663e\u793a</button><button class="sm sec" onclick="copySecret('accessKey')">\u590d\u5236</button></div></div></div>
 <div class="row"><div><label>Member ID</label><input id="memberId" placeholder="\u521b\u5efa\u7ec4\u540e\u81ea\u52a8\u586b\u5145"/></div><div><label>\u4e3b\u673a ID</label><input id="hostId" placeholder="Agent \u767b\u5f55\u540e\u81ea\u52a8\u586b\u5145"/></div><div><label>\u4e3b\u673a\u4ee4\u724c (Host Token)</label><input id="hostToken" type="password" autocomplete="off" placeholder="\u4ece Agent config.yaml \u590d\u5236"/><div class="actions"><button class="sm sec" onclick="toggleSecret('hostToken')">\u77ed\u6682\u663e\u793a</button></div></div></div>
-<div class="row"><div><label>Heartbeat \u72b6\u6001</label><select id="heartbeatStatus"><option>standby</option><option>online</option><option>hosting</option><option>unhealthy</option><option>offline</option></select></div><div><label>Agent Version</label><input id="agentVersion" value="v0.3.5-hotfix1"/></div></div>
+<div class="row"><div><label>Heartbeat \u72b6\u6001</label><select id="heartbeatStatus"><option>standby</option><option>online</option><option>hosting</option><option>unhealthy</option><option>offline</option></select></div><div><label>Agent Version</label><input id="agentVersion" value="0.1.0"/></div></div>
 <div class="warn"><strong>\u8b66\u544a</strong>\uff1a\u4ec5\u5728\u53ef\u4fe1\u672c\u673a\u4f7f\u7528\u3002\u4e0d\u8981\u5728\u516c\u5171\u7535\u8111\u4fdd\u5b58 accessKey \u6216 hostToken\u3002</div>
 <div class="actions">
 <button onclick="saveLocal()">\u4fdd\u5b58\u672c\u5730</button>
@@ -469,7 +469,7 @@ async function registerHost(){
       memberId:$("memberId").value,
       deviceName:$("deviceName").value,
       platform:$("platform").value,
-      agentVersion:$("agentVersion").value||"v0.3.5-hotfix1"
+      agentVersion:$("agentVersion").value||"0.1.0"
     })});
     $("hostId").value=b.hostId;$("hostToken").value=b.hostToken;
     $("ovHost").textContent=b.hostId;

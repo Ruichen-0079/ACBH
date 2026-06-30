@@ -63,11 +63,13 @@ type Status struct {
 	LatestArtifactKind    string `json:"latestArtifactKind,omitempty"`
 	CurrentHostID         string `json:"currentHostId,omitempty"`
 	IsCurrentHost         *bool  `json:"isCurrentHost,omitempty"`
-	LeaseValid            bool   `json:"leaseValid"`
-	LeaseExpiresAt        string `json:"leaseExpiresAt,omitempty"`
-	LeaseRemaining        int64  `json:"leaseRemaining"`
-	HeartbeatActive       bool   `json:"heartbeatActive"`
 	CurrentHostGeneration int    `json:"currentHostGeneration,omitempty"`
+	HostLeaseActive       bool   `json:"hostLeaseActive"`
+	HostLeaseState        string `json:"hostLeaseState,omitempty"`
+	HostLeaseExpiresAt    string `json:"hostLeaseExpiresAt,omitempty"`
+	HostLeaseRemaining    int64  `json:"hostLeaseRemaining,omitempty"`
+	HostLeaseErrorCode    string `json:"hostLeaseErrorCode,omitempty"`
+	HostLeaseMessage      string `json:"hostLeaseMessage,omitempty"`
 	LastError             string `json:"lastError,omitempty"`
 
 	// v0.3.1 hotfix3 required fields for desktop status --json
@@ -188,6 +190,13 @@ func Start(ctx context.Context, opts Options, out *bytes.Buffer) (Status, error)
 		return status, ChineseError(err)
 	}
 	log(out, "心跳已发送，主机已在控制端可见。")
+	if lease, leaseErr := ensureActiveLease(ctx, cfg, client, nil); leaseErr == nil {
+		applyLeaseStatus(&status, lease.Lease)
+		log(out, "Host lease 已激活。")
+	} else {
+		applyLeaseError(&status, leaseErr)
+		log(out, "Host lease 需要处理："+status.HostLeaseMessage)
+	}
 	return status, nil
 }
 
@@ -231,6 +240,9 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 		status.CoordinatorPID = state.CoordinatorPID
 	}
 	if cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName)); err == nil {
+		if cfg.CoordinatorURL != "" {
+			status.CoordinatorURL = cfg.CoordinatorURL
+		}
 		status.GroupID = cfg.GroupID
 		status.HostID = cfg.HostID
 		status.PrivateMode = true
@@ -275,17 +287,21 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 		v := canPush.CanPush
 		status.IsCurrentHost = &v
 	}
-	if cfg, cfgErr := loadDesktopConfig(opts); cfgErr == nil && cfg.GroupID != "" && cfg.HostID != "" && cfg.HostToken != "" {
-		if client, clientErr := coordinator.NewClient(cfg.CoordinatorURL); clientErr == nil {
-			if lease, leaseErr := client.GetLeaseStatus(ctx, coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}); leaseErr == nil {
-				status.LeaseValid = lease.LeaseValid
-				status.LeaseExpiresAt = lease.LeaseExpiresAt
-				status.LeaseRemaining = lease.LeaseRemaining
-				status.HeartbeatActive = lease.HeartbeatActive
-				status.CurrentHostGeneration = lease.Generation
-				status.CurrentHostID = lease.CurrentHostID
-				v := lease.LeaseValid
-				status.IsCurrentHost = &v
+	if status.HealthOK && status.GroupID != "" && status.HostID != "" && client != nil {
+		cfg, cfgErr := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
+		if cfgErr == nil {
+			lease, leaseErr := client.GetLeaseStatus(ctx, coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken})
+			if leaseErr == nil && !lease.LeaseValid && (lease.CurrentHostID == "" || lease.CurrentHostIDMatches) {
+				if ensured, ensureErr := ensureActiveLease(ctx, cfg, client, nil); ensureErr == nil {
+					lease = ensured.Lease
+				} else {
+					applyLeaseError(&status, ensureErr)
+				}
+			} else if leaseErr != nil {
+				applyLeaseError(&status, leaseErr)
+			}
+			if status.HostLeaseErrorCode == "" {
+				applyLeaseStatus(&status, lease)
 			}
 		}
 	}
@@ -342,6 +358,48 @@ func CurrentStatus(ctx context.Context, opts Options) (Status, error) {
 		status.IsCurrentHost = &f
 	}
 	return status, nil
+}
+
+func applyLeaseStatus(status *Status, lease coordinator.HostLeaseStatus) {
+	status.HostLeaseActive = lease.LeaseValid
+	status.HostLeaseExpiresAt = lease.LeaseExpiresAt
+	status.HostLeaseRemaining = lease.LeaseRemaining
+	status.CurrentHostGeneration = lease.Generation
+	status.CurrentHostID = lease.CurrentHostID
+	matches := lease.CurrentHostIDMatches
+	status.IsCurrentHost = &matches
+	if lease.LeaseValid {
+		status.HostLeaseState = "active"
+		status.HostLeaseErrorCode = ""
+		status.HostLeaseMessage = "Host lease active."
+		return
+	}
+	status.HostLeaseState = "needs_attention"
+	switch {
+	case !lease.CurrentHostIDMatches && lease.CurrentHostID != "":
+		status.HostLeaseErrorCode = "not_current_host"
+		status.HostLeaseMessage = "本机不是 current host。"
+	case lease.CurrentHostIDMatches && !lease.HeartbeatActive:
+		status.HostLeaseErrorCode = "expired_lease"
+		status.HostLeaseMessage = "Host lease 已过期。"
+	default:
+		status.HostLeaseErrorCode = "renew_failed"
+		status.HostLeaseMessage = "Host lease 当前无效。"
+	}
+}
+
+func applyLeaseError(status *Status, err error) {
+	status.HostLeaseActive = false
+	status.HostLeaseState = "needs_attention"
+	status.LastError = err.Error()
+	var leaseErr *LeaseFailure
+	if errors.As(err, &leaseErr) {
+		status.HostLeaseErrorCode = leaseErr.Code
+		status.HostLeaseMessage = leaseErr.Message
+		return
+	}
+	status.HostLeaseErrorCode = "renew_failed"
+	status.HostLeaseMessage = err.Error()
 }
 
 func Reset(opts Options) error {
@@ -422,11 +480,6 @@ func baseStatus(opts Options) (Status, error) {
 		return Status{}, fmt.Errorf("create app data directory: %w", err)
 	}
 	url := fmt.Sprintf("http://%s:%s", opts.Host, opts.Port)
-	if cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName)); err == nil && cfg.CoordinatorURL != "" {
-		if (opts.Host == "" || opts.Host == defaultHost) && (opts.Port == "" || opts.Port == defaultPort) {
-			url = cfg.CoordinatorURL
-		}
-	}
 	return Status{
 		AppDataDir:       opts.AppDataDir,
 		ConfigPath:       filepath.Join(opts.AppDataDir, agentconfig.FileName),
@@ -468,21 +521,17 @@ func createPrivateIdentity(
 	if err != nil {
 		return agentconfig.Config{}, false, err
 	}
-	memberID := created.OwnerMemberID
-	if memberID == "" {
-		joined, err := client.JoinGroup(ctx, created.GroupID, coordinator.JoinGroupRequest{
-			AccessKey:   created.AccessKey,
-			DisplayName: opts.DisplayName,
-		})
-		if err != nil {
-			return agentconfig.Config{}, false, err
-		}
-		memberID = joined.MemberID
+	joined, err := client.JoinGroup(ctx, created.GroupID, coordinator.JoinGroupRequest{
+		AccessKey:   created.AccessKey,
+		DisplayName: opts.DisplayName,
+	})
+	if err != nil {
+		return agentconfig.Config{}, false, err
 	}
 	registered, err := client.RegisterHost(ctx, coordinator.RegisterHostRequest{
 		GroupID:      created.GroupID,
 		AccessKey:    created.AccessKey,
-		MemberID:     memberID,
+		MemberID:     joined.MemberID,
 		DeviceName:   opts.DeviceName,
 		Platform:     runtime.GOOS,
 		AgentVersion: agentconfig.AgentVersion,
@@ -493,7 +542,7 @@ func createPrivateIdentity(
 	cfg := agentconfig.Config{
 		CoordinatorURL: fmt.Sprintf("http://%s:%s", opts.Host, opts.Port),
 		GroupID:        created.GroupID,
-		MemberID:       memberID,
+		MemberID:       joined.MemberID,
 		HostID:         registered.HostID,
 		HostToken:      registered.HostToken,
 		DisplayName:    opts.DisplayName,

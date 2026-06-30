@@ -7,7 +7,7 @@
   "displayName": "My Host",
   "deviceName": "my-device",
   "platform": "linux",
-  "agentVersion": "v0.3.5-hotfix1",
+  "agentVersion": "0.1.0",
   "server": {
     "dir": "/home/user/minecraft-server",
     "command": "java -Xmx4G -Xms2G -jar fabric-server-launch.jar nogui",

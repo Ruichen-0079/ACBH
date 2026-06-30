@@ -14,7 +14,6 @@ import type { ArtifactMetadata, InMemoryCoordinatorStore, GcBackend } from "./st
 import { GcBlockedError, StoreError } from "./store.js";
 import type { TunnelSession, PlayerSession } from "./network.js";
 import type { RelayManager } from "./relay.js";
-import { coordinatorVersion } from "./version.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
@@ -43,20 +42,6 @@ const bootstrapPackageDefinitions = [
   },
 ] as const;
 
-const protocolVersion = 2;
-const minimumClientProtocol = 1;
-const coordinatorCapabilities = [
-  "capabilities_v1",
-  "desktop_protocol_v2",
-  "group_whoami_v1",
-  "world_backup_v1",
-  "world_backup_resume",
-  "invite_management_v1",
-  "public_relay_v1",
-  "lease_renew_v1",
-  "bootstrap_packages_v1",
-] as const;
-
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(120),
   ownerName: z.string().trim().min(1).max(80),
@@ -76,24 +61,18 @@ const joinGroupSchema = z.object({
 });
 
 const createInviteSchema = z.object({
-  accessKey: z.string().min(1).optional(),
-  hostId: z.string().min(1).optional(),
-  hostToken: z.string().min(1).optional(),
+  accessKey: z.string().min(1),
   expiresInSeconds: z.number().int().positive().optional(),
   oneTime: z.boolean().optional(),
 });
 
 const revokeInviteSchema = z.object({
-  accessKey: z.string().min(1).optional(),
-  hostId: z.string().min(1).optional(),
-  hostToken: z.string().min(1).optional(),
+  accessKey: z.string().min(1),
   inviteId: z.string().min(1),
 });
 
 const listInviteSchema = z.object({
-  accessKey: z.string().min(1).optional(),
-  hostId: z.string().min(1).optional(),
-  hostToken: z.string().min(1).optional(),
+  accessKey: z.string().min(1),
 });
 
 const joinInviteSchema = z.object({
@@ -156,10 +135,6 @@ const electionAuthSchema = z.object({
   groupId: z.string().min(1),
   hostId: z.string().min(1),
   hostToken: z.string().min(1),
-});
-
-const leaseEnsureSchema = electionAuthSchema.extend({
-  generation: z.number().int().nonnegative().optional(),
 });
 
 const electionRunSchema = electionAuthSchema.extend({
@@ -325,6 +300,23 @@ const streamingUploadHeaderSchema = z.object({
   hostToken: z.string().min(1),
 });
 
+const leaseEnsureSchema = z.object({
+  groupId: z.string().min(1),
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  generation: z.number().int().nonnegative().optional(),
+});
+
+const coordinatorVersion = "v0.4.0-alpha6";
+const protocolVersion = 1;
+const minimumClientProtocol = 1;
+const alpha6Capabilities = [
+  "lease_renew_v1",
+  "world_backup_v1",
+  "group_whoami_v1",
+  "invite_management_v1",
+] as const;
+
 export async function registerRoutes(
   app: FastifyInstance,
   store: InMemoryCoordinatorStore,
@@ -337,21 +329,20 @@ export async function registerRoutes(
     return {
       ok: true,
       service: "acbh-coordinator",
-      version: coordinatorVersion(),
+      version: coordinatorVersion,
+      coordinatorVersion,
       protocolVersion,
-      minimumClientProtocol,
-      capabilities: [...coordinatorCapabilities],
     };
   });
 
   app.get("/v1/capabilities", async () => {
     return {
-      coordinatorVersion: coordinatorVersion(),
+      coordinatorVersion,
       protocolVersion,
       minimumClientProtocol,
-      capabilities: [...coordinatorCapabilities],
+      capabilities: [...alpha6Capabilities],
       serverTime: new Date().toISOString(),
-      authenticationMode: "host_token_or_owner_access_key",
+      authenticationMode: "host-token",
     };
   });
 
@@ -687,7 +678,11 @@ export async function registerRoutes(
         return reply;
       }
       if (error instanceof StoreError) {
-        reply.code(error.statusCode).send({ error: statusText(error.statusCode), message: error.message });
+        reply.code(error.statusCode).send({
+          error: statusText(error.statusCode),
+          message: error.message,
+          ...(error.code ? { code: error.code } : {}),
+        });
         return reply;
       }
       throw error;
@@ -874,8 +869,6 @@ export async function registerRoutes(
       store.createInvite({
         groupId: params.groupId,
         accessKey: body.accessKey,
-        hostId: body.hostId,
-        hostToken: body.hostToken,
         expiresInSeconds: body.expiresInSeconds,
         oneTime: body.oneTime,
       }),
@@ -892,8 +885,6 @@ export async function registerRoutes(
       store.listInvites({
         groupId: params.groupId,
         accessKey: body.accessKey,
-        hostId: body.hostId,
-        hostToken: body.hostToken,
       }),
     );
   });
@@ -908,8 +899,6 @@ export async function registerRoutes(
       store.revokeInvite({
         groupId: params.groupId,
         accessKey: body.accessKey,
-        hostId: body.hostId,
-        hostToken: body.hostToken,
         inviteId: body.inviteId,
       }),
     );
@@ -954,74 +943,26 @@ export async function registerRoutes(
     return handleStoreCall(reply, () => store.updateHeartbeat(body));
   });
 
-  app.get("/v1/groups/:groupId/members", async (request, reply) => {
-    const params = parseParams(groupStateParamsSchema, request, reply);
-    if (!params) {
-      return reply;
-    }
-    const auth = hostAuthHeaderSchema.safeParse({
-      hostId: request.headers["x-acbh-host-id"],
-      hostToken: request.headers["x-acbh-host-token"],
-    });
-    if (!auth.success) {
-      return reply.code(401).send({
-        error: "Unauthorized",
-        code: "host_auth_required",
-        message: "Host authentication headers are required",
-        issues: auth.error.issues,
-      });
-    }
-    return handleStoreCall(reply, () => {
-      store.verifyHost({ groupId: params.groupId, ...auth.data });
-      const state = store.getGroupState(params.groupId);
-      const hostByMember = new Map(state.hosts.map((host) => [host.memberId, host]));
-      const currentHostID = state.currentHostId ?? null;
-      const members = state.members.map((member) => {
-        const host = hostByMember.get(member.memberId);
-        const isCurrentHost = currentHostID !== null && host?.hostId === currentHostID;
-        return {
-          memberId: member.memberId,
-          displayName: member.displayName,
-          role: member.role,
-          hostId: host?.hostId ?? "",
-          deviceName: host?.deviceName ?? "",
-          platform: host?.platform ?? "",
-          status: host?.status ?? "",
-          isLocal: host?.hostId === auth.data.hostId,
-          isCurrentHost,
-          lastHeartbeatAt: host?.lastHeartbeatAt ?? null,
-          leaseValid: isCurrentHost,
-          leaseRemaining: 0,
-          createdAt: member.createdAt,
-        };
-      });
-      return {
-        groupId: state.groupId,
-        groupName: state.name,
-        currentHostId: currentHostID,
-        members,
-      };
-    });
-  });
-
   app.get("/v1/groups/:groupId/whoami", async (request, reply) => {
     const params = parseParams(groupStateParamsSchema, request, reply);
     if (!params) {
       return reply;
     }
-    const auth = hostAuthHeaderSchema.safeParse({
+    const authResult = hostAuthHeaderSchema.safeParse({
       hostId: request.headers["x-acbh-host-id"],
       hostToken: request.headers["x-acbh-host-token"],
     });
-    if (!auth.success) {
+    if (!authResult.success) {
       return reply.code(401).send({
         error: "Unauthorized",
-        code: "host_auth_required",
+        code: "missing_host_token",
         message: "Host authentication headers are required",
-        issues: auth.error.issues,
+        issues: authResult.error.issues,
       });
     }
-    return handleStoreCall(reply, () => store.whoami({ groupId: params.groupId, ...auth.data }));
+    return handleStoreCall(reply, () =>
+      store.whoAmI({ groupId: params.groupId, ...authResult.data }),
+    );
   });
 
   app.get("/v1/groups/:groupId/lease/status", async (request, reply) => {
@@ -1029,19 +970,21 @@ export async function registerRoutes(
     if (!params) {
       return reply;
     }
-    const auth = hostAuthHeaderSchema.safeParse({
+    const authResult = hostAuthHeaderSchema.safeParse({
       hostId: request.headers["x-acbh-host-id"],
       hostToken: request.headers["x-acbh-host-token"],
     });
-    if (!auth.success) {
+    if (!authResult.success) {
       return reply.code(401).send({
         error: "Unauthorized",
-        code: "host_auth_required",
+        code: "missing_host_token",
         message: "Host authentication headers are required",
-        issues: auth.error.issues,
+        issues: authResult.error.issues,
       });
     }
-    return handleStoreCall(reply, () => store.getHostLeaseStatus({ groupId: params.groupId, ...auth.data }));
+    return handleStoreCall(reply, () =>
+      store.getHostLeaseStatus({ groupId: params.groupId, ...authResult.data }),
+    );
   });
 
   app.post("/v1/groups/:groupId/lease/ensure-active", async (request, reply) => {
@@ -1053,7 +996,6 @@ export async function registerRoutes(
     if (params.groupId !== body.groupId) {
       return reply.code(400).send({
         error: "Bad Request",
-        code: "group_mismatch",
         message: "Request groupId must match route groupId",
       });
     }
@@ -1974,29 +1916,57 @@ function validateManifestPathForRequest(value: string): void {
 function worldMetadata(artifact: ArtifactMetadata): {
   snapshotId: string;
   groupId: string;
+  status: string;
+  profileId: string;
+  profileName: string;
   sourceHostId: string;
+  serverDir: string | null;
+  serverIdentity: string | null;
   hostGeneration: number;
   createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
   consistent: boolean;
   pinned: boolean;
   logicalSize: number;
   uploadedSize: number;
+  deduplicatedSize: number;
   fileCount: number;
+  rootCount: number;
   changedFileCount: number;
   deletedFileCount: number;
+  warningCount: number;
+  traceId: string | null;
+  canRestore: boolean;
+  canDownload: boolean;
 } {
+  const uploadedSize = artifact.uploadedSize ?? 0;
+  const status = artifact.status === "available" ? "success" : artifact.status === "rejected" ? "failed" : artifact.status;
   return {
     snapshotId: artifact.artifactId,
     groupId: artifact.groupId,
+    status,
+    profileId: "minecraft-migratable",
+    profileName: "Minecraft 可迁移服务端",
     sourceHostId: artifact.sourceHostId ?? artifact.creatorHostId,
+    serverDir: null,
+    serverIdentity: artifact.sourceHostId ?? artifact.creatorHostId,
     hostGeneration: artifact.hostGeneration ?? 0,
     createdAt: artifact.createdAt,
+    updatedAt: artifact.updatedAt,
+    completedAt: artifact.status === "available" ? artifact.updatedAt : null,
     consistent: artifact.consistent !== false,
     pinned: artifact.pinned === true,
     logicalSize: artifact.totalBytes,
-    uploadedSize: artifact.uploadedSize ?? 0,
+    uploadedSize,
+    deduplicatedSize: Math.max(artifact.totalBytes - uploadedSize, 0),
     fileCount: artifact.fileCount,
+    rootCount: artifact.fileCount > 0 ? 1 : 0,
     changedFileCount: artifact.changedFileCount ?? 0,
     deletedFileCount: artifact.deletedFileCount ?? 0,
+    warningCount: artifact.consistent === false ? 1 : 0,
+    traceId: null,
+    canRestore: artifact.status === "available",
+    canDownload: artifact.status === "available",
   };
 }

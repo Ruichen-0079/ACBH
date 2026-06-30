@@ -217,6 +217,34 @@ func SelectLaunchProfile(serverDir string, selectedPath string) (Report, error) 
 			return report, nil
 		}
 	}
+	if manual, ok, err := manualExternalLaunchCandidate(report.ServerDir, rel); err != nil {
+		return report, err
+	} else if ok {
+		report.ServerType = manual.ServerType
+		report.LaunchEntry = manual.Path
+		report.LaunchJar = ""
+		if manual.Kind == "jar" {
+			report.LaunchJar = manual.Path
+		}
+		report.LaunchReady = true
+		report.BlockingReasons = nil
+		profile := LaunchProfile{
+			Kind: "script", ServerType: manual.ServerType, ScriptType: manual.ScriptType, ScriptPath: manual.Path, WorkingDirectory: report.ServerDir,
+			Shell: scriptShell(manual.ScriptType), ShellArguments: scriptShellArguments(manual.ScriptType, manual.Path),
+			RequiredJavaVersion: javaRequirementFor(manual.ServerType), Confidence: manual.Confidence, Evidence: manual.Evidence,
+		}
+		if manual.Kind == "jar" {
+			profile = LaunchProfile{
+				Kind: "jar", ServerType: manual.ServerType, JarPath: manual.Path, WorkingDirectory: report.ServerDir,
+				RequiredJavaVersion: javaRequirementFor(manual.ServerType), Confidence: manual.Confidence, Evidence: manual.Evidence,
+			}
+		}
+		report.LaunchProfile = profile
+		report.SuggestedCommand = suggestedCommand(manual.Path)
+		report.JavaRequirement = report.LaunchProfile.RequiredJavaVersion
+		report.RequiredJavaVersion = report.LaunchProfile.RequiredJavaVersion
+		return report, nil
+	}
 	if manual, ok, err := manualScriptCandidate(report.ServerDir, rel); err != nil {
 		return report, err
 	} else if ok {
@@ -252,10 +280,10 @@ func normalizeSelectedPath(serverDir string, selectedPath string) (string, error
 		if err != nil {
 			return "", err
 		}
-		if pathEscapesBase(rel) {
-			return "", fmt.Errorf("启动文件必须位于服务端目录内")
+		if !pathEscapesBase(rel) {
+			return filepath.ToSlash(rel), nil
 		}
-		clean = rel
+		return clean, nil
 	}
 	if pathEscapesBase(clean) {
 		return "", fmt.Errorf("启动文件必须位于服务端目录内")
@@ -426,6 +454,52 @@ func manualScriptCandidate(serverDir string, rel string) (LaunchCandidate, bool,
 		Path: relActual, Kind: "script", ServerType: CustomScript, ScriptType: scriptType, Confidence: "manual",
 		Evidence: append(scriptEvidence(serverDir, relActual), "用户手动选择启动脚本"),
 	}, true, nil
+}
+
+func manualExternalLaunchCandidate(serverDir string, selected string) (LaunchCandidate, bool, error) {
+	if selected == "" || !filepath.IsAbs(selected) {
+		return LaunchCandidate{}, false, nil
+	}
+	baseAbs, err := filepath.Abs(serverDir)
+	if err != nil {
+		return LaunchCandidate{}, false, err
+	}
+	selectedAbs, err := filepath.Abs(selected)
+	if err != nil {
+		return LaunchCandidate{}, false, err
+	}
+	relToBase, err := filepath.Rel(baseAbs, selectedAbs)
+	if err == nil && !pathEscapesBase(relToBase) {
+		return LaunchCandidate{}, false, nil
+	}
+	info, err := os.Stat(selectedAbs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return LaunchCandidate{}, false, fmt.Errorf("%s 不存在或已被移动", selected)
+		}
+		return LaunchCandidate{}, false, err
+	}
+	if info.IsDir() {
+		return LaunchCandidate{}, false, fmt.Errorf("启动文件不能是目录: %s", selected)
+	}
+	lower := strings.ToLower(selectedAbs)
+	switch {
+	case strings.HasSuffix(lower, ".ps1"), strings.HasSuffix(lower, ".bat"), strings.HasSuffix(lower, ".cmd"):
+		scriptType := scriptTypeForPath(selectedAbs)
+		return LaunchCandidate{
+			Path: selectedAbs, Kind: "script", ServerType: CustomScript, ScriptType: scriptType, Confidence: "manual",
+			Evidence: append(scriptEvidence(serverDir, selectedAbs), "用户手动选择服务端目录外启动脚本"),
+		}, true, nil
+	case strings.HasSuffix(lower, ".jar"):
+		name := filepath.Base(selectedAbs)
+		kind := kindForEntry(name)
+		return LaunchCandidate{
+			Path: selectedAbs, Kind: "jar", ServerType: kind, Confidence: "manual",
+			Evidence: []string{"用户手动选择服务端目录外核心 JAR: " + selectedAbs},
+		}, true, nil
+	default:
+		return LaunchCandidate{}, false, nil
+	}
 }
 
 func findCaseInsensitiveFile(dir string, want string) (string, bool) {

@@ -59,7 +59,7 @@ type RegisterHostResponse struct {
 }
 
 type CreateInviteRequest struct {
-	AccessKey        string `json:"accessKey,omitempty"`
+	AccessKey        string `json:"accessKey"`
 	HostID           string `json:"hostId,omitempty"`
 	HostToken        string `json:"hostToken,omitempty"`
 	ExpiresInSeconds int    `json:"expiresInSeconds,omitempty"`
@@ -85,7 +85,7 @@ type PublicInvite struct {
 }
 
 type ListInvitesRequest struct {
-	AccessKey string `json:"accessKey,omitempty"`
+	AccessKey string `json:"accessKey"`
 	HostID    string `json:"hostId,omitempty"`
 	HostToken string `json:"hostToken,omitempty"`
 }
@@ -95,7 +95,7 @@ type ListInvitesResponse struct {
 }
 
 type RevokeInviteRequest struct {
-	AccessKey string `json:"accessKey,omitempty"`
+	AccessKey string `json:"accessKey"`
 	HostID    string `json:"hostId,omitempty"`
 	HostToken string `json:"hostToken,omitempty"`
 	InviteID  string `json:"inviteId"`
@@ -176,29 +176,6 @@ type WhoAmIResponse struct {
 	Role           string          `json:"role"`
 	CredentialKind string          `json:"credentialKind"`
 	Lease          HostLeaseStatus `json:"lease"`
-}
-
-type GroupMemberInfo struct {
-	MemberID    string  `json:"memberId"`
-	DisplayName string  `json:"displayName"`
-	Role        string  `json:"role"`
-	HostID      string  `json:"hostId,omitempty"`
-	DeviceName  string  `json:"deviceName,omitempty"`
-	Platform    string  `json:"platform,omitempty"`
-	Status      string  `json:"status,omitempty"`
-	IsLocal     bool    `json:"isLocal"`
-	IsCurrentHost bool  `json:"isCurrentHost"`
-	LastHeartbeatAt *string `json:"lastHeartbeatAt,omitempty"`
-	LeaseValid  bool    `json:"leaseValid"`
-	LeaseRemaining int64 `json:"leaseRemaining,omitempty"`
-	CreatedAt   string  `json:"createdAt,omitempty"`
-}
-
-type ListGroupMembersResponse struct {
-	GroupID       string            `json:"groupId"`
-	GroupName     string            `json:"groupName"`
-	CurrentHostID *string           `json:"currentHostId,omitempty"`
-	Members       []GroupMemberInfo `json:"members"`
 }
 
 type HostLeaseStatus struct {
@@ -285,18 +262,31 @@ type WorldBackupListResponse struct {
 }
 
 type WorldBackupMetadata struct {
-	SnapshotID       string `json:"snapshotId"`
-	GroupID          string `json:"groupId"`
-	SourceHostID     string `json:"sourceHostId"`
-	HostGeneration   int    `json:"hostGeneration"`
-	CreatedAt        string `json:"createdAt"`
-	Consistent       bool   `json:"consistent"`
-	Pinned           bool   `json:"pinned"`
-	LogicalSize      int64  `json:"logicalSize"`
-	UploadedSize     int64  `json:"uploadedSize"`
-	FileCount        int    `json:"fileCount"`
-	ChangedFileCount int    `json:"changedFileCount"`
-	DeletedFileCount int    `json:"deletedFileCount"`
+	SnapshotID       string  `json:"snapshotId"`
+	GroupID          string  `json:"groupId"`
+	Status           string  `json:"status"`
+	ProfileID        string  `json:"profileId"`
+	ProfileName      string  `json:"profileName"`
+	SourceHostID     string  `json:"sourceHostId"`
+	ServerDir        *string `json:"serverDir"`
+	ServerIdentity   *string `json:"serverIdentity"`
+	HostGeneration   int     `json:"hostGeneration"`
+	CreatedAt        string  `json:"createdAt"`
+	UpdatedAt        string  `json:"updatedAt"`
+	CompletedAt      *string `json:"completedAt"`
+	Consistent       bool    `json:"consistent"`
+	Pinned           bool    `json:"pinned"`
+	LogicalSize      int64   `json:"logicalSize"`
+	UploadedSize     int64   `json:"uploadedSize"`
+	DeduplicatedSize int64   `json:"deduplicatedSize"`
+	FileCount        int     `json:"fileCount"`
+	RootCount        int     `json:"rootCount"`
+	ChangedFileCount int     `json:"changedFileCount"`
+	DeletedFileCount int     `json:"deletedFileCount"`
+	WarningCount     int     `json:"warningCount"`
+	TraceID          *string `json:"traceId"`
+	CanRestore       bool    `json:"canRestore"`
+	CanDownload      bool    `json:"canDownload"`
 }
 
 type WorldBackupManifestResponse struct {
@@ -457,35 +447,6 @@ func IsAPIErrorCode(err error, code string) bool {
 	return errors.As(err, &apiErr) && apiErr.Code == code
 }
 
-func IsRouteNotFound(err error) bool {
-	var apiErr *APIError
-	return errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.Code == "route_not_found")
-}
-
-func IsUnsupportedCapability(err error) bool {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) && apiErr.Code == "unsupported_capability" {
-		return true
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "unsupported_capability")
-}
-
-func IsCoordinatorVersionMismatch(err error) bool {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) && apiErr.Code == "coordinator_version_mismatch" {
-		return true
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "coordinator_version_mismatch")
-}
-
-func IsCoordinatorCapabilityRouteMissing(err error) bool {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) && apiErr.Code == "coordinator_capability_route_missing" {
-		return true
-	}
-	return strings.Contains(strings.ToLower(err.Error()), "coordinator_capability_route_missing")
-}
-
 func NewClient(baseURL string) (*Client, error) {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	parsed, err := url.Parse(baseURL)
@@ -593,12 +554,6 @@ func (c *Client) WhoAmI(ctx context.Context, auth ArtifactAuth) (WhoAmIResponse,
 	return out, err
 }
 
-func (c *Client) ListGroupMembers(ctx context.Context, auth ArtifactAuth) (ListGroupMembersResponse, error) {
-	var out ListGroupMembersResponse
-	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/members", auth, &out)
-	return out, err
-}
-
 func (c *Client) GetLeaseStatus(ctx context.Context, auth ArtifactAuth) (HostLeaseStatus, error) {
 	var out HostLeaseStatus
 	err := c.get(ctx, "/v1/groups/"+url.PathEscape(auth.GroupID)+"/lease/status", auth, &out)
@@ -666,13 +621,11 @@ func (c *Client) UploadObjectStream(
 	content io.Reader,
 	size int64,
 ) (UploadObjectResponse, error) {
-	// UploadObjectStream does not take ownership of content. io.NopCloser prevents the
-	// HTTP transport from closing the caller's reader (for example *os.File).
 	httpReq, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPut,
 		c.baseURL+"/v1/artifacts/objects/"+url.PathEscape(sha256),
-		io.NopCloser(content),
+		content,
 	)
 	if err != nil {
 		return UploadObjectResponse{}, fmt.Errorf("create request: %w", err)
@@ -750,9 +703,6 @@ func (c *Client) PlanWorldBackup(ctx context.Context, groupID string, req WorldB
 	return out, err
 }
 
-// UploadWorldObjectStream streams a world CAS object to the Coordinator.
-// The caller retains ownership of content and is responsible for closing any *os.File.
-// This method never closes the provided reader.
 func (c *Client) UploadWorldObjectStream(
 	ctx context.Context,
 	auth ArtifactAuth,
@@ -764,7 +714,7 @@ func (c *Client) UploadWorldObjectStream(
 		ctx,
 		http.MethodPut,
 		c.baseURL+"/v1/groups/"+url.PathEscape(auth.GroupID)+"/world-objects/"+url.PathEscape(sha256),
-		io.NopCloser(content),
+		content,
 	)
 	if err != nil {
 		return UploadObjectResponse{}, fmt.Errorf("create request: %w", err)
@@ -1132,32 +1082,16 @@ func (c *Client) get(ctx context.Context, path string, auth ArtifactAuth, out an
 
 func responseError(statusCode int, body []byte) error {
 	var apiErr apiError
-	if err := json.Unmarshal(body, &apiErr); err == nil && (apiErr.Message != "" || apiErr.Error != "") {
-		code := apiErr.Code
-		if code == "" && statusCode == http.StatusNotFound {
-			code = "route_not_found"
-		}
-		message := apiErr.Message
-		if message == "" {
-			message = apiErr.Error
-		}
-		return &APIError{StatusCode: statusCode, Code: code, Message: message, Body: string(body)}
+	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Message != "" {
+		return &APIError{StatusCode: statusCode, Code: apiErr.Code, Message: apiErr.Message, Body: string(body)}
 	}
 
 	text := strings.TrimSpace(string(body))
 	if text == "" {
-		code := ""
-		if statusCode == http.StatusNotFound {
-			code = "route_not_found"
-		}
-		return &APIError{StatusCode: statusCode, Code: code}
+		return &APIError{StatusCode: statusCode}
 	}
 
-	code := ""
-	if statusCode == http.StatusNotFound {
-		code = "route_not_found"
-	}
-	return &APIError{StatusCode: statusCode, Code: code, Message: text, Body: text}
+	return &APIError{StatusCode: statusCode, Message: text, Body: text}
 }
 
 func ValidStatus(status string) bool {

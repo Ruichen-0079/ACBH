@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -203,6 +204,107 @@ func TestRestoreHashFailureDoesNotModifyCurrentWorld(t *testing.T) {
 	}
 	if string(got) != "old" {
 		t.Fatalf("current world changed on failed restore: %q", got)
+	}
+}
+
+func TestRestoreAllowsTopLevelFilesInCleanTarget(t *testing.T) {
+	server := t.TempDir()
+	content := []byte("allow-list=true")
+	sum := sha(content)
+	manifest := Manifest{
+		SchemaVersion:    1,
+		SnapshotID:       "ws_top_level",
+		GroupID:          "grp_123",
+		SourceHostID:     "host_123",
+		HostGeneration:   1,
+		CreatedAt:        time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC),
+		Consistent:       true,
+		LogicalSize:      int64(len(content)),
+		UploadedSize:     int64(len(content)),
+		FileCount:        1,
+		ChangedFileCount: 1,
+		Files: []FileEntry{{
+			Path:     "banned-ips.json",
+			Size:     int64(len(content)),
+			SHA256:   sum,
+			ObjectID: ObjectID(sum),
+		}},
+	}
+	downloader := func(context.Context, string) (io.ReadCloser, int64, error) {
+		return io.NopCloser(bytes.NewReader(content)), int64(len(content)), nil
+	}
+	summary, err := Restore(context.Background(), RestoreOptions{
+		ServerDir:      server,
+		Manifest:       manifest,
+		Downloader:     downloader,
+		ConsistentOnly: true,
+		TransactionID:  "txn",
+	})
+	if err != nil {
+		t.Fatalf("Restore() error = %v", err)
+	}
+	if summary.DownloadedFiles != 1 {
+		t.Fatalf("DownloadedFiles = %d, want 1", summary.DownloadedFiles)
+	}
+	got, err := os.ReadFile(filepath.Join(server, "banned-ips.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("restored content = %q", got)
+	}
+}
+
+func TestRestoreRejectsSymlinkTopLevelTarget(t *testing.T) {
+	server := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "banned-ips.json")
+	if err := os.WriteFile(outsideFile, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(server, "banned-ips.json")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	content := []byte("new")
+	sum := sha(content)
+	manifest := Manifest{
+		SchemaVersion:    1,
+		SnapshotID:       "ws_symlink",
+		GroupID:          "grp_123",
+		SourceHostID:     "host_123",
+		HostGeneration:   1,
+		CreatedAt:        time.Date(2026, 6, 24, 0, 0, 0, 0, time.UTC),
+		Consistent:       true,
+		LogicalSize:      int64(len(content)),
+		UploadedSize:     int64(len(content)),
+		FileCount:        1,
+		ChangedFileCount: 1,
+		Files: []FileEntry{{
+			Path:     "banned-ips.json",
+			Size:     int64(len(content)),
+			SHA256:   sum,
+			ObjectID: ObjectID(sum),
+		}},
+	}
+	downloader := func(context.Context, string) (io.ReadCloser, int64, error) {
+		return io.NopCloser(bytes.NewReader(content)), int64(len(content)), nil
+	}
+	_, err := Restore(context.Background(), RestoreOptions{
+		ServerDir:      server,
+		Manifest:       manifest,
+		Downloader:     downloader,
+		ConsistentOnly: true,
+		TransactionID:  "txn",
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("Restore() error = %v, want symlink rejection", err)
+	}
+	got, err := os.ReadFile(outsideFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "outside" {
+		t.Fatalf("outside file changed: %q", got)
 	}
 }
 

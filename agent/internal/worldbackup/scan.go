@@ -44,20 +44,11 @@ func BuildSnapshot(opts ScanOptions) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	ignoreRulesDir := opts.IgnoreRulesDir
-	if ignoreRulesDir == "" {
-		ignoreRulesDir = serverDir
-	}
-	ignore, err := LoadIgnoreFile(ignoreRulesDir)
+	ignore, err := LoadIgnoreFile(serverDir)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	index, _, err := LoadIndex(opts.AppDataDir)
-	if err != nil {
-		return Snapshot{}, err
-	}
-
-	sources, err := ListWorldBackupSourceFiles(serverDir, roots, ignore)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -67,38 +58,85 @@ func BuildSnapshot(opts ScanOptions) (Snapshot, error) {
 	var files []FileEntry
 	var logicalSize int64
 
-	for _, source := range sources {
-		fileInfo, err := os.Stat(source.AbsPath)
-		if err != nil {
-			return Snapshot{}, fmt.Errorf("stat %s: %w", source.Path, err)
+	for _, root := range roots {
+		rootAbs := filepath.Join(serverDir, filepath.FromSlash(root))
+		if _, err := os.Stat(rootAbs); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return Snapshot{}, fmt.Errorf("stat world root %s: %w", root, err)
 		}
-		mt := fileInfo.ModTime().UnixNano()
-		size := fileInfo.Size()
-		indexed, ok := index.Files[source.Path]
-		if !ok || indexed.Size != size || indexed.MTimeUnixNano != mt || indexed.SHA256 == "" {
-			sum, err := hashFile(source.AbsPath)
+		if err := filepath.WalkDir(rootAbs, func(filePath string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if filePath == rootAbs {
+				return nil
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				rel, _ := filepath.Rel(serverDir, filePath)
+				normalized, _ := NormalizeManifestPath(rel)
+				return fmt.Errorf("symlink is not allowed in world backup: %s", normalized)
+			}
+			rel, err := filepath.Rel(serverDir, filePath)
 			if err != nil {
-				return Snapshot{}, err
+				return fmt.Errorf("find relative path for %q: %w", filePath, err)
 			}
-			indexed = IndexedFile{
-				Size:          size,
-				MTimeUnixNano: mt,
-				SHA256:        sum,
-				ObjectID:      ObjectID(sum),
+			normalized, err := NormalizeManifestPath(rel)
+			if err != nil {
+				return err
 			}
+			if entry.IsDir() {
+				if shouldIgnorePath(normalized, true, ignore) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if shouldIgnorePath(normalized, false, ignore) {
+				return nil
+			}
+			fileInfo, err := entry.Info()
+			if err != nil {
+				return fmt.Errorf("stat %s: %w", normalized, err)
+			}
+			real, err := filepath.EvalSymlinks(filePath)
+			if err != nil {
+				return fmt.Errorf("resolve %s symlinks: %w", normalized, err)
+			}
+			if !underRoot(serverDir, real) {
+				return fmt.Errorf("path %s escapes server directory through symlink", normalized)
+			}
+
+			mt := fileInfo.ModTime().UnixNano()
+			size := fileInfo.Size()
+			indexed, ok := index.Files[normalized]
+			if !ok || indexed.Size != size || indexed.MTimeUnixNano != mt || indexed.SHA256 == "" {
+				sum, err := hashFile(filePath)
+				if err != nil {
+					return err
+				}
+				indexed = IndexedFile{
+					Size:          size,
+					MTimeUnixNano: mt,
+					SHA256:        sum,
+					ObjectID:      ObjectID(sum),
+				}
+			}
+			if indexed.ObjectID == "" {
+				indexed.ObjectID = ObjectID(indexed.SHA256)
+			}
+			current[normalized] = indexed
+			localPaths[normalized] = filePath
+			files = append(files, FileEntry{
+				Path:     normalized,
+				Size:     indexed.Size,
+				SHA256:   indexed.SHA256,
+				ObjectID: indexed.ObjectID,
+			})
+			logicalSize += indexed.Size
+			return nil
+		}); err != nil {
+			return Snapshot{}, err
 		}
-		if indexed.ObjectID == "" {
-			indexed.ObjectID = ObjectID(indexed.SHA256)
-		}
-		current[source.Path] = indexed
-		localPaths[source.Path] = source.AbsPath
-		files = append(files, FileEntry{
-			Path:     source.Path,
-			Size:     indexed.Size,
-			SHA256:   indexed.SHA256,
-			ObjectID: indexed.ObjectID,
-		})
-		logicalSize += indexed.Size
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
@@ -152,87 +190,6 @@ func BuildSnapshot(opts ScanOptions) (Snapshot, error) {
 		Plan:     plan,
 		Index:    IndexFromManifest(manifest, current),
 	}, nil
-}
-
-// WorldBackupSourceFile describes a live world file eligible for backup.
-type WorldBackupSourceFile struct {
-	Path      string
-	AbsPath   string
-	WorldRoot string
-}
-
-// ListWorldBackupSourceFiles enumerates non-ignored world files under the configured roots.
-func ListWorldBackupSourceFiles(serverDir string, roots []string, ignore IgnoreRules) ([]WorldBackupSourceFile, error) {
-	serverDir, err := filepath.Abs(serverDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve server directory: %w", err)
-	}
-	serverDir, err = filepath.EvalSymlinks(serverDir)
-	if err != nil {
-		return nil, fmt.Errorf("resolve server symlinks: %w", err)
-	}
-	if len(roots) == 0 {
-		roots, err = ResolveWorldRoots(serverDir, nil)
-		if err != nil {
-			return nil, err
-		}
-	}
-	var sources []WorldBackupSourceFile
-	for _, root := range roots {
-		rootAbs := filepath.Join(serverDir, filepath.FromSlash(root))
-		if _, err := os.Stat(rootAbs); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return nil, fmt.Errorf("stat world root %s: %w", root, err)
-		}
-		if err := filepath.WalkDir(rootAbs, func(filePath string, entry os.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			if filePath == rootAbs {
-				return nil
-			}
-			if entry.Type()&os.ModeSymlink != 0 {
-				rel, _ := filepath.Rel(serverDir, filePath)
-				normalized, _ := NormalizeManifestPath(rel)
-				return fmt.Errorf("symlink is not allowed in world backup: %s", normalized)
-			}
-			rel, err := filepath.Rel(serverDir, filePath)
-			if err != nil {
-				return fmt.Errorf("find relative path for %q: %w", filePath, err)
-			}
-			normalized, err := NormalizeManifestPath(rel)
-			if err != nil {
-				return err
-			}
-			if entry.IsDir() {
-				if shouldIgnorePath(normalized, true, ignore) {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if shouldIgnorePath(normalized, false, ignore) {
-				return nil
-			}
-			real, err := filepath.EvalSymlinks(filePath)
-			if err != nil {
-				return fmt.Errorf("resolve %s symlinks: %w", normalized, err)
-			}
-			if !underRoot(serverDir, real) {
-				return fmt.Errorf("path %s escapes server directory through symlink", normalized)
-			}
-			sources = append(sources, WorldBackupSourceFile{
-				Path:      normalized,
-				AbsPath:   real,
-				WorldRoot: root,
-			})
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-	}
-	sort.Slice(sources, func(i, j int) bool { return sources[i].Path < sources[j].Path })
-	return sources, nil
 }
 
 func ResolveWorldRoots(serverDir string, requested []string) ([]string, error) {

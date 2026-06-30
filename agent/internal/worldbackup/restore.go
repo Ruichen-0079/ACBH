@@ -47,6 +47,9 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreSummary, error) {
 	if err != nil {
 		return RestoreSummary{}, fmt.Errorf("resolve server directory: %w", err)
 	}
+	if err := prepareRestoreDirectory(serverDir); err != nil {
+		return RestoreSummary{}, err
+	}
 	if opts.TransactionID == "" {
 		opts.TransactionID = "restore-" + time.Now().UTC().Format("20060102-150405.000000000")
 	}
@@ -80,7 +83,7 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreSummary, error) {
 		if err != nil {
 			return summary, err
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		if err := ensureRestoreParent(stagingDir, target); err != nil {
 			return summary, fmt.Errorf("create staging parent for %s: %w", file.Path, err)
 		}
 		if err := downloadObject(ctx, opts.Downloader, file.ObjectID, file.SHA256, file.Size, target); err != nil {
@@ -105,11 +108,17 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreSummary, error) {
 		current := filepath.Join(serverDir, filepath.FromSlash(root))
 		rollbackPath := filepath.Join(serverDir, root+".acbh-rollback-"+opts.TransactionID)
 		failedPath := filepath.Join(serverDir, root+".acbh-failed-"+opts.TransactionID)
+		if err := ensureRestoreParent(serverDir, current); err != nil {
+			return summary, fmt.Errorf("prepare restore root %s: %w", root, err)
+		}
 		if _, err := os.Stat(rollbackPath); err == nil {
 			return summary, fmt.Errorf("rollback path already exists: %s", rollbackPath)
 		}
 		_ = os.RemoveAll(failedPath)
 		if _, err := os.Stat(current); err == nil {
+			if _, targetErr := checkRestoreFinalTarget(current); targetErr != nil {
+				return summary, fmt.Errorf("check current restore root %s: %w", root, targetErr)
+			}
 			if err := os.Rename(current, rollbackPath); err != nil {
 				return summary, fmt.Errorf("move current world %s to rollback: %w", root, err)
 			}
@@ -122,6 +131,10 @@ func Restore(ctx context.Context, opts RestoreOptions) (RestoreSummary, error) {
 		if _, err := os.Stat(stageRoot); os.IsNotExist(err) {
 			if err := os.MkdirAll(stageRoot, 0o700); err != nil {
 				return summary, fmt.Errorf("create empty stage root %s: %w", root, err)
+			}
+		} else if err == nil {
+			if _, targetErr := checkRestoreFinalTarget(stageRoot); targetErr != nil {
+				return summary, fmt.Errorf("check staged restore root %s: %w", root, targetErr)
 			}
 		}
 		if err := os.Rename(stageRoot, current); err != nil {

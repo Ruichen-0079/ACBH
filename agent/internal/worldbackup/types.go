@@ -16,25 +16,25 @@ const (
 
 var (
 	snapshotIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	sha256Pattern     = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	sha256Pattern    = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
 type Manifest struct {
-	SchemaVersion    int         `json:"schemaVersion"`
-	SnapshotID       string      `json:"snapshotId"`
-	GroupID          string      `json:"groupId"`
-	SourceHostID     string      `json:"sourceHostId"`
-	HostGeneration   int         `json:"hostGeneration"`
-	ParentSnapshotID string      `json:"parentSnapshotId,omitempty"`
-	CreatedAt        time.Time   `json:"createdAt"`
-	Consistent       bool        `json:"consistent"`
-	LogicalSize      int64       `json:"logicalSize"`
-	UploadedSize     int64       `json:"uploadedSize"`
-	FileCount        int         `json:"fileCount"`
-	ChangedFileCount int         `json:"changedFileCount"`
-	DeletedFileCount int         `json:"deletedFileCount"`
-	Files            []FileEntry `json:"files"`
-	DeletedPaths     []string    `json:"deletedPaths,omitempty"`
+	SchemaVersion     int         `json:"schemaVersion"`
+	SnapshotID        string      `json:"snapshotId"`
+	GroupID           string      `json:"groupId"`
+	SourceHostID      string      `json:"sourceHostId"`
+	HostGeneration    int         `json:"hostGeneration"`
+	ParentSnapshotID  string      `json:"parentSnapshotId,omitempty"`
+	CreatedAt         time.Time   `json:"createdAt"`
+	Consistent        bool        `json:"consistent"`
+	LogicalSize       int64       `json:"logicalSize"`
+	UploadedSize      int64       `json:"uploadedSize"`
+	FileCount         int         `json:"fileCount"`
+	ChangedFileCount  int         `json:"changedFileCount"`
+	DeletedFileCount  int         `json:"deletedFileCount"`
+	Files             []FileEntry `json:"files"`
+	DeletedPaths      []string    `json:"deletedPaths,omitempty"`
 }
 
 type FileEntry struct {
@@ -58,22 +58,22 @@ type Index struct {
 }
 
 type Plan struct {
-	SnapshotID       string          `json:"snapshotId"`
-	ParentSnapshotID string          `json:"parentSnapshotId,omitempty"`
-	LogicalSize      int64           `json:"logicalSize"`
-	FileCount        int             `json:"fileCount"`
-	ChangedFileCount int             `json:"changedFileCount"`
-	DeletedFileCount int             `json:"deletedFileCount"`
-	ChangedFiles     []ChangedFile   `json:"changedFiles"`
-	DeletedPaths     []string        `json:"deletedPaths,omitempty"`
-	Objects          []PlannedObject `json:"objects"`
+	SnapshotID        string          `json:"snapshotId"`
+	ParentSnapshotID  string          `json:"parentSnapshotId,omitempty"`
+	LogicalSize       int64           `json:"logicalSize"`
+	FileCount         int             `json:"fileCount"`
+	ChangedFileCount  int             `json:"changedFileCount"`
+	DeletedFileCount  int             `json:"deletedFileCount"`
+	ChangedFiles      []ChangedFile   `json:"changedFiles"`
+	DeletedPaths      []string        `json:"deletedPaths,omitempty"`
+	Objects           []PlannedObject `json:"objects"`
 }
 
 type ChangedFile struct {
-	Path      string `json:"path"`
-	Size      int64  `json:"size"`
-	SHA256    string `json:"sha256"`
-	ObjectID  string `json:"objectId"`
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	SHA256   string `json:"sha256"`
+	ObjectID string `json:"objectId"`
 	LocalPath string `json:"localPath"`
 }
 
@@ -84,17 +84,16 @@ type PlannedObject struct {
 }
 
 type ScanOptions struct {
-	ServerDir      string
-	AppDataDir     string
-	IgnoreRulesDir string
-	WorldRoots     []string
-	SnapshotID     string
-	GroupID        string
-	SourceHostID   string
-	HostGeneration int
-	Parent         *Manifest
-	Consistent     bool
-	Clock          func() time.Time
+	ServerDir        string
+	AppDataDir       string
+	WorldRoots       []string
+	SnapshotID       string
+	GroupID          string
+	SourceHostID     string
+	HostGeneration   int
+	Parent           *Manifest
+	Consistent       bool
+	Clock            func() time.Time
 }
 
 type Snapshot struct {

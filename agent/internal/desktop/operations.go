@@ -97,28 +97,52 @@ type TakeoverStatus struct {
 }
 
 type ManagedServerState struct {
-	Running bool   `json:"running"`
-	Stale   bool   `json:"stale"`
-	Reason  string `json:"reason,omitempty"`
-	PID     int    `json:"pid,omitempty"`
+	Running            bool   `json:"running"`
+	Stale              bool   `json:"stale"`
+	Unknown            bool   `json:"unknown,omitempty"`
+	Repairable         bool   `json:"repairable"`
+	Reason             string `json:"reason,omitempty"`
+	PID                int    `json:"pid,omitempty"`
+	LockPID            int    `json:"lockPid,omitempty"`
+	ProcessCommandLine string `json:"processCommandLine,omitempty"`
+	ServerDir          string `json:"serverDir,omitempty"`
+	RuntimeDir         string `json:"runtimeDir,omitempty"`
+	LockPath           string `json:"lockPath,omitempty"`
+	StatePath          string `json:"statePath,omitempty"`
 }
 
 type StartServerResult struct {
-	OK               bool     `json:"ok"`
-	ErrorCode        string   `json:"errorCode,omitempty"`
-	Message          string   `json:"message,omitempty"`
-	ServerDir        string   `json:"serverDir,omitempty"`
-	WorkingDirectory string   `json:"workingDirectory,omitempty"`
-	LaunchCommand    string   `json:"launchCommand,omitempty"`
-	ScriptPath       string   `json:"scriptPath,omitempty"`
-	LauncherPath     string   `json:"launcherPath,omitempty"`
-	ExitCode         int      `json:"exitCode,omitempty"`
-	JavaPath         string   `json:"javaPath,omitempty"`
-	JarPath          string   `json:"jarPath,omitempty"`
-	LogFile          string   `json:"logFile,omitempty"`
-	Suggestion       string   `json:"suggestion,omitempty"`
-	PID              int      `json:"pid,omitempty"`
-	Warnings         []string `json:"warnings,omitempty"`
+	OK                 bool     `json:"ok"`
+	ErrorCode          string   `json:"errorCode,omitempty"`
+	Message            string   `json:"message,omitempty"`
+	ServerDir          string   `json:"serverDir,omitempty"`
+	WorkingDirectory   string   `json:"workingDirectory,omitempty"`
+	LaunchCommand      string   `json:"launchCommand,omitempty"`
+	ScriptPath         string   `json:"scriptPath,omitempty"`
+	LauncherPath       string   `json:"launcherPath,omitempty"`
+	ExitCode           int      `json:"exitCode,omitempty"`
+	JavaPath           string   `json:"javaPath,omitempty"`
+	JarPath            string   `json:"jarPath,omitempty"`
+	LogFile            string   `json:"logFile,omitempty"`
+	Suggestion         string   `json:"suggestion,omitempty"`
+	PID                int      `json:"pid,omitempty"`
+	RuntimeDir         string   `json:"runtimeDir,omitempty"`
+	ReadyTimeout       string   `json:"readyTimeout,omitempty"`
+	LogTail            []string `json:"logTail,omitempty"`
+	Repairable         bool     `json:"repairable"`
+	LockPID            int      `json:"lockPid,omitempty"`
+	ProcessCommandLine string   `json:"processCommandLine,omitempty"`
+	Warnings           []string `json:"warnings,omitempty"`
+}
+
+type ServerRepairResult struct {
+	OK           bool               `json:"ok"`
+	Repairable   bool               `json:"repairable"`
+	Repaired     bool               `json:"repaired"`
+	RemovedState bool               `json:"removedState"`
+	RemovedLock  bool               `json:"removedLock"`
+	Message      string             `json:"message"`
+	Status       ManagedServerState `json:"status"`
 }
 
 type StopServerResult struct {
@@ -299,6 +323,13 @@ func SafeSyncWorld(ctx context.Context, opts Options, rconPassword string) (Safe
 	if err != nil {
 		return SafeSyncResult{}, err
 	}
+	var keeper leaseStopper = noopLeaseKeeper{}
+	if client, clientErr := coordinator.NewClient(cfg.CoordinatorURL); clientErr == nil {
+		ctx, keeper = maybeStartCurrentHostLeaseKeeper(ctx, cfg, client, nil)
+	}
+	defer func() {
+		_ = keeper.Stop()
+	}()
 	if strings.TrimSpace(cfg.Server.Dir) == "" {
 		return SafeSyncResult{}, errors.New("请先在 GUI 中导入 MC 服务端目录。")
 	}
@@ -353,7 +384,7 @@ func SafeSyncWorld(ctx context.Context, opts Options, rconPassword string) (Safe
 	if err := manifest.SaveFile(output, manifestData); err != nil {
 		return SafeSyncResult{}, err
 	}
-	return SafeSyncResult{
+	result := SafeSyncResult{
 		ScanResult: ScanResult{
 			ManifestPath: output,
 			ArtifactKind: manifest.WorldSnapshot,
@@ -362,46 +393,11 @@ func SafeSyncWorld(ctx context.Context, opts Options, rconPassword string) (Safe
 			Message:      "世界快照 world-snapshot manifest 已生成，下一步建议点击上传同步制品 push。",
 		},
 		RCONMessage: "RCON save-all flush succeeded.",
-	}, nil
-}
-
-func ScanWorldSnapshotStopped(opts Options) (ScanResult, error) {
-	opts = withDefaults(opts)
-	cfg, err := loadDesktopConfig(opts)
-	if err != nil {
-		return ScanResult{}, err
 	}
-	if strings.TrimSpace(cfg.Server.Dir) == "" {
-		return ScanResult{}, errors.New("请先在 GUI 中导入 MC 服务端目录。")
+	if leaseErr := keeper.Stop(); leaseErr != nil {
+		return SafeSyncResult{}, leaseErr
 	}
-	artifactID := "world-" + time.Now().Format("20060102-150405")
-	output := filepath.Join(manifestDir(opts), artifactID+".manifest.json")
-	serverPackVersion := latestServerPackID(opts)
-	if serverPackVersion == "" {
-		serverPackVersion = "server-pack-local"
-	}
-	manifestData, report, err := scanner.Scan(scanner.Options{
-		ServerDir:         cfg.Server.Dir,
-		ArtifactKind:      manifest.WorldSnapshot,
-		ArtifactID:        artifactID,
-		GroupID:           cfg.GroupID,
-		CreatorHostID:     cfg.HostID,
-		ServerPackVersion: serverPackVersion,
-		OutputPath:        output,
-	})
-	if err != nil {
-		return ScanResult{}, err
-	}
-	if err := manifest.SaveFile(output, manifestData); err != nil {
-		return ScanResult{}, err
-	}
-	return ScanResult{
-		ManifestPath: output,
-		ArtifactKind: manifest.WorldSnapshot,
-		ArtifactID:   artifactID,
-		Report:       report,
-		Message:      "停服后的世界快照 world-snapshot manifest 已生成。",
-	}, nil
+	return result, nil
 }
 
 func PushLatest(ctx context.Context, opts Options) (artifactsync.PushSummary, error) {
@@ -426,13 +422,31 @@ func PushLatest(ctx context.Context, opts Options) (artifactsync.PushSummary, er
 		return artifactsync.PushSummary{}, err
 	}
 	generation := canPush.CurrentHostGeneration
-	return artifactsync.Push(ctx, artifactsync.PushOptions{
+	leaseCtx, keeper, _, err := startActiveLeaseKeeper(ctx, cfg, client, &generation)
+	if err != nil {
+		return artifactsync.PushSummary{}, err
+	}
+	summary, pushErr := artifactsync.Push(leaseCtx, artifactsync.PushOptions{
 		ManifestPath:   latest.Path,
 		ServerDir:      cfg.Server.Dir,
 		Config:         cfg,
 		Client:         client,
 		HostGeneration: &generation,
 	})
+	leaseErr := keeper.Stop()
+	if pushErr != nil {
+		if leaseErr != nil && errors.Is(pushErr, context.Canceled) {
+			return artifactsync.PushSummary{}, leaseErr
+		}
+		return artifactsync.PushSummary{}, pushErr
+	}
+	if leaseErr != nil {
+		return artifactsync.PushSummary{}, leaseErr
+	}
+	if _, err := ensureActiveLease(ctx, cfg, client, &generation); err != nil {
+		return artifactsync.PushSummary{}, err
+	}
+	return summary, nil
 }
 
 func PullLatest(ctx context.Context, opts Options, artifactKind manifest.ArtifactKind, artifactID string, applyDeletes bool) (artifactsync.PullSummary, error) {
@@ -454,7 +468,8 @@ func PullLatest(ctx context.Context, opts Options, artifactKind manifest.Artifac
 	if err != nil {
 		return artifactsync.PullSummary{}, err
 	}
-	return artifactsync.Pull(ctx, artifactsync.PullOptions{
+	leaseCtx, keeper := maybeStartCurrentHostLeaseKeeper(ctx, cfg, client, nil)
+	summary, pullErr := artifactsync.Pull(leaseCtx, artifactsync.PullOptions{
 		ArtifactKind: artifactKind,
 		ArtifactID:   artifactID,
 		OutputDir:    cfg.Server.Dir,
@@ -462,6 +477,17 @@ func PullLatest(ctx context.Context, opts Options, artifactKind manifest.Artifac
 		Config:       cfg,
 		Client:       client,
 	})
+	leaseErr := keeper.Stop()
+	if pullErr != nil {
+		if leaseErr != nil && errors.Is(pullErr, context.Canceled) {
+			return artifactsync.PullSummary{}, leaseErr
+		}
+		return artifactsync.PullSummary{}, pullErr
+	}
+	if leaseErr != nil {
+		return artifactsync.PullSummary{}, leaseErr
+	}
+	return summary, nil
 }
 
 func CanPush(ctx context.Context, opts Options) (CanPushResult, error) {
@@ -494,14 +520,6 @@ func CanPush(ctx context.Context, opts Options) (CanPushResult, error) {
 	if *status.CurrentHostID != cfg.HostID {
 		result.Reason = "当前本地主机不是 current host，不能上传同步制品 push。"
 		return result, nil
-	}
-	if lease, leaseErr := client.GetLeaseStatus(ctx, coordinator.ArtifactAuth{GroupID: cfg.GroupID, HostID: cfg.HostID, HostToken: cfg.HostToken}); leaseErr == nil {
-		result.CurrentHostGeneration = lease.Generation
-		if !lease.LeaseValid {
-			result.Reason = "当前 Host lease 已过期，不能上传同步制品 push。"
-			result.NextStep = "请先重新申请主机资格或等待桌面端自动续租。"
-			return result, nil
-		}
 	}
 	result.CanPush = true
 	result.Reason = "当前本地主机是 current host，可以上传同步制品 push。"
@@ -587,15 +605,69 @@ func LatestManifest(opts Options) (ManifestInfo, error) {
 
 func ManagedServerStatus(opts Options) (ManagedServerState, error) {
 	opts = withDefaults(opts)
-	status, err := mcserver.GetStatus(filepath.Join(opts.AppDataDir, "runtime"))
+	runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+	status, err := mcserver.GetStatus(runtimeDir)
 	if err != nil {
 		return ManagedServerState{}, err
 	}
-	out := ManagedServerState{Running: status.Running, Stale: status.Stale, Reason: status.Reason}
+	out := ManagedServerState{
+		Running:    status.Running,
+		Stale:      status.Stale,
+		Unknown:    status.Unknown,
+		Reason:     status.Reason,
+		RuntimeDir: runtimeDir,
+		LockPath:   mcserver.LockPath(runtimeDir),
+		StatePath:  mcserver.StatePath(runtimeDir),
+	}
 	if status.State.PID > 0 {
 		out.PID = status.State.PID
+		out.ServerDir = status.State.ServerDir
+		out.ProcessCommandLine = processCommandLine(status.State.PID)
 	}
+	if status.Lock.PID > 0 {
+		out.LockPID = status.Lock.PID
+		out.ServerDir = status.Lock.ServerDir
+		out.ProcessCommandLine = processCommandLine(status.Lock.PID)
+	}
+	pid := out.PID
+	if pid == 0 {
+		pid = out.LockPID
+	}
+	out.Repairable = status.Stale && !status.Unknown && (pid <= 0 || !processRunning(pid))
 	return out, nil
+}
+
+func RepairServerState(opts Options) (ServerRepairResult, error) {
+	opts = withDefaults(opts)
+	before, statusErr := ManagedServerStatus(opts)
+	if statusErr != nil {
+		return ServerRepairResult{}, statusErr
+	}
+	if before.Stale && !before.Repairable {
+		msg := "检测到旧 server.lock 或 server-state，但记录的进程仍可能存在，已拒绝自动修复。请先停止旧 MC/Java 进程后再试。"
+		return ServerRepairResult{OK: false, Repairable: false, Message: msg, Status: before}, nil
+	}
+	cfg, _ := loadDesktopConfig(opts)
+	runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+	result, err := mcserver.RepairState(runtimeDir, cfg.Server.Dir)
+	if err != nil {
+		after, _ := ManagedServerStatus(opts)
+		msg := "修复启动状态失败：" + err.Error()
+		return ServerRepairResult{OK: false, Repairable: false, Message: msg, Status: after}, nil
+	}
+	after, _ := ManagedServerStatus(opts)
+	if !result.Repaired {
+		return ServerRepairResult{OK: true, Repairable: false, Message: "没有需要修复的 server.lock 或 server-state。", Status: after}, nil
+	}
+	return ServerRepairResult{
+		OK:           true,
+		Repairable:   false,
+		Repaired:     result.Repaired,
+		RemovedState: result.RemovedState,
+		RemovedLock:  result.RemovedLock,
+		Message:      "启动状态已安全修复，可再次启动服务端。",
+		Status:       after,
+	}, nil
 }
 
 func loadDesktopConfig(opts Options) (agentconfig.Config, error) {
@@ -686,7 +758,6 @@ func processRunning(pid int) bool {
 
 type RelayHostState struct {
 	Running  bool   `json:"running"`
-	State    string `json:"state"`
 	PID      int    `json:"pid,omitempty"`
 	Target   string `json:"target,omitempty"`
 	Message  string `json:"message"`
@@ -714,16 +785,21 @@ func StartRelayHost(opts Options, targetAddress string) (RelayHostState, error) 
 	}
 	cfg, _ := loadDesktopConfig(opts)
 	if !cp.CanPush || cp.CurrentHostID != cfg.HostID {
-		return RelayHostState{State: "blocked_not_current_host", Message: "当前本地主机不是 current host，不能启动公网中转 relay。"}, nil
+		return RelayHostState{Message: "当前本地主机不是 current host，不能启动公网中转 relay。"}, nil
+	}
+	if client, err := coordinator.NewClient(cfg.CoordinatorURL); err == nil {
+		gen := cp.CurrentHostGeneration
+		if _, err := ensureActiveLease(context.Background(), cfg, client, &gen); err != nil {
+			return RelayHostState{}, err
+		}
 	}
 
 	pidPath := relayHostPIDPath(opts)
 	// if already running, return
 	if raw, err := os.ReadFile(pidPath); err == nil {
 		if p, _ := strconv.Atoi(strings.TrimSpace(string(raw))); p > 0 && processRunning(p) {
-			return RelayHostState{Running: true, State: "running", PID: p, Target: targetAddress, Message: "公网中转 relay host 已在运行。"}, nil
+			return RelayHostState{Running: true, PID: p, Target: targetAddress, Message: "公网中转 relay host 已在运行。"}, nil
 		}
-		_ = os.Remove(pidPath)
 	}
 
 	if targetAddress == "" {
@@ -748,7 +824,7 @@ func StartRelayHost(opts Options, targetAddress string) (RelayHostState, error) 
 	// For the manager, we poll list and start per-session host clients.
 	go runRelayHostManager(opts, targetAddress, pidPath)
 
-	return RelayHostState{Running: true, State: "running", PID: pid, Target: targetAddress, Message: "公网中转 relay host 已启动 (manager 运行中)。"}, nil
+	return RelayHostState{Running: true, PID: pid, Target: targetAddress, Message: "公网中转 relay host 已启动 (manager 运行中)。"}, nil
 }
 
 func StopRelayHost(opts Options) (RelayHostState, error) {
@@ -756,7 +832,7 @@ func StopRelayHost(opts Options) (RelayHostState, error) {
 	pidPath := relayHostPIDPath(opts)
 	raw, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return RelayHostState{State: "stopped", Message: "公网中转 relay host 未运行。"}, nil
+		return RelayHostState{Message: "公网中转 relay host 未运行。"}, nil
 	}
 	if err != nil {
 		return RelayHostState{}, err
@@ -764,7 +840,7 @@ func StopRelayHost(opts Options) (RelayHostState, error) {
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if pid <= 0 || !processRunning(pid) {
 		_ = os.Remove(pidPath)
-		return RelayHostState{State: "stale_pid", Message: "公网中转 relay host 记录已清理。"}, nil
+		return RelayHostState{Message: "公网中转 relay host 记录已清理。"}, nil
 	}
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -774,7 +850,7 @@ func StopRelayHost(opts Options) (RelayHostState, error) {
 		return RelayHostState{}, fmt.Errorf("停止 relay host 失败: %w", err)
 	}
 	_ = os.Remove(pidPath)
-	return RelayHostState{Running: false, State: "stopped", Message: "公网中转 relay host 已停止。"}, nil
+	return RelayHostState{Running: false, Message: "公网中转 relay host 已停止。"}, nil
 }
 
 func RelayHostStatus(opts Options) (RelayHostState, error) {
@@ -782,22 +858,14 @@ func RelayHostStatus(opts Options) (RelayHostState, error) {
 	pidPath := relayHostPIDPath(opts)
 	raw, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
-		cp, cpErr := CanPush(context.Background(), opts)
-		if cpErr == nil && !cp.CanPush {
-			return RelayHostState{Running: false, State: "blocked_not_current_host", Message: cp.Reason}, nil
-		}
-		return RelayHostState{Running: false, State: "stopped", Message: "公网中转 relay host 未运行。"}, nil
+		return RelayHostState{Running: false, Message: "公网中转 relay host 未运行。"}, nil
 	}
 	if err != nil {
 		return RelayHostState{}, err
 	}
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
 	running := pid > 0 && processRunning(pid)
-	if !running {
-		_ = os.Remove(pidPath)
-		return RelayHostState{Running: false, State: "stale_pid", PID: pid, Message: "公网中转 relay host pid 已失效并清理。"}, nil
-	}
-	return RelayHostState{Running: true, State: "running", PID: pid, Message: "公网中转 relay host 状态已查询。"}, nil
+	return RelayHostState{Running: running, PID: pid, Message: "公网中转 relay host 状态已查询。"}, nil
 }
 
 // runRelayHostManager discovers tunnel sessions assigned to us and starts HostRelayClient for each.
@@ -879,7 +947,6 @@ func StartServer(opts Options) (StartServerResult, error) {
 
 	serverDir := filepath.Clean(cfg.Server.Dir)
 	res.ServerDir = serverDir
-	res.WorkingDirectory = serverDir
 
 	if serverDir == "" {
 		res.ErrorCode = "no_server_dir"
@@ -892,8 +959,24 @@ func StartServer(opts Options) (StartServerResult, error) {
 		res.Suggestion = "请确认目录存在并重新导入。"
 		return res, nil
 	}
+	workingDir, workingErr := resolveWorkingDir(serverDir, cfg.Server.WorkingDir)
+	if workingErr != nil {
+		res.ErrorCode = "working_dir_invalid"
+		res.Message = "启动工作目录不可用: " + workingErr.Error()
+		res.Suggestion = "请重新选择服务端目录或启动文件。"
+		return res, nil
+	}
+	res.WorkingDirectory = workingDir
 
 	setup, _ := LoadSetup(opts)
+	startCtx := context.Background()
+	var startLease leaseStopper = noopLeaseKeeper{}
+	if client, clientErr := coordinator.NewClient(cfg.CoordinatorURL); clientErr == nil {
+		startCtx, startLease = maybeStartCurrentHostLeaseKeeper(startCtx, cfg, client, nil)
+	}
+	defer func() {
+		_ = startLease.Stop()
+	}()
 
 	// inspect for jar, eula, props
 	report, inspectErr := mcimport.Inspect(serverDir)
@@ -905,6 +988,9 @@ func StartServer(opts Options) (StartServerResult, error) {
 
 	jar := report.LaunchJar
 	launchCommand := cfg.Server.Command
+	if launchCommand == "" && strings.TrimSpace(cfg.Server.LaunchPath) != "" {
+		launchCommand = mcimport.SuggestedCommand(cfg.Server.LaunchPath)
+	}
 	if report.LaunchEntry == "" && launchCommand == "" {
 		res.ErrorCode = "missing_launch_entry"
 		res.Message = "找不到服务端启动入口。请重新导入 Minecraft 服务端目录。"
@@ -912,15 +998,15 @@ func StartServer(opts Options) (StartServerResult, error) {
 		return res, nil
 	}
 	if jar != "" {
-		res.JarPath = filepath.Join(serverDir, jar)
+		res.JarPath = resolveLaunchPath(serverDir, jar)
 	}
 
 	// java
-	javaPath, javaErr := exec.LookPath("java")
+	javaPath, javaErr := resolveJavaExecutable(firstNonEmpty(cfg.Server.JavaPath, report.LaunchProfile.JavaPath))
 	if javaErr != nil {
 		res.ErrorCode = "no_java"
-		res.Message = "未检测到 Java，请安装 Java 17 或 21。"
-		res.Suggestion = "安装 Java 17/21 (推荐 Eclipse Adoptium Temurin) 并确保 java.exe 在系统 PATH 中。"
+		res.Message = "未检测到可用 Java: " + javaErr.Error()
+		res.Suggestion = "安装 Java 17/21 (推荐 Eclipse Adoptium Temurin)，或在启动配置中重新选择 java.exe。"
 		return res, nil
 	}
 	res.JavaPath = javaPath
@@ -948,7 +1034,7 @@ func StartServer(opts Options) (StartServerResult, error) {
 		res.ErrorCode = psInfo.ErrorCode
 		res.Message = psErr.Error()
 		res.ScriptPath = psInfo.ScriptPath
-		res.WorkingDirectory = serverDir
+		res.WorkingDirectory = workingDir
 		res.LauncherPath = psInfo.LauncherPath
 		res.Suggestion = psInfo.Suggestion
 		return res, nil
@@ -967,7 +1053,12 @@ func StartServer(opts Options) (StartServerResult, error) {
 			res.Message = "启动命令解析失败: " + parseErr.Error()
 			return res, nil
 		}
-		_ = argv // validated; mcserver parses again inside the supervisor.
+		if len(argv) > 0 && isJavaExecutableName(argv[0]) && javaPath != "" {
+			argv[0] = javaPath
+			launchArgv = argv
+			launchCommand = mcserver.DisplayCommand(launchArgv)
+			res.LaunchCommand = launchCommand
+		}
 	}
 
 	// server.properties warn but not block (7)
@@ -996,6 +1087,7 @@ func StartServer(opts Options) (StartServerResult, error) {
 
 	// prepare mcserver start opts , use runtime subdir for isolation
 	runtimeDir := filepath.Join(opts.AppDataDir, "runtime")
+	res.RuntimeDir = runtimeDir
 	logDirForServer := filepath.Join(opts.AppDataDir, "logs", "minecraft")
 	// use config stop timeout or default
 	stopTimeout := 30 * time.Second
@@ -1007,6 +1099,7 @@ func StartServer(opts Options) (StartServerResult, error) {
 
 	startOpts := mcserver.StartOptions{
 		ServerDir:   serverDir,
+		WorkingDir:  workingDir,
 		Command:     launchCommand,
 		CommandArgv: launchArgv,
 		LogDir:      logDirForServer,
@@ -1021,8 +1114,18 @@ func StartServer(opts Options) (StartServerResult, error) {
 	}
 
 	// call mcserver start (this will record its own state/pid in runtime, we also record simple pid)
-	state, startErr := mcserver.Start(context.Background(), exe, startOpts)
+	state, startErr := mcserver.Start(startCtx, exe, startOpts)
+	if leaseErr := startLease.Stop(); leaseErr != nil {
+		res.ErrorCode = leaseErrorCode(leaseErr)
+		res.Message = leaseErr.Error()
+		res.Suggestion = "请重新获取 Host lease 后重试；如果本机不是 current host，请先完成接管。"
+		return res, nil
+	}
 	if startErr != nil {
+		applyStartServerDiagnostics(&res, runtimeDir, logDirForServer, startErr)
+		if res.ErrorCode != "" {
+			return res, nil
+		}
 		if len(launchArgv) > 0 {
 			res.ErrorCode = "powershell_script_failed"
 			res.ExitCode = -1
@@ -1047,6 +1150,148 @@ func StartServer(opts Options) (StartServerResult, error) {
 	_ = os.WriteFile(logFile, []byte(fmt.Sprintf("[%s] MC server start requested via ACBH desktop (pid supervisor ~%d, see minecraft/*.log)\n", time.Now().Format(time.RFC3339), state.PID)), 0o600)
 
 	return res, nil
+}
+
+func resolveWorkingDir(serverDir string, configured string) (string, error) {
+	workingDir := strings.TrimSpace(configured)
+	if workingDir == "" {
+		workingDir = serverDir
+	}
+	if !filepath.IsAbs(workingDir) {
+		workingDir = filepath.Join(serverDir, workingDir)
+	}
+	abs, err := filepath.Abs(filepath.Clean(workingDir))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s 不是目录", abs)
+	}
+	return abs, nil
+}
+
+func resolveLaunchPath(serverDir string, launchPath string) string {
+	launchPath = strings.TrimSpace(launchPath)
+	if launchPath == "" {
+		return ""
+	}
+	clean := filepath.Clean(filepath.FromSlash(launchPath))
+	if filepath.IsAbs(clean) {
+		return clean
+	}
+	return filepath.Join(serverDir, clean)
+}
+
+func resolveJavaExecutable(configured string) (string, error) {
+	configured = strings.TrimSpace(configured)
+	if configured != "" {
+		if filepath.IsAbs(configured) {
+			info, err := os.Stat(configured)
+			if err != nil {
+				return "", err
+			}
+			if info.IsDir() {
+				return "", fmt.Errorf("%s 是目录，不是 java 可执行文件", configured)
+			}
+			return configured, nil
+		}
+		return exec.LookPath(configured)
+	}
+	return exec.LookPath("java")
+}
+
+func isJavaExecutableName(value string) bool {
+	base := strings.ToLower(filepath.Base(strings.TrimSpace(value)))
+	return base == "java" || base == "java.exe"
+}
+
+func applyStartServerDiagnostics(res *StartServerResult, runtimeDir string, logDir string, startErr error) {
+	errText := startErr.Error()
+	status, _ := ManagedServerStatus(Options{AppDataDir: filepath.Dir(runtimeDir)})
+	status.RuntimeDir = runtimeDir
+	lower := strings.ToLower(errText)
+	switch {
+	case strings.Contains(lower, "server process lock already exists"):
+		res.ErrorCode = "stale_server_lock"
+		res.Message = "检测到旧 server.lock，启动被安全拦截：" + errText
+		res.Suggestion = "如果确认旧 MC/Java 进程已停止，请点击“修复启动状态”；如果仍有旧进程，请先停止服务端。"
+		res.Repairable = status.Repairable
+		res.LockPID = status.LockPID
+		res.ProcessCommandLine = status.ProcessCommandLine
+	case strings.Contains(lower, "server state is stale"), strings.Contains(lower, "cannot be verified"):
+		res.ErrorCode = "server_state_blocked"
+		res.Message = "检测到旧 server-state 或无法验证的 supervisor 状态，启动被安全拦截：" + errText
+		res.Suggestion = "确认旧服务端已停止后再执行“修复启动状态”。"
+		res.Repairable = status.Repairable
+		res.LockPID = status.LockPID
+		res.ProcessCommandLine = status.ProcessCommandLine
+	case strings.Contains(lower, "server supervisor did not become ready"):
+		res.ErrorCode = "supervisor_not_ready"
+		res.Message = "MC 服务端 supervisor 未在超时时间内就绪：" + errText
+		res.Suggestion = "请检查 workingDir、launchPath、javaPath，以及 logs/minecraft/server-stderr.log。"
+		res.ReadyTimeout = "10s"
+		res.LogTail = append(res.LogTail, tailFileLines(filepath.Join(logDir, "server-stderr.log"), 40)...)
+		res.LogTail = append(res.LogTail, tailFileLines(filepath.Join(logDir, "server-stdout.log"), 20)...)
+	}
+}
+
+func tailFileLines(path string, maxLines int) []string {
+	if maxLines <= 0 {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	text = strings.TrimRight(text, "\n")
+	if text == "" {
+		return nil
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	for i := range lines {
+		lines[i] = redactDiagnosticLine(lines[i])
+	}
+	return lines
+}
+
+func processCommandLine(pid int) string {
+	if pid <= 0 || runtime.GOOS != "windows" {
+		return ""
+	}
+	script := fmt.Sprintf(`(Get-CimInstance Win32_Process -Filter "ProcessId=%d").CommandLine`, pid)
+	out, err := exec.Command("powershell.exe", "-NoLogo", "-NoProfile", "-Command", script).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(redactDiagnosticLine(string(out)))
+}
+
+func redactDiagnosticLine(value string) string {
+	for _, marker := range []string{"hostToken", "accessKey", "joinToken", "relayToken", "rcon.password", "ACBH_RCON_PASSWORD"} {
+		lower := strings.ToLower(value)
+		idx := strings.Index(lower, strings.ToLower(marker))
+		if idx < 0 {
+			continue
+		}
+		end := idx + len(marker)
+		if end < len(value) && (value[end] == '=' || value[end] == ':') {
+			secretStart := end + 1
+			secretEnd := secretStart
+			for secretEnd < len(value) && !strings.ContainsRune(" \t\r\n,;}", rune(value[secretEnd])) {
+				secretEnd++
+			}
+			value = value[:secretStart] + "[REDACTED]" + value[secretEnd:]
+		}
+	}
+	return value
 }
 
 type powerShellLaunchInfo struct {
@@ -1134,15 +1379,11 @@ func resolveLaunchScriptInside(serverDir string, scriptPath string) (string, err
 	if strings.HasPrefix(scriptPath, `\\`) {
 		return "", errors.New("暂不支持网络 UNC 启动脚本路径。")
 	}
-	normalizedScriptPath := filepath.FromSlash(strings.ReplaceAll(scriptPath, `\`, `/`))
-	if runtime.GOOS != "windows" && looksLikeWindowsAbsolutePath(normalizedScriptPath) {
-		return "", errors.New("run.ps1 不在服务端目录内，已拒绝执行。")
-	}
 	baseAbs, err := filepath.Abs(filepath.Clean(serverDir))
 	if err != nil {
 		return "", err
 	}
-	clean := filepath.Clean(normalizedScriptPath)
+	clean := filepath.Clean(filepath.FromSlash(scriptPath))
 	var candidate string
 	if filepath.IsAbs(clean) {
 		candidate = clean
@@ -1157,21 +1398,10 @@ func resolveLaunchScriptInside(serverDir string, scriptPath string) (string, err
 	if err != nil {
 		return "", err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+	if !filepath.IsAbs(clean) && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel)) {
 		return "", errors.New("run.ps1 不在服务端目录内，已拒绝执行。")
 	}
 	return candidateAbs, nil
-}
-
-func looksLikeWindowsAbsolutePath(path string) bool {
-	if len(path) < 3 || path[1] != ':' {
-		return false
-	}
-	drive := path[0]
-	if !((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) {
-		return false
-	}
-	return path[2] == '/' || path[2] == '\\'
 }
 
 func StopServer(opts Options) (StopServerResult, error) {

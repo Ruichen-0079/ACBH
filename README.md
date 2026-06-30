@@ -46,16 +46,6 @@ A public lightweight service responsible for groups, members, hosts, heartbeats,
 
 A client-side daemon/CLI installed on candidate host devices. It downloads server packs, starts Minecraft, performs safe sync, uploads snapshots, reports health, and executes takeover.
 
-### Windows 桌面 GUI（中文）
-
-`scripts/acbh-desktop-gui.ps1` 提供四步组网与世界备份。v0.4.0-alpha2 起，主界面 **成员与邀请** 支持：
-
-- Owner 生成 / 查看 / 撤销 Group 邀请码（后台任务，窗口保持响应）
-- 邀请码明文仅在一次结果对话框显示，日志与列表默认掩码
-- 加入已有 Group 时使用 `ACBH_INVITE_CODE` 环境变量，避免命令行暴露
-
-详见 [docs/zh-CN/windows-gui-invites.md](docs/zh-CN/windows-gui-invites.md) 与 [docs/zh-CN/v0.4-operations.md](docs/zh-CN/v0.4-operations.md)。
-
 ### Storage
 
 A content-addressed file store for server packs, snapshot manifests, and file blobs. V1 starts with local filesystem storage; S3-compatible storage can be added later.

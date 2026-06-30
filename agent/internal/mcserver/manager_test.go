@@ -126,6 +126,10 @@ func TestSupervisorCommandArgvHandlesSpacesAndRecordsLauncherPID(t *testing.T) {
 	if err := os.MkdirAll(serverDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	workingDir := filepath.Join(serverDir, "工作目录")
+	if err := os.MkdirAll(workingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("GO_WANT_MCSERVER_HELPER", "1")
 	argv := []string{os.Args[0], "-test.run=TestMCServerHelperProcess", "--", "graceful"}
 
@@ -134,6 +138,7 @@ func TestSupervisorCommandArgvHandlesSpacesAndRecordsLauncherPID(t *testing.T) {
 		done <- runTestSupervisor(context.Background(), SupervisorOptions{
 			StartOptions: StartOptions{
 				ServerDir:   serverDir,
+				WorkingDir:  workingDir,
 				CommandArgv: argv,
 				LogDir:      logDir,
 				RuntimeDir:  runtimeDir,
@@ -148,6 +153,9 @@ func TestSupervisorCommandArgvHandlesSpacesAndRecordsLauncherPID(t *testing.T) {
 	}
 	if len(status.State.CommandArgv) != len(argv) {
 		t.Fatalf("CommandArgv = %#v, want %#v", status.State.CommandArgv, argv)
+	}
+	if status.State.WorkingDir != workingDir {
+		t.Fatalf("WorkingDir = %q, want %q", status.State.WorkingDir, workingDir)
 	}
 	if _, stopped, err := Stop(runtimeDir); err != nil || !stopped {
 		t.Fatalf("Stop() stopped=%t error=%v", stopped, err)
@@ -516,6 +524,7 @@ func TestStartSupervisorProcess(t *testing.T) {
 	}
 	flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
 	serverDir := flags.String("server-dir", "", "")
+	workingDir := flags.String("working-dir", "", "")
 	command := flags.String("command", "", "")
 	commandArgv := flags.String("command-argv", "", "")
 	logDir := flags.String("log-dir", "", "")
@@ -527,7 +536,7 @@ func TestStartSupervisorProcess(t *testing.T) {
 	}
 	err := RunSupervisor(context.Background(), SupervisorOptions{
 		StartOptions: StartOptions{
-			ServerDir: *serverDir, Command: *command, LogDir: *logDir,
+			ServerDir: *serverDir, WorkingDir: *workingDir, Command: *command, LogDir: *logDir,
 			CommandArgv: DecodeCommandArgv(*commandArgv),
 			RuntimeDir:  *runtimeDir, StopTimeout: *stopTimeout,
 		},
