@@ -86,6 +86,74 @@ func TestEnsureBackupProfileForServerDirMigratesWhenServerDirChanges(t *testing.
 	}
 }
 
+func TestBackupSummaryFallsBackToDesktopConfigWhenAgentConfigMissing(t *testing.T) {
+	opts := Options{AppDataDir: t.TempDir()}
+	serverDir := filepath.Join(opts.AppDataDir, "Desktop Only Server")
+	mustMkdir(t, serverDir)
+	launchBat := filepath.Join(serverDir, "双击直接开服！！！.bat")
+	mustWrite(t, launchBat, "@echo off\n")
+	mustWrite(t, filepath.Join(serverDir, "server.properties"), "level-name=world\n")
+
+	if err := SaveDesktopConfig(opts, DesktopConfig{
+		LastServerDir: serverDir,
+		LaunchProfile: DesktopLaunchProfile{Kind: "script", Path: launchBat},
+	}); err != nil {
+		t.Fatalf("SaveDesktopConfig() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opts.AppDataDir, agentconfig.FileName)); !os.IsNotExist(err) {
+		t.Fatalf("agent config should not exist before summary: %v", err)
+	}
+
+	summary, err := BackupProfileSummaryForServer(opts, "")
+	if err != nil {
+		t.Fatalf("BackupProfileSummaryForServer() error = %v", err)
+	}
+	if summary["ok"] != true {
+		t.Fatalf("summary ok = %#v, message = %#v", summary["ok"], summary["message"])
+	}
+	if got := summary["serverDir"]; got != serverDir {
+		t.Fatalf("summary serverDir = %#v, want %q", got, serverDir)
+	}
+	worldPath := filepath.Join(serverDir, "world")
+	if summary["worldPath"] != worldPath {
+		t.Fatalf("summary worldPath = %#v, want %q", summary["worldPath"], worldPath)
+	}
+	if summary["worldPending"] != true {
+		t.Fatalf("summary worldPending = %#v, want true", summary["worldPending"])
+	}
+	roots, ok := summary["roots"].([]BackupRootScanInfo)
+	if !ok {
+		t.Fatalf("summary roots type = %T, want []BackupRootScanInfo", summary["roots"])
+	}
+	if len(roots) == 0 {
+		t.Fatal("summary roots must not be empty")
+	}
+	for _, root := range roots {
+		if !strings.HasPrefix(root.SourcePath, serverDir) || !strings.HasPrefix(root.RestorePath, serverDir) {
+			t.Fatalf("root %q paths must stay under serverDir: source=%q restore=%q", root.RootID, root.SourcePath, root.RestorePath)
+		}
+		if root.RestorePath != root.SourcePath {
+			t.Fatalf("root %q restorePath = %q, want %q", root.RootID, root.RestorePath, root.SourcePath)
+		}
+	}
+	worldRoot, found := findSummaryRoot(roots, "world")
+	if !found {
+		t.Fatal("summary missing world root")
+	}
+	if !worldRoot.Pending {
+		t.Fatalf("world root = %#v, want pending=true", worldRoot)
+	}
+}
+
+func findSummaryRoot(roots []BackupRootScanInfo, rootID string) (BackupRootScanInfo, bool) {
+	for _, root := range roots {
+		if root.RootID == rootID {
+			return root, true
+		}
+	}
+	return BackupRootScanInfo{}, false
+}
+
 func TestSaveServerConfigAutoCreatesBackupProfile(t *testing.T) {
 	opts := Options{AppDataDir: t.TempDir()}
 	serverDir := filepath.Join(opts.AppDataDir, "Server Root")

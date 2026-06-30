@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -155,7 +156,7 @@ func loadConfiguredServerDir(opts Options) (string, error) {
 		if dir := strings.TrimSpace(cfg.Server.Dir); dir != "" {
 			return dir, nil
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	desktopCfg, err := LoadDesktopConfig(opts)
