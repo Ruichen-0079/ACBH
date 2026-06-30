@@ -269,7 +269,21 @@ func registerBackupTopLevelEndpoints(register routeRegistrar, manager *Operation
 		handleBackupRestoreOperation(w, r, manager, opts, "BackupProfileRestore", "ask_on_conflict")
 	})
 	register("/api/backup/sync", func(w http.ResponseWriter, r *http.Request) {
-		handleBackupRestoreOperation(w, r, manager, opts, "BackupProfileSync", "ask_on_conflict")
+		handleBackupRestoreOperation(w, r, manager, opts, "BackupProfileSync", "remote_overwrite")
+	})
+	register("/api/backup/summary", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		serverDir := strings.TrimSpace(r.URL.Query().Get("serverDir"))
+		out, err := BackupProfileSummaryForServer(opts, serverDir)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"ok": false, "message": err.Error()})
+			return
+		}
+		writeJSON(w, out)
 	})
 	register("/api/backup/pin", func(w http.ResponseWriter, r *http.Request) {
 		handleBackupSnapshotAdmin(w, r, manager, opts, "BackupProfilePin")

@@ -17,6 +17,21 @@ func PickFile(title, filter string) (string, error) {
 }
 
 func PickFiles(title, filter string) ([]string, error) {
+	return PickFilesIn(title, filter, "")
+}
+
+func PickFolderIn(title, initialDir string) (string, error) {
+	_ = initialDir
+	return "", errors.New("native folder picker is unavailable on this platform; enter the path manually")
+}
+
+func PickFileIn(title, filter, initialDir string) (string, error) {
+	_ = initialDir
+	return "", errors.New("native file picker is unavailable on this platform; enter the path manually")
+}
+
+func PickFilesIn(title, filter, initialDir string) ([]string, error) {
+	_ = initialDir
 	return nil, errors.New("native file picker is unavailable on this platform; enter the paths manually")
 }
 

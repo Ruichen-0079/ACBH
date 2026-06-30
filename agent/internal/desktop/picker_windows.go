@@ -69,7 +69,8 @@ type browseInfoW struct {
 	Image         int32
 }
 
-func pickFolderNative(title string) (string, error) {
+func pickFolderNative(title, initialDir string) (string, error) {
+	_ = initialDir
 	ensureCOM()
 	defer releaseCOM()
 	display := make([]uint16, syscall.MAX_PATH)
@@ -102,8 +103,8 @@ func pickFolderNative(title string) (string, error) {
 	return path, nil
 }
 
-func pickFileNative(title, filter string) (string, error) {
-	paths, err := pickFilesNative(title, filter, false)
+func pickFileNative(title, filter, initialDir string) (string, error) {
+	paths, err := pickFilesNative(title, filter, initialDir, false)
 	if err != nil {
 		return "", err
 	}
@@ -113,7 +114,7 @@ func pickFileNative(title, filter string) (string, error) {
 	return paths[0], nil
 }
 
-func pickFilesNative(title, filter string, multi bool) ([]string, error) {
+func pickFilesNative(title, filter, initialDir string, multi bool) ([]string, error) {
 	ensureCOM()
 	defer releaseCOM()
 	buf := make([]uint16, 32*1024)
@@ -136,6 +137,11 @@ func pickFilesNative(title, filter string, multi bool) ([]string, error) {
 		MaxFile:    uint32(len(buf)),
 		Title:      uintptr(unsafe.Pointer(titlePtr)),
 		Flags:      uint32(flags),
+	}
+	if strings.TrimSpace(initialDir) != "" {
+		if dirPtr, err := syscall.UTF16PtrFromString(initialDir); err == nil {
+			ofn.InitialDir = uintptr(unsafe.Pointer(dirPtr))
+		}
 	}
 	ok, _, callErr := procGetOFN.Call(uintptr(unsafe.Pointer(&ofn)))
 	if ok == 0 {
@@ -199,15 +205,27 @@ func releaseCOM() {
 }
 
 func PickFolder(title string) (string, error) {
-	return pickFolderNative(defaultPickerTitle(title, "选择文件夹"))
+	return PickFolderIn(title, "")
+}
+
+func PickFolderIn(title, initialDir string) (string, error) {
+	return pickFolderNative(defaultPickerTitle(title, "选择文件夹"), initialDir)
 }
 
 func PickFile(title, filter string) (string, error) {
-	return pickFileNative(defaultPickerTitle(title, "选择文件"), filter)
+	return PickFileIn(title, filter, "")
+}
+
+func PickFileIn(title, filter, initialDir string) (string, error) {
+	return pickFileNative(defaultPickerTitle(title, "选择文件"), filter, initialDir)
 }
 
 func PickFiles(title, filter string) ([]string, error) {
-	return pickFilesNative(defaultPickerTitle(title, "选择文件"), filter, true)
+	return PickFilesIn(title, filter, "")
+}
+
+func PickFilesIn(title, filter, initialDir string) ([]string, error) {
+	return pickFilesNative(defaultPickerTitle(title, "选择文件"), filter, initialDir, true)
 }
 
 func defaultPickerTitle(title, fallback string) string {

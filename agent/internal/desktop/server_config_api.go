@@ -21,14 +21,15 @@ type ServerConfigPayload struct {
 }
 
 type SaveServerConfigResult struct {
-	OK        bool                  `json:"ok"`
-	Outcome   OperationOutcome      `json:"outcome"`
-	Message   string                `json:"message"`
-	ErrorCode string                `json:"errorCode,omitempty"`
-	Field     string                `json:"field,omitempty"`
-	TraceID   string                `json:"traceId,omitempty"`
-	Server    ServerConfigPayload   `json:"server,omitempty"`
-	Saved     ServerConfigPayload   `json:"saved,omitempty"`
+	OK        bool                      `json:"ok"`
+	Outcome   OperationOutcome          `json:"outcome"`
+	Message   string                    `json:"message"`
+	ErrorCode string                    `json:"errorCode,omitempty"`
+	Field     string                    `json:"field,omitempty"`
+	TraceID   string                    `json:"traceId,omitempty"`
+	Server    ServerConfigPayload       `json:"server,omitempty"`
+	Saved     ServerConfigPayload       `json:"saved,omitempty"`
+	Backup    *BackupProfileEnsureResult `json:"backup,omitempty"`
 }
 
 func LoadServerConfigPayload(opts Options) (ServerConfigPayload, error) {
@@ -36,15 +37,30 @@ func LoadServerConfigPayload(opts Options) (ServerConfigPayload, error) {
 	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			desktopCfg, _ := LoadDesktopConfig(opts)
-			if desktopCfg.LastServerDir != "" {
-				return ServerConfigPayload{ServerDir: desktopCfg.LastServerDir}, nil
-			}
-			return ServerConfigPayload{}, nil
+			desktopCfg, desktopErr := LoadDesktopConfig(opts)
+			return serverPayloadFromDesktop(desktopCfg, desktopErr), nil
 		}
 		return ServerConfigPayload{}, err
 	}
 	return serverPayloadFromAgent(cfg.Server, cfg.Server.Dir), nil
+}
+
+func serverPayloadFromDesktop(desktopCfg DesktopConfig, desktopErr error) ServerConfigPayload {
+	if desktopErr != nil {
+		return ServerConfigPayload{}
+	}
+	if strings.TrimSpace(desktopCfg.LastServerDir) == "" {
+		return ServerConfigPayload{}
+	}
+	payload := ServerConfigPayload{
+		ServerDir: desktopCfg.LastServerDir,
+		LaunchType: firstNonEmpty(desktopCfg.LaunchProfile.Kind, "jar"),
+		LaunchPath: desktopCfg.LaunchProfile.Path,
+		JavaPath:   desktopCfg.JavaPath,
+		WorkingDir: desktopCfg.LastServerDir,
+		StartTimeoutSeconds: 120,
+	}
+	return payload
 }
 
 func SaveServerConfigValidated(opts Options, payload ServerConfigPayload, traceID string) (SaveServerConfigResult, error) {
@@ -83,46 +99,73 @@ func SaveServerConfigValidated(opts Options, payload ServerConfigPayload, traceI
 			return result, nil
 		}
 	}
-	cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			cfg = agentconfig.Config{AgentVersion: agentconfig.AgentVersion}
-		} else {
-			return result, err
-		}
+	expected := payload
+	if strings.TrimSpace(expected.WorkingDir) == "" {
+		expected.WorkingDir = expected.ServerDir
 	}
-	cfg.Server = agentServerFromPayload(payload)
-	configPath := filepath.Join(opts.AppDataDir, agentconfig.FileName)
-	if err := agentconfig.Save(configPath, cfg); err != nil {
+	if expected.StartTimeoutSeconds <= 0 {
+		expected.StartTimeoutSeconds = 120
+	}
+	if err := syncDesktopConfig(opts, func(dcfg *DesktopConfig) {
+		dcfg.LastServerDir = expected.ServerDir
+		if expected.LaunchPath != "" {
+			dcfg.LaunchProfile = DesktopLaunchProfile{Kind: expected.LaunchType, Path: expected.LaunchPath}
+		}
+		dcfg.JavaPath = expected.JavaPath
+	}); err != nil {
 		result.ErrorCode = "save_failed"
 		result.Message = err.Error()
 		return result, nil
 	}
-	readBack, err := agentconfig.Load(configPath)
-	if err != nil {
-		result.ErrorCode = "read_back_failed"
-		result.Message = err.Error()
-		return result, nil
-	}
-	saved := serverPayloadFromAgent(readBack.Server, readBack.Server.Dir)
-	expected := serverPayloadFromAgent(cfg.Server, cfg.Server.Dir)
+	desktopCfg, desktopErr := LoadDesktopConfig(opts)
+	saved := serverPayloadFromDesktop(desktopCfg, desktopErr)
 	if !serverPayloadEqual(saved, expected) {
 		result.ErrorCode = "read_back_mismatch"
 		result.Field = "serverDir"
 		result.Message = fmt.Sprintf("保存后回读不一致：提交 %q，读取 %q", expected.ServerDir, saved.ServerDir)
 		return result, nil
 	}
-	_ = syncDesktopConfig(opts, func(dcfg *DesktopConfig) {
-		dcfg.LastServerDir = saved.ServerDir
-		if saved.LaunchPath != "" {
-			dcfg.LaunchProfile = DesktopLaunchProfile{Kind: saved.LaunchType, Path: saved.LaunchPath}
+	configPath := filepath.Join(opts.AppDataDir, agentconfig.FileName)
+	cfg, err := agentconfig.Load(configPath)
+	agentReady := err == nil && cfg.Validate() == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return result, err
+	}
+	if agentReady {
+		cfg.Server = agentServerFromPayload(expected)
+		if err := agentconfig.Save(configPath, cfg); err != nil {
+			result.ErrorCode = "save_failed"
+			result.Message = err.Error()
+			return result, nil
 		}
-		dcfg.JavaPath = saved.JavaPath
-	})
+		readBack, err := agentconfig.Load(configPath)
+		if err != nil {
+			result.ErrorCode = "read_back_failed"
+			result.Message = err.Error()
+			return result, nil
+		}
+		agentSaved := serverPayloadFromAgent(readBack.Server, readBack.Server.Dir)
+		if !serverPayloadEqual(agentSaved, expected) {
+			result.ErrorCode = "read_back_mismatch"
+			result.Field = "serverDir"
+			result.Message = fmt.Sprintf("保存后回读不一致：提交 %q，读取 %q", expected.ServerDir, agentSaved.ServerDir)
+			return result, nil
+		}
+		saved = agentSaved
+	}
+	if backup, err := EnsureBackupProfileForServerDir(opts, saved.ServerDir); err == nil {
+		result.Backup = &backup
+		if backup.Message != "" {
+			result.Message = "服务器配置已保存。" + backup.Message
+		} else {
+			result.Message = "服务器配置已保存。"
+		}
+	} else {
+		result.Message = "服务器配置已保存，但备份配置同步失败：" + err.Error()
+	}
 	result.OK = true
 	result.Outcome = OutcomeSuccess
-	result.Message = "服务器配置已保存。"
-	result.Server = expected
+	result.Server = saved
 	result.Saved = saved
 	return result, nil
 }

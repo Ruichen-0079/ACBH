@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -267,6 +268,213 @@ func TestOperationManagerCancelCloseTimeoutAndHistory(t *testing.T) {
 	}
 	if got := len(manager.Summary().Operations); got > 100 {
 		t.Fatalf("history length = %d, want <= 100", got)
+	}
+}
+
+func TestDesktopRuntimeSaveServerConfigAcceptsUnicodeBodyWithASCIIIdempotencyKey(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	appData, cleanup := runtimeTestAppData(t)
+	defer cleanup()
+	rt, err := StartDesktopRuntime(ctx, Options{AppDataDir: appData}, RuntimeOptions{})
+	if err != nil {
+		cancel()
+		t.Fatalf("StartDesktopRuntime() error = %v", err)
+	}
+	defer closeRuntimeForTest(rt, cancel)
+	base := runtimeBaseURL(t, rt.URL)
+
+	if err := agentconfig.Save(filepath.Join(appData, agentconfig.FileName), agentconfig.Config{
+		CoordinatorURL: "http://127.0.0.1:6121",
+		GroupID:        "grp_test",
+		MemberID:       "mem_test",
+		HostID:         "host_test",
+		HostToken:      "token",
+		DisplayName:    "Tester",
+		DeviceName:     "PC",
+		Platform:       runtime.GOOS,
+		AgentVersion:   agentconfig.AgentVersion,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	serverDir := filepath.Join(appData, "中文 Server Dir")
+	if err := os.MkdirAll(serverDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launchPath := filepath.Join(serverDir, "双击直接开服！！！.bat")
+	if err := os.WriteFile(launchPath, []byte("@echo off"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"serverDir":%q,"launchType":"script","launchPath":%q,"workingDir":%q,"startArgs":[],"startTimeoutSeconds":120}`,
+		serverDir, launchPath, serverDir)
+	req, err := http.NewRequest(http.MethodPut, base+"/api/config/server", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-ACBH-Desktop-Session", rt.session)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", base)
+	req.Header.Set("Idempotency-Key", "req_7f3c2a1b-4d5e-6789-abcd-ef0123456789")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("save request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("save status = %d, want 202", resp.StatusCode)
+	}
+	var accepted struct {
+		OperationID string `json:"operationId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&accepted); err != nil {
+		t.Fatal(err)
+	}
+	snap := waitRuntimeOperation(t, rt, accepted.OperationID)
+	if snap.State != OperationSucceeded {
+		t.Fatalf("operation state = %s, want succeeded; terminal=%#v", snap.State, snap.Result)
+	}
+	loaded, err := LoadServerConfigPayload(Options{AppDataDir: appData})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ServerDir != serverDir || loaded.LaunchPath != launchPath {
+		t.Fatalf("loaded = %#v, want chinese paths preserved", loaded)
+	}
+	summary, err := BackupProfileSummaryForServer(Options{AppDataDir: appData}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary["serverDir"] != serverDir {
+		t.Fatalf("backup summary serverDir = %#v, want %q", summary["serverDir"], serverDir)
+	}
+}
+
+func TestDesktopRuntimeBackupSummaryWithoutQueryFallsBackToDesktopConfig(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	appData, cleanup := runtimeTestAppData(t)
+	defer cleanup()
+	rt, err := StartDesktopRuntime(ctx, Options{AppDataDir: appData}, RuntimeOptions{})
+	if err != nil {
+		cancel()
+		t.Fatalf("StartDesktopRuntime() error = %v", err)
+	}
+	defer closeRuntimeForTest(rt, cancel)
+	base := runtimeBaseURL(t, rt.URL)
+
+	serverDir := filepath.Join(appData, "Desktop Summary Server")
+	if err := os.MkdirAll(serverDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launchPath := filepath.Join(serverDir, "双击直接开服！！！.bat")
+	if err := os.WriteFile(launchPath, []byte("@echo off"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(serverDir, "server.properties"), []byte("level-name=world\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveDesktopConfig(Options{AppDataDir: appData}, DesktopConfig{
+		LastServerDir: serverDir,
+		LaunchProfile: DesktopLaunchProfile{Kind: "script", Path: launchPath},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(appData, agentconfig.FileName)); !os.IsNotExist(err) {
+		t.Fatalf("agent config should not exist: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, base+"/api/backup/summary", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-ACBH-Desktop-Session", rt.session)
+	req.Header.Set("Origin", base)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("summary status = %d, body = %s", resp.StatusCode, string(body))
+	}
+	var out struct {
+		OK        bool   `json:"ok"`
+		ServerDir string `json:"serverDir"`
+		Message   string `json:"message"`
+		Roots     []struct {
+			RootID      string `json:"rootId"`
+			SourcePath  string `json:"sourcePath"`
+			RestorePath string `json:"restorePath"`
+			Pending     bool   `json:"pending"`
+		} `json:"roots"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK {
+		t.Fatalf("summary = %#v, want ok=true", out)
+	}
+	if out.ServerDir != serverDir {
+		t.Fatalf("summary serverDir = %q, want %q", out.ServerDir, serverDir)
+	}
+	if strings.Contains(out.Message, "read config:") {
+		t.Fatalf("summary message must not expose wrapped agent config read error: %q", out.Message)
+	}
+	if len(out.Roots) == 0 {
+		t.Fatal("summary roots must not be empty")
+	}
+	for _, root := range out.Roots {
+		if !strings.HasPrefix(root.SourcePath, serverDir) || !strings.HasPrefix(root.RestorePath, serverDir) {
+			t.Fatalf("root %q paths must stay under serverDir", root.RootID)
+		}
+	}
+}
+
+func TestDesktopRuntimePickerAPIAcceptsStructuredFiltersInBody(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	appData, cleanup := runtimeTestAppData(t)
+	defer cleanup()
+	rt, err := StartDesktopRuntime(ctx, Options{AppDataDir: appData}, RuntimeOptions{})
+	if err != nil {
+		cancel()
+		t.Fatalf("StartDesktopRuntime() error = %v", err)
+	}
+	defer closeRuntimeForTest(rt, cancel)
+	base := runtimeBaseURL(t, rt.URL)
+
+	serverDir := filepath.Join(appData, "picker-server")
+	if err := os.MkdirAll(serverDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launchPath := filepath.Join(serverDir, "start.bat")
+	if err := os.WriteFile(launchPath, []byte("@echo off"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := fmt.Sprintf(`{"title":"选择启动文件","initialDir":%q,"filters":[{"name":"启动脚本或服务端核心","patterns":["*.bat","*.jar"]}],"path":%q}`,
+		serverDir, launchPath)
+	req, err := http.NewRequest(http.MethodPost, base+"/api/picker/file", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-ACBH-Desktop-Session", rt.session)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", base)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("picker status = %d, want 200", resp.StatusCode)
+	}
+	var out struct {
+		OK   bool   `json:"ok"`
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || out.Path != launchPath {
+		t.Fatalf("picker response = %#v, want path %q", out, launchPath)
 	}
 }
 
