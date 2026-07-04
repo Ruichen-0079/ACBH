@@ -516,11 +516,27 @@ func TestBodyBackupSnapshotAPIs(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("latest download status = %d body=%s", rec.Code, rec.Body.String())
 	}
+	var downloadOp operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &downloadOp); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		var ok bool
+		downloadOp, ok = srv.Operations.Get(downloadOp.OperationID)
+		if ok && downloadOp.State != operations.Running {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if downloadOp.State != operations.Success {
+		t.Fatalf("snapshot download op = %#v", downloadOp)
+	}
 	if got, err := os.ReadFile(filepath.Join(target, "banned-ips.json")); err != nil || string(got) != "[]" {
 		t.Fatalf("downloaded top-level file got=%q err=%v", got, err)
 	}
-	if !strings.Contains(rec.Body.String(), `"actualRequestUrl"`) || !strings.Contains(rec.Body.String(), "/world-backups/latest") {
-		t.Fatalf("download operation missing actualRequestUrl diagnostics: %s", rec.Body.String())
+	downloadJSON, _ := json.Marshal(downloadOp)
+	if !strings.Contains(string(downloadJSON), `"actualRequestUrl"`) || !strings.Contains(string(downloadJSON), "/world-backups/latest") {
+		t.Fatalf("download operation missing actualRequestUrl diagnostics: %s", string(downloadJSON))
 	}
 }
 

@@ -380,16 +380,55 @@ func (s *Server) handleSnapshotDownloadWithID(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	if err := preflightDownloadRequest(req); err != nil {
+		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
+		return
+	}
 	op.Stage = "snapshot_download"
 	op.Progress = 30
 	op.Message = "downloading snapshot through coordinator"
 	s.Operations.Update(op)
-	result, err := s.backupService().Download(r.Context(), cfg, snapshotID, req)
-	if err != nil {
-		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
-		return
+	service := s.backupService()
+	go func(op operations.Operation) {
+		result, err := service.Download(context.Background(), cfg, snapshotID, req)
+		if err != nil {
+			s.Operations.Fail(op, err)
+			return
+		}
+		s.Operations.Complete(op, result, "snapshot downloaded")
+	}(op)
+	writeJSON(w, http.StatusOK, op)
+}
+
+func preflightDownloadRequest(req minibackup.DownloadRequest) *coreerrors.Error {
+	if strings.TrimSpace(req.TargetDir) == "" {
+		return coreerrors.New(coreerrors.TargetDirRequired, "targetDir is required", coreerrors.Details{}, "Choose a new empty restore directory.")
 	}
-	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "snapshot downloaded"))
+	targetDir, absErr := filepath.Abs(req.TargetDir)
+	if absErr != nil {
+		return coreerrors.New(coreerrors.InvalidRequest, "targetDir is invalid", coreerrors.Details{Path: req.TargetDir}, absErr.Error())
+	}
+	info, statErr := os.Lstat(targetDir)
+	if statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		return coreerrors.New(coreerrors.InvalidRequest, "inspect targetDir failed", coreerrors.Details{Path: targetDir}, statErr.Error())
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return coreerrors.New(coreerrors.RestorePathEscapeBlocked, "targetDir is a symlink or reparse point", coreerrors.Details{Path: targetDir}, "Choose a normal directory.")
+	}
+	if !info.IsDir() {
+		return coreerrors.New(coreerrors.InvalidRequest, "targetDir is not a directory", coreerrors.Details{Path: targetDir}, "Choose a directory.")
+	}
+	entries, readErr := os.ReadDir(targetDir)
+	if readErr != nil {
+		return coreerrors.New(coreerrors.InvalidRequest, "read targetDir failed", coreerrors.Details{Path: targetDir}, readErr.Error())
+	}
+	if len(entries) > 0 && !req.AllowNonEmpty {
+		return coreerrors.New(coreerrors.TargetDirNotEmpty, "targetDir is not empty", coreerrors.Details{Path: targetDir}, "Choose an empty directory or set allowNonEmpty=true.")
+	}
+	return nil
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -642,6 +681,9 @@ func (s *Server) backupService() minibackup.Service {
 	service := s.Backup
 	if service.HTTPClient == nil {
 		service.HTTPClient = s.HTTPClient
+	}
+	if service.HTTPClient == nil {
+		service.HTTPClient = &http.Client{}
 	}
 	return service
 }

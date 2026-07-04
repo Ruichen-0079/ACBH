@@ -335,6 +335,9 @@ func (s Service) Download(ctx context.Context, cfg coreconfig.Config, snapshotID
 	var downloaded int
 	var roots []string
 	seenRoots := map[string]bool{}
+	if err := createIncludedDirectories(targetDir, cfg.Backup.Include, seenRoots, &roots); err != nil {
+		return DownloadResult{}, err
+	}
 	for _, file := range remote.Manifest.Files {
 		target, err := safeTarget(targetDir, file.Path)
 		if err != nil {
@@ -361,6 +364,27 @@ func (s Service) Download(ctx context.Context, cfg coreconfig.Config, snapshotID
 	}
 	sort.Strings(roots)
 	return DownloadResult{OK: true, SnapshotID: remote.Manifest.SnapshotID, TargetDir: targetDir, DownloadedFiles: downloaded, LogicalSize: remote.Manifest.LogicalSize, AppliedRoots: roots, ActualRequestURL: requestURL(cfg, manifestPath), NetworkRequests: requests}, nil
+}
+
+func createIncludedDirectories(root string, includes []string, seenRoots map[string]bool, roots *[]string) *coreerrors.Error {
+	for _, rule := range parseRules(includes) {
+		if rule.kind != "dir" {
+			continue
+		}
+		target, err := safeTarget(root, rule.path)
+		if err != nil {
+			return err
+		}
+		if err := ensureSafeParent(root, target); err != nil {
+			return err
+		}
+		first := strings.Split(rule.path, "/")[0]
+		if first != "" && !seenRoots[first] {
+			seenRoots[first] = true
+			*roots = append(*roots, first)
+		}
+	}
+	return nil
 }
 
 func (s Service) client(cfg coreconfig.Config) (Client, *coreerrors.Error) {

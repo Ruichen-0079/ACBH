@@ -303,4 +303,9 @@ func TestDownloadBlocksUnsafeTargetsAndRestoresTopLevelFile(t *testing.T) {
 			t.Fatalf("restore %s got=%q err=%v", name, got, readErr)
 		}
 	}
+	for _, name := range []string{"defaultconfigs", "datapacks", "resourcepacks", "patchouli_books"} {
+		if info, statErr := os.Stat(filepath.Join(target, name)); statErr != nil || !info.IsDir() {
+			t.Fatalf("restore empty include dir %s info=%#v err=%v", name, info, statErr)
+		}
+	}
 }

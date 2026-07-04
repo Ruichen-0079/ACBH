@@ -432,6 +432,19 @@ function Set-BackupOperation {
     }
 }
 
+function Wait-BodyOperation {
+    param([object]$Op)
+    if (-not $Op.operationId) { return $Op }
+    while ($Op.state -eq "running") {
+        Set-BackupOperation $Op
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Seconds 2
+        $Op = Invoke-BodyJson -Method "GET" -Path ("/v1/operations/" + [uri]::EscapeDataString($Op.operationId))
+    }
+    Set-BackupOperation $Op
+    return $Op
+}
+
 function Analyze-Backup {
     try {
         $result = Invoke-BodyJson -Method "POST" -Path "/v1/backup/analyze"
@@ -482,7 +495,7 @@ function Download-LatestSnapshot {
     try {
         $body = @{ targetDir = $txtRestoreTargetDir.Text.Trim(); allowNonEmpty = $chkAllowNonEmpty.Checked }
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/snapshots/latest/download" -Body $body
-        Set-BackupOperation $op
+        $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
             $txtBackupSummary.Text = "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
             Add-Log "Latest snapshot downloaded through body API."
@@ -498,7 +511,7 @@ function Download-SelectedSnapshot {
         if (-not $snapshotId) { throw "Snapshot ID is required." }
         $body = @{ targetDir = $txtRestoreTargetDir.Text.Trim(); allowNonEmpty = $chkAllowNonEmpty.Checked }
         $op = Invoke-BodyJson -Method "POST" -Path ("/v1/snapshots/" + [uri]::EscapeDataString($snapshotId) + "/download") -Body $body
-        Set-BackupOperation $op
+        $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
             $txtBackupSummary.Text = "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
             Add-Log "Selected snapshot downloaded through body API."
