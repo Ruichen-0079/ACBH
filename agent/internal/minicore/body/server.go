@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	minibackup "github.com/Ruichen-0079/ACBH/agent/internal/minicore/backup"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
@@ -34,6 +35,7 @@ type Server struct {
 	HTTPClient  *http.Client
 	Listener    minilistener.Service
 	Relay       minirelay.Service
+	Backup      minibackup.Service
 	httpServer  *http.Server
 }
 
@@ -156,6 +158,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/listener/probe", s.handleListenerProbe)
 	mux.HandleFunc("/v1/relay/configure", s.handleRelayConfigure)
 	mux.HandleFunc("/v1/relay/status", s.handleRelayStatus)
+	mux.HandleFunc("/v1/backup/analyze", s.handleBackupAnalyze)
+	mux.HandleFunc("/v1/backup/upload", s.handleBackupUpload)
+	mux.HandleFunc("/v1/snapshots", s.handleSnapshots)
+	mux.HandleFunc("/v1/snapshots/latest/download", s.handleLatestSnapshotDownload)
+	mux.HandleFunc("/v1/snapshots/", s.handleSnapshotDownload)
 	mux.HandleFunc("/v1/operations", s.handleOperations)
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -261,6 +268,125 @@ func (s *Server) handleRelayStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "relay": state})
+}
+
+func (s *Server) handleBackupAnalyze(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r)
+		return
+	}
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeError(w, statusForCoreError(cfgErr), cfgErr)
+		return
+	}
+	var req minibackup.AnalyzeRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, coreerrors.New(coreerrors.ConfigParseError, "request body is not valid JSON", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, err.Error()))
+			return
+		}
+	}
+	result, err := s.backupService().Analyze(r.Context(), cfg, req)
+	if err != nil {
+		writeError(w, statusForCoreError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleBackupUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r)
+		return
+	}
+	op := s.Operations.Start("backup.upload", "load_config", "loading config")
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeJSON(w, statusForCoreError(cfgErr), s.Operations.Fail(op, cfgErr))
+		return
+	}
+	var req minibackup.AnalyzeRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			parseErr := coreerrors.New(coreerrors.ConfigParseError, "request body is not valid JSON", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, err.Error())
+			writeJSON(w, http.StatusBadRequest, s.Operations.Fail(op, parseErr))
+			return
+		}
+	}
+	op.Stage = "backup_upload"
+	op.Progress = 30
+	op.Message = "uploading backup through coordinator"
+	s.Operations.Update(op)
+	result, err := s.backupService().Upload(r.Context(), cfg, req)
+	if err != nil {
+		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "backup uploaded"))
+}
+
+func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r)
+		return
+	}
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeError(w, statusForCoreError(cfgErr), cfgErr)
+		return
+	}
+	result, err := s.backupService().List(r.Context(), cfg)
+	if err != nil {
+		writeError(w, statusForCoreError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleLatestSnapshotDownload(w http.ResponseWriter, r *http.Request) {
+	s.handleSnapshotDownloadWithID(w, r, "latest")
+}
+
+func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request) {
+	suffix := strings.TrimPrefix(r.URL.Path, "/v1/snapshots/")
+	snapshotID, rest, ok := strings.Cut(suffix, "/")
+	if !ok || rest != "download" || snapshotID == "" {
+		writeError(w, http.StatusNotFound, coreerrors.New(coreerrors.CoordinatorRouteMissing, "body route not found", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, "Use /v1/snapshots/{snapshotId}/download."))
+		return
+	}
+	s.handleSnapshotDownloadWithID(w, r, snapshotID)
+}
+
+func (s *Server) handleSnapshotDownloadWithID(w http.ResponseWriter, r *http.Request, snapshotID string) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r)
+		return
+	}
+	op := s.Operations.Start("snapshot.download", "load_config", "loading config")
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeJSON(w, statusForCoreError(cfgErr), s.Operations.Fail(op, cfgErr))
+		return
+	}
+	var req minibackup.DownloadRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			parseErr := coreerrors.New(coreerrors.ConfigParseError, "request body is not valid JSON", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, err.Error())
+			writeJSON(w, http.StatusBadRequest, s.Operations.Fail(op, parseErr))
+			return
+		}
+	}
+	op.Stage = "snapshot_download"
+	op.Progress = 30
+	op.Message = "downloading snapshot through coordinator"
+	s.Operations.Update(op)
+	result, err := s.backupService().Download(r.Context(), cfg, snapshotID, req)
+	if err != nil {
+		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "snapshot downloaded"))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -499,6 +625,14 @@ func (s *Server) relayService() minirelay.Service {
 	return service
 }
 
+func (s *Server) backupService() minibackup.Service {
+	service := s.Backup
+	if service.HTTPClient == nil {
+		service.HTTPClient = s.HTTPClient
+	}
+	return service
+}
+
 func withJSON(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -524,19 +658,23 @@ func statusForCoreError(err *coreerrors.Error) int {
 		return http.StatusInternalServerError
 	}
 	switch err.ErrorCode {
-	case coreerrors.ConfigMissing, coreerrors.ConfigInvalid, coreerrors.ConfigParseError, coreerrors.InvalidRequest:
+	case coreerrors.ConfigMissing, coreerrors.ConfigInvalid, coreerrors.ConfigParseError, coreerrors.InvalidRequest, coreerrors.TargetDirRequired, coreerrors.TargetDirNotEmpty, coreerrors.RestorePathEscapeBlocked, coreerrors.SnapshotDownloadFailed:
 		return http.StatusBadRequest
 	case coreerrors.IdentityIncomplete:
 		return http.StatusBadRequest
+	case coreerrors.BackupObjectTooLarge:
+		return http.StatusRequestEntityTooLarge
 	case coreerrors.AuthMissing, coreerrors.AuthInvalid:
 		return http.StatusUnauthorized
 	case coreerrors.LeaseExpired, coreerrors.NotCurrentHost:
 		return http.StatusForbidden
+	case coreerrors.SnapshotNotFound:
+		return http.StatusNotFound
 	case coreerrors.ProcessInspectionLimited:
 		return http.StatusOK
 	case coreerrors.CoordinatorRouteMissing:
 		return http.StatusNotFound
-	case coreerrors.CoordinatorUnreachable, coreerrors.ProxyInterferenceSuspected:
+	case coreerrors.CoordinatorUnreachable, coreerrors.ProxyInterferenceSuspected, coreerrors.CoordinatorServerError, coreerrors.NetworkError:
 		return http.StatusBadGateway
 	default:
 		return http.StatusInternalServerError

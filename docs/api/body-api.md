@@ -34,3 +34,27 @@ Body exposes user-facing identity as `identityModel: "single-owner"`. `GET /v1/c
 Operations return `operationId`, `traceId`, `state`, `stage`, `progress`, `startedAt`, `completedAt`, `errorCode`, and `message`.
 
 Errors include `errorCode`, `message`, `details.url`, `details.method`, `details.httpStatus`, `details.responseBody`, `details.configPath`, and `details.coordinatorUrl` when available.
+
+## Implemented in Phase 3
+
+- `POST /v1/backup/analyze`
+- `POST /v1/backup/upload`
+- `GET /v1/snapshots`
+- `POST /v1/snapshots/latest/download`
+- `POST /v1/snapshots/:snapshotId/download`
+
+Backup analysis scans the configured `server.dir` without requiring a Minecraft listener. The default profile includes migratable server data such as `world`, `mods`, `config`, `defaultconfigs`, datapack/resource directories, and top-level files such as `server.properties`, `eula.txt`, `ops.json`, `whitelist.json`, `banned-ips.json`, and `banned-players.json`. It excludes runtime/install data such as `libraries`, `jre`, `logs`, `crash-reports`, `versions`, and caches.
+
+Backup upload runs through the body API and Coordinator protocol v2 world-backup routes. It ensures the current host lease, queries missing objects, uploads missing content-addressed objects, and commits a snapshot manifest. It does not expose group/member/host token fields in user-facing body responses.
+
+Snapshot download requires `targetDir`. The target directory is created if missing, but an existing non-empty directory is rejected unless `allowNonEmpty=true`. Restore paths are normalized and checked to stay inside `targetDir`; symlink and Windows reparse-point/junction targets are blocked. Top-level snapshot files are valid and restore directly under `targetDir`.
+
+Coordinator route inventory used internally by Phase 3:
+
+- `POST /v1/groups/:groupId/world-backups/plan`
+- `PUT /v1/groups/:groupId/world-objects/:sha256`
+- `POST /v1/groups/:groupId/world-backups/commit`
+- `GET /v1/groups/:groupId/world-backups`
+- `GET /v1/groups/:groupId/world-backups/latest`
+- `GET /v1/groups/:groupId/world-backups/:snapshotId`
+- `GET /v1/groups/:groupId/world-objects/:sha256`

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
+	"github.com/Ruichen-0079/ACBH/agent/internal/worldbackup"
 )
 
 const maxResponseBytes = 32 * 1024 * 1024
@@ -80,6 +81,67 @@ type EnsureActiveLeaseResponse struct {
 	Renewed bool            `json:"renewed"`
 	Lease   HostLeaseStatus `json:"lease"`
 	Message string          `json:"message"`
+}
+
+type WorldBackupPlanRequest struct {
+	HostID           string                      `json:"hostId"`
+	HostToken        string                      `json:"hostToken"`
+	HostGeneration   int                         `json:"hostGeneration"`
+	ParentSnapshotID string                      `json:"parentSnapshotId,omitempty"`
+	Objects          []worldbackup.PlannedObject `json:"objects"`
+}
+
+type WorldBackupPlanResponse struct {
+	OK             bool                        `json:"ok"`
+	MissingObjects []worldbackup.PlannedObject `json:"missingObjects"`
+	ExistingCount  int                         `json:"existingCount"`
+}
+
+type WorldBackupCommitRequest struct {
+	HostID         string               `json:"hostId"`
+	HostToken      string               `json:"hostToken"`
+	HostGeneration int                  `json:"hostGeneration"`
+	Manifest       worldbackup.Manifest `json:"manifest"`
+}
+
+type WorldBackupCommitResponse struct {
+	OK         bool   `json:"ok"`
+	SnapshotID string `json:"snapshotId"`
+	Status     string `json:"status"`
+}
+
+type WorldBackupListResponse struct {
+	Snapshots []WorldBackupMetadata `json:"snapshots"`
+}
+
+type WorldBackupMetadata struct {
+	SnapshotID       string  `json:"snapshotId"`
+	GroupID          string  `json:"groupId,omitempty"`
+	Status           string  `json:"status"`
+	ProfileID        string  `json:"profileId"`
+	CreatedAt        string  `json:"createdAt"`
+	UpdatedAt        string  `json:"updatedAt,omitempty"`
+	CompletedAt      *string `json:"completedAt,omitempty"`
+	LogicalSize      int64   `json:"logicalSize"`
+	UploadedSize     int64   `json:"uploadedSize"`
+	DeduplicatedSize int64   `json:"deduplicatedSize"`
+	FileCount        int     `json:"fileCount"`
+	RootCount        int     `json:"rootCount"`
+	TraceID          *string `json:"traceId,omitempty"`
+	CanRestore       bool    `json:"canRestore"`
+	CanDownload      bool    `json:"canDownload"`
+}
+
+type WorldBackupManifestResponse struct {
+	Metadata WorldBackupMetadata  `json:"metadata"`
+	Manifest worldbackup.Manifest `json:"manifest"`
+}
+
+type UploadObjectResponse struct {
+	OK     bool   `json:"ok"`
+	SHA256 string `json:"sha256"`
+	Exists bool   `json:"exists"`
+	Size   int64  `json:"size"`
 }
 
 type RouteProbe struct {
@@ -153,11 +215,16 @@ func (c *Client) GetLeaseStatus(ctx context.Context, groupID string, hostID stri
 }
 
 func (c *Client) EnsureActiveLease(ctx context.Context, groupID string, hostID string, hostToken string) (EnsureActiveLeaseResponse, *coreerrors.Error) {
+	return c.EnsureActiveLeaseWithGeneration(ctx, groupID, hostID, hostToken, nil)
+}
+
+func (c *Client) EnsureActiveLeaseWithGeneration(ctx context.Context, groupID string, hostID string, hostToken string, generation *int) (EnsureActiveLeaseResponse, *coreerrors.Error) {
 	body := struct {
-		GroupID   string `json:"groupId"`
-		HostID    string `json:"hostId"`
-		HostToken string `json:"hostToken"`
-	}{GroupID: groupID, HostID: hostID, HostToken: hostToken}
+		GroupID    string `json:"groupId"`
+		HostID     string `json:"hostId"`
+		HostToken  string `json:"hostToken"`
+		Generation *int   `json:"generation,omitempty"`
+	}{GroupID: groupID, HostID: hostID, HostToken: hostToken, Generation: generation}
 	var out EnsureActiveLeaseResponse
 	err := c.doJSON(ctx, http.MethodPost, "/v1/groups/"+url.PathEscape(groupID)+"/lease/ensure-active", body, nil, &out)
 	return out, err
@@ -167,6 +234,71 @@ func (c *Client) SendHeartbeat(ctx context.Context, req HeartbeatRequest) (Heart
 	var out HeartbeatResponse
 	err := c.doJSON(ctx, http.MethodPost, "/v1/hosts/heartbeat", req, nil, &out)
 	return out, err
+}
+
+func (c *Client) PlanWorldBackup(ctx context.Context, groupID string, req WorldBackupPlanRequest) (WorldBackupPlanResponse, *coreerrors.Error) {
+	var out WorldBackupPlanResponse
+	err := c.doJSON(ctx, http.MethodPost, "/v1/groups/"+url.PathEscape(groupID)+"/world-backups/plan", req, nil, &out)
+	return out, err
+}
+
+func (c *Client) UploadWorldObjectStream(ctx context.Context, groupID string, hostID string, hostToken string, sha256 string, content io.Reader, size int64) (UploadObjectResponse, *coreerrors.Error) {
+	headers := authHeaders(hostID, hostToken)
+	var out UploadObjectResponse
+	err := c.doJSONReader(ctx, http.MethodPut, "/v1/groups/"+url.PathEscape(groupID)+"/world-objects/"+url.PathEscape(sha256), content, size, headers, &out)
+	return out, err
+}
+
+func (c *Client) CommitWorldBackup(ctx context.Context, groupID string, req WorldBackupCommitRequest) (WorldBackupCommitResponse, *coreerrors.Error) {
+	var out WorldBackupCommitResponse
+	err := c.doJSON(ctx, http.MethodPost, "/v1/groups/"+url.PathEscape(groupID)+"/world-backups/commit", req, nil, &out)
+	return out, err
+}
+
+func (c *Client) ListWorldBackups(ctx context.Context, groupID string, hostID string, hostToken string) (WorldBackupListResponse, *coreerrors.Error) {
+	headers := authHeaders(hostID, hostToken)
+	var out WorldBackupListResponse
+	err := c.doJSON(ctx, http.MethodGet, "/v1/groups/"+url.PathEscape(groupID)+"/world-backups", nil, headers, &out)
+	return out, err
+}
+
+func (c *Client) GetLatestWorldBackup(ctx context.Context, groupID string, hostID string, hostToken string, consistentOnly bool) (WorldBackupManifestResponse, *coreerrors.Error) {
+	headers := authHeaders(hostID, hostToken)
+	path := "/v1/groups/" + url.PathEscape(groupID) + "/world-backups/latest"
+	if consistentOnly {
+		path += "?consistentOnly=true"
+	}
+	var out WorldBackupManifestResponse
+	err := c.doJSON(ctx, http.MethodGet, path, nil, headers, &out)
+	return out, err
+}
+
+func (c *Client) GetWorldBackup(ctx context.Context, groupID string, hostID string, hostToken string, snapshotID string) (WorldBackupManifestResponse, *coreerrors.Error) {
+	headers := authHeaders(hostID, hostToken)
+	var out WorldBackupManifestResponse
+	err := c.doJSON(ctx, http.MethodGet, "/v1/groups/"+url.PathEscape(groupID)+"/world-backups/"+url.PathEscape(snapshotID), nil, headers, &out)
+	return out, err
+}
+
+func (c *Client) DownloadWorldObjectStream(ctx context.Context, groupID string, hostID string, hostToken string, sha256 string) (io.ReadCloser, int64, *coreerrors.Error) {
+	headers := authHeaders(hostID, hostToken)
+	req, err := c.newRequest(ctx, http.MethodGet, "/v1/groups/"+url.PathEscape(groupID)+"/world-objects/"+url.PathEscape(sha256), nil, headers)
+	if err != nil {
+		return nil, 0, err
+	}
+	resp, httpErr := c.http.Do(req)
+	if httpErr != nil {
+		return nil, 0, transportError(httpErr, http.MethodGet, req.URL.String())
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+		if readErr != nil {
+			return nil, 0, coreerrors.New(coreerrors.CoordinatorUnreachable, "read coordinator response failed", coreerrors.Details{URL: req.URL.String(), Method: http.MethodGet, HTTPStatus: resp.StatusCode}, readErr.Error())
+		}
+		return nil, 0, responseError(http.MethodGet, req.URL.String(), resp.StatusCode, string(data))
+	}
+	return resp.Body, resp.ContentLength, nil
 }
 
 func (c *Client) Probe(ctx context.Context) (ProbeResult, *coreerrors.Error) {
@@ -239,6 +371,33 @@ func (c *Client) doJSON(ctx context.Context, method string, path string, body an
 	return nil
 }
 
+func (c *Client) doJSONReader(ctx context.Context, method string, path string, body io.Reader, size int64, headers map[string]string, out any) *coreerrors.Error {
+	req, err := c.newRequest(ctx, method, path, body, headers)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if size >= 0 {
+		req.ContentLength = size
+	}
+	resp, httpErr := c.http.Do(req)
+	if httpErr != nil {
+		return transportError(httpErr, method, c.baseURL+path)
+	}
+	defer resp.Body.Close()
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if readErr != nil {
+		return coreerrors.New(coreerrors.CoordinatorUnreachable, "read coordinator response failed", coreerrors.Details{URL: c.baseURL + path, Method: method, HTTPStatus: resp.StatusCode}, readErr.Error())
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return responseError(method, c.baseURL+path, resp.StatusCode, string(data))
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		return coreerrors.New(coreerrors.CoordinatorUnreachable, "decode coordinator response failed", coreerrors.Details{URL: c.baseURL + path, Method: method, HTTPStatus: resp.StatusCode, ResponseBody: string(data)}, err.Error())
+	}
+	return nil
+}
+
 func (c *Client) doRaw(ctx context.Context, method string, path string, body any, headers map[string]string) (int, string, *coreerrors.Error) {
 	var reader io.Reader
 	if body != nil {
@@ -248,15 +407,12 @@ func (c *Client) doRaw(ctx context.Context, method string, path string, body any
 		}
 		reader = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
-	if err != nil {
-		return 0, "", coreerrors.New(coreerrors.InvalidRequest, "create request failed", coreerrors.Details{URL: c.baseURL + path, Method: method}, err.Error())
+	req, createErr := c.newRequest(ctx, method, path, reader, headers)
+	if createErr != nil {
+		return 0, "", createErr
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
-	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -268,6 +424,17 @@ func (c *Client) doRaw(ctx context.Context, method string, path string, body any
 		return resp.StatusCode, "", coreerrors.New(coreerrors.CoordinatorUnreachable, "read coordinator response failed", coreerrors.Details{URL: c.baseURL + path, Method: method, HTTPStatus: resp.StatusCode}, readErr.Error())
 	}
 	return resp.StatusCode, string(data), nil
+}
+
+func (c *Client) newRequest(ctx context.Context, method string, path string, reader io.Reader, headers map[string]string) (*http.Request, *coreerrors.Error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	if err != nil {
+		return nil, coreerrors.New(coreerrors.InvalidRequest, "create request failed", coreerrors.Details{URL: c.baseURL + path, Method: method}, err.Error())
+	}
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	return req, nil
 }
 
 func responseError(method string, rawURL string, status int, body string) *coreerrors.Error {
@@ -286,6 +453,10 @@ func responseError(method string, rawURL string, status int, body string) *coree
 		message = "coordinator rejected invalid request"
 	case coreerrors.ProxyInterferenceSuspected:
 		message = "proxy interference suspected"
+	case coreerrors.BackupObjectTooLarge:
+		message = "backup object is too large"
+	case coreerrors.CoordinatorServerError:
+		message = "VPS Coordinator server error"
 	}
 	return coreerrors.New(code, message, coreerrors.Details{URL: rawURL, Method: method, HTTPStatus: status, ResponseBody: body}, "Check the URL, status and responseBody in details.")
 }
@@ -305,10 +476,14 @@ func classifyStatus(status int, body string) coreerrors.ErrorCode {
 		return coreerrors.InvalidRequest
 	case status == http.StatusBadGateway && strings.Contains(lower, "proxy-connection"):
 		return coreerrors.ProxyInterferenceSuspected
+	case status == http.StatusRequestEntityTooLarge:
+		return coreerrors.BackupObjectTooLarge
 	case status == http.StatusUnauthorized:
 		return coreerrors.AuthMissing
 	case status == http.StatusForbidden:
 		return coreerrors.AuthInvalid
+	case status >= 500:
+		return coreerrors.CoordinatorServerError
 	default:
 		return coreerrors.CoordinatorUnreachable
 	}
@@ -319,6 +494,8 @@ func transportError(err error, method string, rawURL string) *coreerrors.Error {
 	code := coreerrors.CoordinatorUnreachable
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		code = coreerrors.OperationTimeout
+	} else {
+		code = coreerrors.NetworkError
 	}
 	return coreerrors.New(code, "coordinator request failed", coreerrors.Details{URL: rawURL, Method: method}, err.Error())
 }

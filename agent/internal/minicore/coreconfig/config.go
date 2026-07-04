@@ -126,10 +126,14 @@ func DefaultConfig() Config {
 		Backup: BackupConfig{
 			ProfileID: "minecraft-migratable",
 			Include: []string{
-				"dir:world", "dir:mods", "dir:config", "file:server.properties", "file:eula.txt",
-				"file:ops.json", "file:whitelist.json", "file:banned-ips.json", "file:banned-players.json",
+				"dir:world", "dir:mods", "dir:config", "dir:defaultconfigs", "dir:datapacks", "dir:resourcepacks",
+				"dir:global_packs", "dir:patchouli_books",
+				"file:server.properties", "file:eula.txt", "file:ops.json", "file:whitelist.json",
+				"file:banned-ips.json", "file:banned-players.json", "file:server-icon.png", "file:manifest.json",
+				"file:variables.txt", "file:user_jvm_args.txt", "file:start.bat", "file:start.ps1", "file:start.sh",
+				"file:run.sh", "file:双击直接开服！！！.bat", "file:HOW-TO-RUN.md",
 			},
-			Exclude: []string{"dir:libraries", "dir:jre", "dir:logs", "dir:crash-reports"},
+			Exclude: []string{"dir:libraries", "dir:jre", "dir:logs", "dir:crash-reports", "dir:versions", "dir:.cache", "dir:cache"},
 		},
 	}
 }
@@ -320,7 +324,13 @@ func applyDefaults(cfg Config) Config {
 		cfg.Relay.MinecraftPort = defaults.Relay.MinecraftPort
 	}
 	if cfg.Backup.ProfileID == "" {
-		cfg.Backup = defaults.Backup
+		cfg.Backup.ProfileID = defaults.Backup.ProfileID
+	}
+	if len(cfg.Backup.Include) == 0 {
+		cfg.Backup.Include = append([]string{}, defaults.Backup.Include...)
+	}
+	if len(cfg.Backup.Exclude) == 0 {
+		cfg.Backup.Exclude = append([]string{}, defaults.Backup.Exclude...)
 	}
 	return cfg
 }

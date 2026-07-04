@@ -31,6 +31,20 @@ v0.5 uses a single-owner/private instance model in user-visible runtime and GUI 
 
 Runtime code maps schemaVersion 2 identity to Coordinator v2 group routes through an identity adapter. Business modules should not read legacy group fields directly.
 
+## Phase 3 Backup And Snapshot
+
+Phase 3 adds the minimal backup/snapshot main path behind the body API:
+
+- analyze the configured Minecraft server directory
+- upload changed backup objects to the VPS
+- commit a snapshot manifest
+- list snapshots
+- download latest or selected snapshots into an explicit restore target directory
+
+The GUI remains a thin body API client. It shows a `备份 / 快照` panel and does not call the VPS directly. Backup/snapshot work does not require the local Minecraft listener to be running.
+
+Downloads never overwrite `server.dir` by default. The caller must pass `targetDir`; existing non-empty targets are blocked unless `allowNonEmpty=true`. Restore path validation treats top-level files such as `banned-ips.json` as valid snapshot entries while still blocking path traversal, symlinks, and Windows reparse points/junctions.
+
 ## Frozen Paths
 
-The old server supervisor, `server.lock` repair, GUI Java/bat launch, takeover/election UI, backup/snapshot flows, and local Coordinator fallback remain in the tree for compatibility, but they are not on the v0.5 main path. Coordinator protocol v2 still uses legacy group routes internally; protocol v3 can remove that compatibility layer after existing VPS data is migrated.
+The old server supervisor, `server.lock` repair, GUI Java/bat launch, takeover/election UI, and local Coordinator fallback remain in the tree for compatibility, but they are not on the v0.5 main path. Coordinator protocol v2 still uses legacy group routes internally; protocol v3 can remove that compatibility layer after existing VPS data is migrated.

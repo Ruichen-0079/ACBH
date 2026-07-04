@@ -1,11 +1,9 @@
 # Known Limits
 
-v0.5 minimal-core currently implements config, local body/runtime, Coordinator probe/init, local listener detection, relay state configuration, and the minimal GUI path for those flows.
+v0.5 minimal-core currently implements config, local body/runtime, Coordinator probe/init, local listener detection, relay state configuration, backup upload, snapshot listing/download, and the minimal GUI path for those flows.
 
 Not yet on the v0.5 main path:
 
-- backup upload
-- snapshot download
 - diagnostic bundle export
 - Windows release artifact assembly
 - Coordinator artifact repackaging and `SHA256SUMS`

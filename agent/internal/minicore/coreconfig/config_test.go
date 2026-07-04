@@ -128,6 +128,52 @@ func TestOldConfigDefaultsListenerRelay(t *testing.T) {
 	}
 }
 
+func TestBackupDefaultsIncludeMigratableMinecraftFiles(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := validConfig()
+	cfg.Backup = BackupConfig{}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.Backup.ProfileID != "minecraft-migratable" {
+		t.Fatalf("backup profileId = %q", got.Backup.ProfileID)
+	}
+	for _, want := range []string{"dir:world", "dir:mods", "dir:config", "file:banned-ips.json", "file:server.properties"} {
+		if !containsString(got.Backup.Include, want) {
+			t.Fatalf("backup include missing %q in %#v", want, got.Backup.Include)
+		}
+	}
+	for _, want := range []string{"dir:libraries", "dir:jre", "dir:logs", "dir:crash-reports", "dir:versions"} {
+		if !containsString(got.Backup.Exclude, want) {
+			t.Fatalf("backup exclude missing %q in %#v", want, got.Backup.Exclude)
+		}
+	}
+}
+
+func TestBackupDefaultsDoNotOverwriteCustomRules(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := validConfig()
+	cfg.Backup = BackupConfig{
+		ProfileID: "custom",
+		Include:   []string{"dir:world"},
+		Exclude:   []string{"dir:logs"},
+	}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.Backup.ProfileID != "custom" || len(got.Backup.Include) != 1 || got.Backup.Include[0] != "dir:world" || len(got.Backup.Exclude) != 1 || got.Backup.Exclude[0] != "dir:logs" {
+		t.Fatalf("custom backup rules overwritten: %#v", got.Backup)
+	}
+}
+
 func TestOldConfigJSONMigratesToSchemaVersion2(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
@@ -221,4 +267,13 @@ func TestRelayPublicHostCanBeOverridden(t *testing.T) {
 	if got.Relay.PublicHost != "relay.example.test" {
 		t.Fatalf("relay publicHost = %q", got.Relay.PublicHost)
 	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }

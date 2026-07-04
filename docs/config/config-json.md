@@ -50,6 +50,23 @@ Minimal remote-public config:
     "publicHost": "121.40.101.224",
     "coordinatorPort": 6121,
     "minecraftPort": 25565
+  },
+  "backup": {
+    "profileId": "minecraft-migratable",
+    "include": [
+      "dir:world",
+      "dir:mods",
+      "dir:config",
+      "file:server.properties",
+      "file:banned-ips.json"
+    ],
+    "exclude": [
+      "dir:libraries",
+      "dir:jre",
+      "dir:logs",
+      "dir:crash-reports",
+      "dir:versions"
+    ]
   }
 }
 ```
@@ -61,3 +78,4 @@ Field notes:
 - `server` is the current Minecraft server configuration.
 - `ownerToken` is the user-facing access token name.
 - `compat` exists only because Coordinator protocol v2 still uses legacy group routes. GUI normal views hide full legacy values and redact tokens.
+- `backup` controls the minimal Phase 3 backup profile. Empty `include` or `exclude` lists are filled with the built-in Minecraft migratable defaults; custom non-empty lists are preserved.

@@ -17,6 +17,14 @@ if ($SelfTest) {
         "txtPublicEndpoint",
         "txtListenerProcess",
         "txtRelayError",
+        "Analyze-Backup",
+        "Upload-Backup",
+        "Refresh-Snapshots",
+        "Download-LatestSnapshot",
+        "txtBackupSummary",
+        "txtSnapshotList",
+        "txtRestoreTargetDir",
+        "备份 / 快照",
         "私人实例",
         "当前设备",
         "VPS 中转",
@@ -240,8 +248,8 @@ function Save-Config {
             relay = @{ enabled = $true; publicHost = $txtPublicHost.Text.Trim(); coordinatorPort = 6121; minecraftPort = [int]$txtPublicPort.Text.Trim() }
             backup = @{
                 profileId = "minecraft-migratable"
-                include = @("dir:world","dir:mods","dir:config","file:server.properties","file:eula.txt","file:ops.json","file:whitelist.json","file:banned-ips.json","file:banned-players.json")
-                exclude = @("dir:libraries","dir:jre","dir:logs","dir:crash-reports")
+                include = @("dir:world","dir:mods","dir:config","dir:defaultconfigs","dir:datapacks","dir:resourcepacks","dir:global_packs","dir:patchouli_books","file:server.properties","file:eula.txt","file:ops.json","file:whitelist.json","file:banned-ips.json","file:banned-players.json","file:server-icon.png","file:manifest.json","file:variables.txt","file:user_jvm_args.txt","file:start.bat","file:start.ps1","file:start.sh","file:run.sh","file:双击直接开服！！！.bat","file:HOW-TO-RUN.md")
+                exclude = @("dir:libraries","dir:jre","dir:logs","dir:crash-reports","dir:versions","dir:.cache","dir:cache")
             }
         }
         Invoke-BodyJson -Method "PUT" -Path "/v1/config" -Body $cfg | Out-Null
@@ -414,6 +422,92 @@ function Refresh-RelayStatus {
     }
 }
 
+function Set-BackupOperation {
+    param([object]$Op)
+    $txtOperation.Text = ($Op | ConvertTo-Json -Depth 16)
+    if ($Op.state -eq "success") {
+        $txtBackupError.Text = ""
+    } elseif ($Op.error) {
+        $txtBackupError.Text = "errorCode=$($Op.error.errorCode) httpStatus=$($Op.error.details.httpStatus) responseBody=$($Op.error.details.responseBody)"
+    }
+}
+
+function Analyze-Backup {
+    try {
+        $result = Invoke-BodyJson -Method "POST" -Path "/v1/backup/analyze"
+        $txtBackupSummary.Text = "files=$($result.fileCount) roots=$($result.rootCount) size=$($result.logicalSize) profile=$($result.profileId)"
+        $txtBackupError.Text = ""
+        Add-Log "Backup analysis completed through body API."
+    } catch {
+        Show-Error ("Backup analyze failed: " + $_.Exception.Message)
+    }
+}
+
+function Upload-Backup {
+    try {
+        $op = Invoke-BodyJson -Method "POST" -Path "/v1/backup/upload"
+        Set-BackupOperation $op
+        if ($op.state -eq "success") {
+            $txtBackupSummary.Text = "snapshot=$($op.result.snapshotId) uploaded=$($op.result.uploadedSize) deduped=$($op.result.deduplicatedSize) actualRequestUrl=$($op.result.actualRequestUrl)"
+            Add-Log "Backup uploaded through body API."
+        }
+    } catch {
+        Show-Error ("Backup upload failed: " + $_.Exception.Message)
+    }
+}
+
+function Refresh-Snapshots {
+    try {
+        $result = Invoke-BodyJson -Method "GET" -Path "/v1/snapshots"
+        $txtSnapshotList.Text = ($result.snapshots | ConvertTo-Json -Depth 8)
+        if ($result.snapshots -and $result.snapshots.Count -gt 0) {
+            $txtSnapshotId.Text = $result.snapshots[0].snapshotId
+        }
+        Add-Log "Snapshot list refreshed through body API."
+    } catch {
+        Show-Error ("Snapshot list failed: " + $_.Exception.Message)
+    }
+}
+
+function Choose-RestoreDir {
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = "Choose a new empty restore directory"
+    if ($txtRestoreTargetDir.Text) { $dialog.SelectedPath = $txtRestoreTargetDir.Text }
+    if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtRestoreTargetDir.Text = $dialog.SelectedPath
+    }
+}
+
+function Download-LatestSnapshot {
+    try {
+        $body = @{ targetDir = $txtRestoreTargetDir.Text.Trim(); allowNonEmpty = $chkAllowNonEmpty.Checked }
+        $op = Invoke-BodyJson -Method "POST" -Path "/v1/snapshots/latest/download" -Body $body
+        Set-BackupOperation $op
+        if ($op.state -eq "success") {
+            $txtBackupSummary.Text = "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
+            Add-Log "Latest snapshot downloaded through body API."
+        }
+    } catch {
+        Show-Error ("Latest snapshot download failed: " + $_.Exception.Message)
+    }
+}
+
+function Download-SelectedSnapshot {
+    try {
+        $snapshotId = $txtSnapshotId.Text.Trim()
+        if (-not $snapshotId) { throw "Snapshot ID is required." }
+        $body = @{ targetDir = $txtRestoreTargetDir.Text.Trim(); allowNonEmpty = $chkAllowNonEmpty.Checked }
+        $op = Invoke-BodyJson -Method "POST" -Path ("/v1/snapshots/" + [uri]::EscapeDataString($snapshotId) + "/download") -Body $body
+        Set-BackupOperation $op
+        if ($op.state -eq "success") {
+            $txtBackupSummary.Text = "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
+            Add-Log "Selected snapshot downloaded through body API."
+        }
+    } catch {
+        Show-Error ("Snapshot download failed: " + $_.Exception.Message)
+    }
+}
+
 function Choose-ServerDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = "Choose Minecraft server directory"
@@ -457,8 +551,8 @@ function Add-Button {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH v0.5 Minimal Core"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(920, 1000)
-$form.MinimumSize = New-Object System.Drawing.Size(880, 760)
+$form.Size = New-Object System.Drawing.Size(920, 1240)
+$form.MinimumSize = New-Object System.Drawing.Size(880, 900)
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
 
 $title = New-Object System.Windows.Forms.Label
@@ -619,6 +713,67 @@ Add-GroupLabel "Warnings" 482 160 | Out-Null
 $txtListenerWarnings = Add-GroupTextBox 560 158 250 $true
 $txtRelayState = Add-GroupTextBox 16 190 390 $true
 $txtRelayError = Add-GroupTextBox 420 190 390 $true
+
+$grpBackup = New-Object System.Windows.Forms.GroupBox
+$grpBackup.Text = "备份 / 快照"
+$grpBackup.Location = New-Object System.Drawing.Point(24, 924)
+$grpBackup.Size = New-Object System.Drawing.Size(840, 230)
+$form.Controls.Add($grpBackup)
+
+function Add-BackupLabel {
+    param([string]$Text, [int]$X, [int]$Y)
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = $Text
+    $label.Location = New-Object System.Drawing.Point($X, $Y)
+    $label.Size = New-Object System.Drawing.Size(120, 22)
+    $grpBackup.Controls.Add($label)
+    return $label
+}
+
+function Add-BackupTextBox {
+    param([int]$X, [int]$Y, [int]$W, [bool]$ReadOnly = $false)
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Location = New-Object System.Drawing.Point($X, $Y)
+    $box.Size = New-Object System.Drawing.Size($W, 24)
+    $box.ReadOnly = $ReadOnly
+    $grpBackup.Controls.Add($box)
+    return $box
+}
+
+function Add-BackupButton {
+    param([string]$Text, [int]$X, [int]$Y, [scriptblock]$Click)
+    $button = New-Object System.Windows.Forms.Button
+    $button.Text = $Text
+    $button.Location = New-Object System.Drawing.Point($X, $Y)
+    $button.Size = New-Object System.Drawing.Size(130, 28)
+    $button.Add_Click({ try { & $Click } catch { Show-Error $_.Exception.Message } }.GetNewClosure())
+    $grpBackup.Controls.Add($button)
+    return $button
+}
+
+Add-BackupButton "Analyze backup" 16 26 { Analyze-Backup } | Out-Null
+Add-BackupButton "Upload backup" 156 26 { Upload-Backup } | Out-Null
+Add-BackupButton "List snapshots" 296 26 { Refresh-Snapshots } | Out-Null
+Add-BackupButton "Download latest" 436 26 { Download-LatestSnapshot } | Out-Null
+Add-BackupButton "Download selected" 576 26 { Download-SelectedSnapshot } | Out-Null
+
+Add-BackupLabel "Snapshot ID" 16 66 | Out-Null
+$txtSnapshotId = Add-BackupTextBox 118 64 210
+Add-BackupLabel "Restore target" 344 66 | Out-Null
+$txtRestoreTargetDir = Add-BackupTextBox 450 64 220
+Add-BackupButton "Choose target" 680 61 { Choose-RestoreDir } | Out-Null
+$chkAllowNonEmpty = New-Object System.Windows.Forms.CheckBox
+$chkAllowNonEmpty.Text = "allow non-empty target"
+$chkAllowNonEmpty.Location = New-Object System.Drawing.Point(118, 96)
+$chkAllowNonEmpty.Size = New-Object System.Drawing.Size(180, 24)
+$grpBackup.Controls.Add($chkAllowNonEmpty)
+
+Add-BackupLabel "Summary" 16 128 | Out-Null
+$txtBackupSummary = Add-BackupTextBox 118 126 690 $true
+Add-BackupLabel "Snapshots" 16 160 | Out-Null
+$txtSnapshotList = Add-BackupTextBox 118 158 340 $true
+Add-BackupLabel "Error" 470 160 | Out-Null
+$txtBackupError = Add-BackupTextBox 530 158 278 $true
 
 $form.Add_Shown({
     try {

@@ -3,7 +3,10 @@ package body
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +15,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
+	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/listener"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/operations"
+	"github.com/Ruichen-0079/ACBH/agent/internal/worldbackup"
 )
 
 type bodyFakeInspector struct {
@@ -65,6 +71,21 @@ func testConfig(coordinatorURL string) coreconfig.Config {
 
 func mockCoordinator(t *testing.T) *httptest.Server {
 	t.Helper()
+	objectData := []byte("[]")
+	sum := sha256.Sum256(objectData)
+	objectSHA := hex.EncodeToString(sum[:])
+	manifest := worldbackup.Manifest{
+		SchemaVersion:  worldbackup.SchemaVersion,
+		SnapshotID:     "ws_20260704_120000",
+		GroupID:        "grp_123",
+		SourceHostID:   "host_123",
+		HostGeneration: 1,
+		CreatedAt:      mustRFC3339(t, "2026-07-04T12:00:00Z"),
+		Consistent:     true,
+		LogicalSize:    int64(len(objectData)),
+		FileCount:      1,
+		Files:          []worldbackup.FileEntry{{Path: "banned-ips.json", Size: int64(len(objectData)), SHA256: objectSHA, ObjectID: worldbackup.ObjectID(objectSHA)}},
+	}
 	lease := map[string]any{
 		"groupId":              "grp_123",
 		"hostId":               "host_123",
@@ -77,6 +98,19 @@ func mockCoordinator(t *testing.T) *httptest.Server {
 		"heartbeatActive":      true,
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/groups/grp_123/world-objects/") {
+			sha := strings.TrimPrefix(r.URL.Path, "/v1/groups/grp_123/world-objects/")
+			if r.Method == http.MethodGet && sha == objectSHA {
+				w.Header().Set("Content-Type", "application/octet-stream")
+				_, _ = w.Write(objectData)
+				return
+			}
+			if r.Method == http.MethodPut {
+				_, _ = io.Copy(io.Discard, r.Body)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "sha256": sha, "size": r.ContentLength})
+				return
+			}
+		}
 		switch r.URL.Path {
 		case "/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "protocolVersion": 2})
@@ -99,6 +133,24 @@ func mockCoordinator(t *testing.T) *httptest.Server {
 			})
 		case "/v1/hosts/heartbeat":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "hostId": "host_123", "status": "hosting"})
+		case "/v1/groups/grp_123/world-backups/plan":
+			var req struct {
+				Objects []worldbackup.PlannedObject `json:"objects"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "missingObjects": req.Objects, "existingCount": 0})
+		case "/v1/groups/grp_123/world-backups/commit":
+			var req struct {
+				Manifest worldbackup.Manifest `json:"manifest"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "snapshotId": req.Manifest.SnapshotID, "status": "completed"})
+		case "/v1/groups/grp_123/world-backups":
+			_ = json.NewEncoder(w).Encode(map[string]any{"snapshots": []map[string]any{{
+				"snapshotId": "ws_20260704_120000", "status": "completed", "createdAt": "2026-07-04T12:00:00Z", "logicalSize": len(objectData), "fileCount": 1, "rootCount": 1, "canRestore": true, "canDownload": true,
+			}}})
+		case "/v1/groups/grp_123/world-backups/latest", "/v1/groups/grp_123/world-backups/ws_20260704_120000":
+			_ = json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"snapshotId": "ws_20260704_120000"}, "manifest": manifest})
 		case "/v1/groups/grp_test/lease/ensure-active":
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"code":"invalid_body"}`))
@@ -107,6 +159,15 @@ func mockCoordinator(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"code":"host_auth_required"}`))
 		}
 	}))
+}
+
+func mustRFC3339(t *testing.T, raw string) time.Time {
+	t.Helper()
+	out, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 func TestBodyHealthAndConfig(t *testing.T) {
@@ -381,6 +442,95 @@ func TestBodyRelayAPIs(t *testing.T) {
 	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/relay/status", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("relay/status status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBodyBackupSnapshotAPIs(t *testing.T) {
+	coord := mockCoordinator(t)
+	defer coord.Close()
+	serverDir := t.TempDir()
+	for name, content := range map[string]string{
+		"world/level.dat": "world",
+		"banned-ips.json": "[]",
+	} {
+		path := filepath.Join(serverDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := New("127.0.0.1:6120", t.TempDir())
+	cfg := testConfig(coord.URL)
+	cfg.Server.Dir = serverDir
+	if err := srv.ConfigStore.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/backup/analyze", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("backup/analyze status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "banned-ips.json") {
+		t.Fatalf("analyze did not include top-level file: %s", rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/backup/upload", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("backup/upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var op operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.State != operations.Success {
+		t.Fatalf("backup upload op = %#v", op)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/snapshots", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snapshots status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "hostToken") || strings.Contains(rec.Body.String(), "groupId") {
+		t.Fatalf("snapshots leaked legacy fields: %s", rec.Body.String())
+	}
+
+	target := filepath.Join(t.TempDir(), "restore")
+	body, _ := json.Marshal(map[string]any{"targetDir": target})
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/snapshots/latest/download", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("latest download status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(target, "banned-ips.json")); err != nil || string(got) != "[]" {
+		t.Fatalf("downloaded top-level file got=%q err=%v", got, err)
+	}
+}
+
+func TestBodySnapshotDownloadRejectsNonEmptyTarget(t *testing.T) {
+	coord := mockCoordinator(t)
+	defer coord.Close()
+	target := t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, "keep.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:6120", t.TempDir())
+	if err := srv.ConfigStore.Save(testConfig(coord.URL)); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"targetDir": target})
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/snapshots/ws_20260704_120000/download", bytes.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("snapshot download non-empty status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), string(coreerrors.TargetDirNotEmpty)) {
+		t.Fatalf("expected target_dir_not_empty: %s", rec.Body.String())
 	}
 }
 

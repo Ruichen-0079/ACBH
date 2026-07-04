@@ -22,6 +22,14 @@ const (
 	ProcessInspectionLimited     ErrorCode = "process_inspection_limited"
 	RelayConfigFailed            ErrorCode = "relay_config_failed"
 	IdentityIncomplete           ErrorCode = "identity_incomplete"
+	BackupObjectTooLarge         ErrorCode = "backup_object_too_large"
+	CoordinatorServerError       ErrorCode = "coordinator_server_error"
+	NetworkError                 ErrorCode = "network_error"
+	TargetDirRequired            ErrorCode = "target_dir_required"
+	TargetDirNotEmpty            ErrorCode = "target_dir_not_empty"
+	RestorePathEscapeBlocked     ErrorCode = "restore_path_escape_blocked"
+	SnapshotNotFound             ErrorCode = "snapshot_not_found"
+	SnapshotDownloadFailed       ErrorCode = "snapshot_download_failed"
 	OperationTimeout             ErrorCode = "operation_timeout"
 )
 
