@@ -15,7 +15,9 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
+	minilistener "github.com/Ruichen-0079/ACBH/agent/internal/minicore/listener"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/operations"
+	minirelay "github.com/Ruichen-0079/ACBH/agent/internal/minicore/relay"
 )
 
 const (
@@ -29,6 +31,8 @@ type Server struct {
 	ConfigStore coreconfig.Store
 	Operations  *operations.Store
 	HTTPClient  *http.Client
+	Listener    minilistener.Service
+	Relay       minirelay.Service
 	httpServer  *http.Server
 }
 
@@ -96,12 +100,116 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/config", s.handleConfig)
 	mux.HandleFunc("/v1/coordinator/probe", s.handleCoordinatorProbe)
 	mux.HandleFunc("/v1/init", s.handleInit)
+	mux.HandleFunc("/v1/listener/status", s.handleListenerStatus)
+	mux.HandleFunc("/v1/listener/config", s.handleListenerConfig)
+	mux.HandleFunc("/v1/listener/probe", s.handleListenerProbe)
+	mux.HandleFunc("/v1/relay/configure", s.handleRelayConfigure)
+	mux.HandleFunc("/v1/relay/status", s.handleRelayStatus)
 	mux.HandleFunc("/v1/operations", s.handleOperations)
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, coreerrors.New(coreerrors.CoordinatorRouteMissing, "body route not found", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, "Use /v1/body/health or another v1 body API route."))
 	})
 	return withJSON(mux)
+}
+
+func (s *Server) handleListenerStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r)
+		return
+	}
+	status, err := s.listenerStatus(r.Context())
+	if err != nil {
+		writeError(w, statusForCoreError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleListenerProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r)
+		return
+	}
+	status, err := s.listenerStatus(r.Context())
+	if err != nil {
+		writeError(w, statusForCoreError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) handleListenerConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		methodNotAllowed(w, r)
+		return
+	}
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeError(w, statusForCoreError(cfgErr), cfgErr)
+		return
+	}
+	var listenerCfg coreconfig.ListenerConfig
+	if err := json.NewDecoder(r.Body).Decode(&listenerCfg); err != nil {
+		writeError(w, http.StatusBadRequest, coreerrors.New(coreerrors.ConfigParseError, "request body is not valid JSON", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, err.Error()))
+		return
+	}
+	cfg.Listener = listenerCfg
+	if err := s.ConfigStore.Save(cfg); err != nil {
+		writeError(w, statusForCoreError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg.Listener)
+}
+
+func (s *Server) handleRelayConfigure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r)
+		return
+	}
+	op := s.Operations.Start("relay.configure", "load_config", "loading config")
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeJSON(w, statusForCoreError(cfgErr), s.Operations.Fail(op, cfgErr))
+		return
+	}
+	var req minirelay.ConfigureRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			parseErr := coreerrors.New(coreerrors.ConfigParseError, "request body is not valid JSON", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, err.Error())
+			writeJSON(w, http.StatusBadRequest, s.Operations.Fail(op, parseErr))
+			return
+		}
+	}
+	service := s.relayService()
+	op.Stage = "relay_configure"
+	op.Progress = 40
+	op.Message = "configuring relay through coordinator"
+	s.Operations.Update(op)
+	result, err := service.Configure(r.Context(), cfg, req)
+	if err != nil {
+		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "relay configured"))
+}
+
+func (s *Server) handleRelayStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r)
+		return
+	}
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeError(w, statusForCoreError(cfgErr), cfgErr)
+		return
+	}
+	state, err := s.relayService().Status(r.Context(), cfg)
+	if err != nil {
+		writeError(w, statusForCoreError(err), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "relay": state})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -263,6 +371,23 @@ func (s *Server) probe(ctx context.Context, op *operations.Operation) (coordinat
 	return result, nil
 }
 
+func (s *Server) listenerStatus(ctx context.Context) (minilistener.Status, *coreerrors.Error) {
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		return minilistener.Status{}, cfgErr
+	}
+	service := s.Listener
+	return service.Status(ctx, cfg)
+}
+
+func (s *Server) relayService() minirelay.Service {
+	service := s.Relay
+	if service.HTTPClient == nil {
+		service.HTTPClient = s.HTTPClient
+	}
+	return service
+}
+
 func withJSON(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -292,8 +417,10 @@ func statusForCoreError(err *coreerrors.Error) int {
 		return http.StatusBadRequest
 	case coreerrors.AuthMissing, coreerrors.AuthInvalid:
 		return http.StatusUnauthorized
-	case coreerrors.LeaseExpired:
+	case coreerrors.LeaseExpired, coreerrors.NotCurrentHost:
 		return http.StatusForbidden
+	case coreerrors.ProcessInspectionLimited:
+		return http.StatusOK
 	case coreerrors.CoordinatorRouteMissing:
 		return http.StatusNotFound
 	case coreerrors.CoordinatorUnreachable, coreerrors.ProxyInterferenceSuspected:

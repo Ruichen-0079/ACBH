@@ -8,6 +8,38 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ($SelfTest) {
+    $source = Get-Content -Raw -Path $PSCommandPath
+    $checks = @(
+        "Refresh-ListenerStatus",
+        "Save-ListenerConfig",
+        "Configure-Relay",
+        "Refresh-RelayStatus",
+        "txtPublicEndpoint",
+        "txtListenerProcess",
+        "txtRelayError",
+        "`$script:BodyUrl"
+    )
+    foreach ($check in $checks) {
+        if (-not $source.Contains($check)) {
+            throw "GUI self-test failed: missing $check"
+        }
+    }
+    $forbidden = @(
+        ("Start" + "Server"),
+        ("Stop" + "Server"),
+        ("Repair" + "Lock"),
+        ("server" + ".lock"),
+        ("super" + "visor"),
+        ("take over " + "election")
+    )
+    foreach ($token in $forbidden) {
+        if ($source.Contains($token)) {
+            throw "GUI self-test failed: forbidden lifecycle/control path found"
+        }
+    }
+    if ($source -match ("Invoke-RestMethod\s+[^\r\n]*" + "txtCoordinator")) {
+        throw "GUI self-test failed: direct coordinator REST call found"
+    }
     Write-Output "ACBH minimal-core GUI self-test ok"
     exit 0
 }
@@ -144,6 +176,14 @@ function Load-Config {
         $txtDisplayName.Text = $cfg.identity.displayName
         $txtDeviceName.Text = $cfg.identity.deviceName
         $txtServerDir.Text = $cfg.server.dir
+        if ($cfg.listener) {
+            $txtListenerHost.Text = $cfg.listener.localHost
+            $txtListenerPort.Text = [string]$cfg.listener.localPort
+        }
+        if ($cfg.relay) {
+            $txtPublicHost.Text = $cfg.relay.publicHost
+            $txtPublicPort.Text = [string]$cfg.relay.minecraftPort
+        }
         Add-Log "config.json loaded."
     } catch {
         Add-Log ("Config not loaded yet: " + $_.Exception.Message)
@@ -167,7 +207,7 @@ function Save-Config {
             }
             server = @{ dir = $txtServerDir.Text.Trim() }
             listener = @{ enabled = $true; localHost = "127.0.0.1"; localPort = 25565 }
-            relay = @{ enabled = $true; publicHost = ""; coordinatorPort = 6121; minecraftPort = 25565 }
+            relay = @{ enabled = $true; publicHost = $txtPublicHost.Text.Trim(); coordinatorPort = 6121; minecraftPort = [int]$txtPublicPort.Text.Trim() }
             backup = @{
                 profileId = "minecraft-migratable"
                 include = @("dir:world","dir:mods","dir:config","file:server.properties","file:eula.txt","file:ops.json","file:whitelist.json","file:banned-ips.json","file:banned-players.json")
@@ -220,6 +260,109 @@ function Run-Init {
     }
 }
 
+function Save-ListenerConfig {
+    try {
+        $cfg = @{
+            enabled = $true
+            localHost = $txtListenerHost.Text.Trim()
+            localPort = [int]$txtListenerPort.Text.Trim()
+            expectedProcessNames = @("java.exe", "javaw.exe")
+            serverDirMatchRequired = $false
+        }
+        Invoke-BodyJson -Method "PUT" -Path "/v1/listener/config" -Body $cfg | Out-Null
+        Add-Log "Listener config saved."
+        Refresh-ListenerStatus
+    } catch {
+        Show-Error ("Save listener config failed: " + $_.Exception.Message)
+    }
+}
+
+function Set-ListenerFields {
+    param([object]$Status)
+    $txtListening.Text = [string]$Status.listening
+    $txtListenerWarnings.Text = ""
+    if ($Status.warnings) {
+        $txtListenerWarnings.Text = (($Status.warnings | ForEach-Object { $_.code + ": " + $_.message }) -join "; ")
+    }
+    if ($Status.listeners -and $Status.listeners.Count -gt 0) {
+        $item = $Status.listeners[0]
+        $txtListenerPid.Text = [string]$item.pid
+        $txtListenerProcess.Text = [string]$item.processName
+        $txtListenerCommand.Text = [string]$item.commandLine
+        $txtServerDirMatched.Text = [string]$item.serverDirMatched
+    } else {
+        $txtListenerPid.Text = ""
+        $txtListenerProcess.Text = ""
+        $txtListenerCommand.Text = ""
+        $txtServerDirMatched.Text = ""
+    }
+}
+
+function Refresh-ListenerStatus {
+    try {
+        $status = Invoke-BodyJson -Method "GET" -Path "/v1/listener/status"
+        Set-ListenerFields $status
+        if (-not $status.listening) {
+            Add-Log "ACBH does not start Minecraft. Start your server with MCSL or your own script, then refresh listener status."
+        } else {
+            Add-Log "Listener status refreshed."
+        }
+    } catch {
+        Show-Error ("Listener status failed: " + $_.Exception.Message)
+    }
+}
+
+function Probe-Listener {
+    try {
+        $status = Invoke-BodyJson -Method "POST" -Path "/v1/listener/probe"
+        Set-ListenerFields $status
+        Add-Log "Listener probe completed."
+    } catch {
+        Show-Error ("Listener probe failed: " + $_.Exception.Message)
+    }
+}
+
+function Set-RelayFields {
+    param([object]$Relay)
+    $txtPublicEndpoint.Text = [string]$Relay.publicEndpoint
+    $txtLocalEndpoint.Text = [string]$Relay.localEndpoint
+    $txtRelayState.Text = "configured=$($Relay.configured) active=$($Relay.active) currentHost=$($Relay.currentHost) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
+    $txtRelayError.Text = ""
+    if ($Relay.errors) {
+        $txtRelayError.Text = (($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + $_.details.responseBody }) -join "; ")
+    }
+}
+
+function Configure-Relay {
+    try {
+        $body = @{
+            localMinecraftHost = $txtListenerHost.Text.Trim()
+            localMinecraftPort = [int]$txtListenerPort.Text.Trim()
+            publicMinecraftPort = [int]$txtPublicPort.Text.Trim()
+        }
+        $op = Invoke-BodyJson -Method "POST" -Path "/v1/relay/configure" -Body $body
+        $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
+        if ($op.state -eq "success") {
+            Set-RelayFields $op.result.relay
+            Add-Log "Relay configured through body API."
+        } elseif ($op.error) {
+            $txtRelayError.Text = "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
+        }
+    } catch {
+        Show-Error ("Relay configure failed: " + $_.Exception.Message)
+    }
+}
+
+function Refresh-RelayStatus {
+    try {
+        $status = Invoke-BodyJson -Method "GET" -Path "/v1/relay/status"
+        Set-RelayFields $status.relay
+        Add-Log "Relay status refreshed."
+    } catch {
+        Show-Error ("Relay status failed: " + $_.Exception.Message)
+    }
+}
+
 function Choose-ServerDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = "Choose Minecraft server directory"
@@ -263,8 +406,8 @@ function Add-Button {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH v0.5 Minimal Core"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(920, 720)
-$form.MinimumSize = New-Object System.Drawing.Size(860, 640)
+$form.Size = New-Object System.Drawing.Size(920, 1000)
+$form.MinimumSize = New-Object System.Drawing.Size(880, 760)
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
 
 $title = New-Object System.Windows.Forms.Label
@@ -348,6 +491,80 @@ $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtLog)
+
+$grpListenerRelay = New-Object System.Windows.Forms.GroupBox
+$grpListenerRelay.Text = "Listener / Relay"
+$grpListenerRelay.Location = New-Object System.Drawing.Point(24, 674)
+$grpListenerRelay.Size = New-Object System.Drawing.Size(840, 236)
+$form.Controls.Add($grpListenerRelay)
+
+function Add-GroupLabel {
+    param([string]$Text, [int]$X, [int]$Y)
+    $label = New-Object System.Windows.Forms.Label
+    $label.Text = $Text
+    $label.Location = New-Object System.Drawing.Point($X, $Y)
+    $label.Size = New-Object System.Drawing.Size(120, 22)
+    $grpListenerRelay.Controls.Add($label)
+    return $label
+}
+
+function Add-GroupTextBox {
+    param([int]$X, [int]$Y, [int]$W, [bool]$ReadOnly = $false)
+    $box = New-Object System.Windows.Forms.TextBox
+    $box.Location = New-Object System.Drawing.Point($X, $Y)
+    $box.Size = New-Object System.Drawing.Size($W, 24)
+    $box.ReadOnly = $ReadOnly
+    $grpListenerRelay.Controls.Add($box)
+    return $box
+}
+
+function Add-GroupButton {
+    param([string]$Text, [int]$X, [int]$Y, [scriptblock]$Click)
+    $button = New-Object System.Windows.Forms.Button
+    $button.Text = $Text
+    $button.Location = New-Object System.Drawing.Point($X, $Y)
+    $button.Size = New-Object System.Drawing.Size(130, 28)
+    $button.Add_Click({ try { & $Click } catch { Show-Error $_.Exception.Message } }.GetNewClosure())
+    $grpListenerRelay.Controls.Add($button)
+    return $button
+}
+
+Add-GroupLabel "Local host" 16 28 | Out-Null
+$txtListenerHost = Add-GroupTextBox 118 26 140
+$txtListenerHost.Text = "127.0.0.1"
+Add-GroupLabel "Local port" 270 28 | Out-Null
+$txtListenerPort = Add-GroupTextBox 368 26 80
+$txtListenerPort.Text = "25565"
+Add-GroupLabel "Public host" 470 28 | Out-Null
+$txtPublicHost = Add-GroupTextBox 568 26 140
+Add-GroupLabel "Public port" 16 62 | Out-Null
+$txtPublicPort = Add-GroupTextBox 118 60 80
+$txtPublicPort.Text = "25565"
+
+Add-GroupButton "Save listener" 220 58 { Save-ListenerConfig } | Out-Null
+Add-GroupButton "Refresh listener" 360 58 { Refresh-ListenerStatus } | Out-Null
+Add-GroupButton "Probe listener" 500 58 { Probe-Listener } | Out-Null
+Add-GroupButton "Configure relay" 640 58 { Configure-Relay } | Out-Null
+Add-GroupButton "Relay status" 640 92 { Refresh-RelayStatus } | Out-Null
+
+Add-GroupLabel "Listening" 16 96 | Out-Null
+$txtListening = Add-GroupTextBox 118 94 80 $true
+Add-GroupLabel "PID" 214 96 | Out-Null
+$txtListenerPid = Add-GroupTextBox 258 94 80 $true
+Add-GroupLabel "Process" 350 96 | Out-Null
+$txtListenerProcess = Add-GroupTextBox 430 94 190 $true
+Add-GroupLabel "Dir matched" 16 130 | Out-Null
+$txtServerDirMatched = Add-GroupTextBox 118 128 80 $true
+Add-GroupLabel "Local endpoint" 214 130 | Out-Null
+$txtLocalEndpoint = Add-GroupTextBox 318 128 160 $true
+Add-GroupLabel "Public endpoint" 490 130 | Out-Null
+$txtPublicEndpoint = Add-GroupTextBox 600 128 210 $true
+Add-GroupLabel "Command" 16 160 | Out-Null
+$txtListenerCommand = Add-GroupTextBox 118 158 350 $true
+Add-GroupLabel "Warnings" 482 160 | Out-Null
+$txtListenerWarnings = Add-GroupTextBox 560 158 250 $true
+$txtRelayState = Add-GroupTextBox 16 190 390 $true
+$txtRelayError = Add-GroupTextBox 420 190 390 $true
 
 $form.Add_Shown({
     try {

@@ -104,3 +104,52 @@ func TestConfigWriteIsAtomicAndNoSilentTokenReset(t *testing.T) {
 		t.Fatalf("identity changed on save/load: %#v", got.Identity)
 	}
 }
+
+func TestOldConfigDefaultsListenerRelay(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := validConfig()
+	cfg.Listener = ListenerConfig{}
+	cfg.Relay = RelayConfig{}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.Listener.LocalHost != "127.0.0.1" || got.Listener.LocalPort != 25565 {
+		t.Fatalf("listener defaults = %#v", got.Listener)
+	}
+	if len(got.Listener.ExpectedProcessNames) == 0 {
+		t.Fatalf("expected process defaults missing: %#v", got.Listener)
+	}
+	if got.Relay.PublicHost != "121.40.101.224" || got.Relay.MinecraftPort != 25565 {
+		t.Fatalf("relay defaults = %#v", got.Relay)
+	}
+}
+
+func TestInvalidListenerPortReportsConfigInvalid(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := validConfig()
+	cfg.Listener.LocalPort = 70000
+	err := store.Save(cfg)
+	if err == nil || err.ErrorCode != coreerrors.ConfigInvalid {
+		t.Fatalf("Save() error = %v, want config_invalid", err)
+	}
+}
+
+func TestRelayPublicHostCanBeOverridden(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := validConfig()
+	cfg.Relay.PublicHost = "relay.example.test"
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.Relay.PublicHost != "relay.example.test" {
+		t.Fatalf("relay publicHost = %q", got.Relay.PublicHost)
+	}
+}

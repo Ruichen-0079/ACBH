@@ -46,9 +46,11 @@ type ServerConfig struct {
 }
 
 type ListenerConfig struct {
-	Enabled   bool   `json:"enabled"`
-	LocalHost string `json:"localHost"`
-	LocalPort int    `json:"localPort"`
+	Enabled                bool     `json:"enabled"`
+	LocalHost              string   `json:"localHost"`
+	LocalPort              int      `json:"localPort"`
+	ExpectedProcessNames   []string `json:"expectedProcessNames,omitempty"`
+	ServerDirMatchRequired bool     `json:"serverDirMatchRequired"`
 }
 
 type RelayConfig struct {
@@ -90,7 +92,7 @@ func DefaultConfig() Config {
 	return Config{
 		SchemaVersion: 1,
 		Mode:          "remote-public",
-		Listener:      ListenerConfig{Enabled: true, LocalHost: "127.0.0.1", LocalPort: 25565},
+		Listener:      ListenerConfig{Enabled: true, LocalHost: "127.0.0.1", LocalPort: 25565, ExpectedProcessNames: []string{"java.exe", "javaw.exe"}},
 		Relay:         RelayConfig{Enabled: true, CoordinatorPort: 6121, MinecraftPort: 25565},
 		Backup: BackupConfig{
 			ProfileID: "minecraft-migratable",
@@ -219,6 +221,14 @@ func applyDefaults(cfg Config) Config {
 	if cfg.Listener.LocalPort == 0 {
 		cfg.Listener.LocalPort = defaults.Listener.LocalPort
 	}
+	if len(cfg.Listener.ExpectedProcessNames) == 0 {
+		cfg.Listener.ExpectedProcessNames = append([]string{}, defaults.Listener.ExpectedProcessNames...)
+	}
+	if cfg.Relay.PublicHost == "" && cfg.CoordinatorURL != "" {
+		if parsed, err := url.Parse(cfg.CoordinatorURL); err == nil {
+			cfg.Relay.PublicHost = parsed.Hostname()
+		}
+	}
 	if cfg.Relay.CoordinatorPort == 0 {
 		cfg.Relay.CoordinatorPort = defaults.Relay.CoordinatorPort
 	}
@@ -245,6 +255,15 @@ func validate(cfg Config, path string) *coreerrors.Error {
 	host := parsed.Hostname()
 	if cfg.Mode == "remote-public" && isLoopbackHost(host) {
 		return coreerrors.New(coreerrors.ConfigInvalid, "remote-public mode cannot use a localhost coordinatorUrl", coreerrors.Details{ConfigPath: path, CoordinatorURL: cfg.CoordinatorURL}, "Use the VPS coordinator URL, or explicitly switch mode to local-private.")
+	}
+	if cfg.Listener.LocalPort < 1 || cfg.Listener.LocalPort > 65535 {
+		return coreerrors.New(coreerrors.ConfigInvalid, "listener.localPort must be between 1 and 65535", coreerrors.Details{ConfigPath: path}, "Set listener.localPort to the Minecraft server port.")
+	}
+	if strings.TrimSpace(cfg.Listener.LocalHost) == "" {
+		return coreerrors.New(coreerrors.ConfigInvalid, "listener.localHost is required", coreerrors.Details{ConfigPath: path}, "Set listener.localHost to 127.0.0.1 unless you intentionally bind elsewhere.")
+	}
+	if cfg.Relay.MinecraftPort < 1 || cfg.Relay.MinecraftPort > 65535 {
+		return coreerrors.New(coreerrors.ConfigInvalid, "relay.minecraftPort must be between 1 and 65535", coreerrors.Details{ConfigPath: path}, "Set relay.minecraftPort to the public Minecraft port.")
 	}
 	if cfg.Identity.GroupID == "" || cfg.Identity.HostID == "" || cfg.Identity.HostToken == "" {
 		return coreerrors.New(coreerrors.ConfigInvalid, "identity.groupId, identity.hostId and identity.hostToken are required", coreerrors.Details{ConfigPath: path}, "Restore identity from legacy config or join/create a group.")

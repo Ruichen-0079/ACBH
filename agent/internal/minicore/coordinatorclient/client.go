@@ -42,6 +42,46 @@ type Capabilities struct {
 	AuthenticationMode    string   `json:"authenticationMode"`
 }
 
+type HostConnection struct {
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	Network string `json:"network"`
+}
+
+type HeartbeatRequest struct {
+	GroupID    string          `json:"groupId"`
+	HostID     string          `json:"hostId"`
+	HostToken  string          `json:"hostToken"`
+	Status     string          `json:"status"`
+	Connection *HostConnection `json:"connection,omitempty"`
+}
+
+type HeartbeatResponse struct {
+	OK     bool   `json:"ok"`
+	HostID string `json:"hostId"`
+	Status string `json:"status"`
+}
+
+type HostLeaseStatus struct {
+	GroupID              string `json:"groupId"`
+	HostID               string `json:"hostId"`
+	CurrentHostID        string `json:"currentHostId,omitempty"`
+	CurrentHostIDMatches bool   `json:"currentHostIdMatches"`
+	LeaseValid           bool   `json:"leaseValid"`
+	LeaseExpiresAt       string `json:"leaseExpiresAt,omitempty"`
+	LeaseRemaining       int64  `json:"leaseRemaining"`
+	Generation           int    `json:"generation"`
+	ServerTime           string `json:"serverTime"`
+	HeartbeatActive      bool   `json:"heartbeatActive"`
+}
+
+type EnsureActiveLeaseResponse struct {
+	OK      bool            `json:"ok"`
+	Renewed bool            `json:"renewed"`
+	Lease   HostLeaseStatus `json:"lease"`
+	Message string          `json:"message"`
+}
+
 type RouteProbe struct {
 	Method       string               `json:"method"`
 	Path         string               `json:"path"`
@@ -102,6 +142,30 @@ func (c *Client) LeaseStatus(ctx context.Context, groupID string, hostID string,
 	headers := authHeaders(hostID, hostToken)
 	var out map[string]any
 	err := c.doJSON(ctx, http.MethodGet, "/v1/groups/"+url.PathEscape(groupID)+"/lease/status", nil, headers, &out)
+	return out, err
+}
+
+func (c *Client) GetLeaseStatus(ctx context.Context, groupID string, hostID string, hostToken string) (HostLeaseStatus, *coreerrors.Error) {
+	headers := authHeaders(hostID, hostToken)
+	var out HostLeaseStatus
+	err := c.doJSON(ctx, http.MethodGet, "/v1/groups/"+url.PathEscape(groupID)+"/lease/status", nil, headers, &out)
+	return out, err
+}
+
+func (c *Client) EnsureActiveLease(ctx context.Context, groupID string, hostID string, hostToken string) (EnsureActiveLeaseResponse, *coreerrors.Error) {
+	body := struct {
+		GroupID   string `json:"groupId"`
+		HostID    string `json:"hostId"`
+		HostToken string `json:"hostToken"`
+	}{GroupID: groupID, HostID: hostID, HostToken: hostToken}
+	var out EnsureActiveLeaseResponse
+	err := c.doJSON(ctx, http.MethodPost, "/v1/groups/"+url.PathEscape(groupID)+"/lease/ensure-active", body, nil, &out)
+	return out, err
+}
+
+func (c *Client) SendHeartbeat(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, *coreerrors.Error) {
+	var out HeartbeatResponse
+	err := c.doJSON(ctx, http.MethodPost, "/v1/hosts/heartbeat", req, nil, &out)
 	return out, err
 }
 
@@ -233,6 +297,8 @@ func classifyStatus(status int, body string) coreerrors.ErrorCode {
 		return coreerrors.AuthMissing
 	case status == http.StatusForbidden && strings.Contains(lower, "host_lease_expired"):
 		return coreerrors.LeaseExpired
+	case status == http.StatusForbidden && strings.Contains(lower, "not_current_host"):
+		return coreerrors.NotCurrentHost
 	case status == http.StatusBadRequest:
 		return coreerrors.InvalidRequest
 	case status == http.StatusBadGateway && strings.Contains(lower, "proxy-connection"):

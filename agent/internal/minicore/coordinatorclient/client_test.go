@@ -68,6 +68,7 @@ func TestResponseClassifiesAuthInvalidAndRouteMissing(t *testing.T) {
 		{"401 auth missing", http.StatusUnauthorized, `{"code":"host_auth_required"}`, coreerrors.AuthMissing},
 		{"400 invalid request", http.StatusBadRequest, `{"code":"invalid_body"}`, coreerrors.InvalidRequest},
 		{"403 lease expired", http.StatusForbidden, `{"code":"host_lease_expired"}`, coreerrors.LeaseExpired},
+		{"403 not current host", http.StatusForbidden, `{"code":"not_current_host"}`, coreerrors.NotCurrentHost},
 		{"404 route missing", http.StatusNotFound, `{"code":"route_not_found"}`, coreerrors.CoordinatorRouteMissing},
 		{"502 proxy", http.StatusBadGateway, `Proxy-Connection: keep-alive`, coreerrors.ProxyInterferenceSuspected},
 	}

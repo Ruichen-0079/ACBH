@@ -17,6 +17,10 @@ const (
 	LeaseExpired                 ErrorCode = "lease_expired"
 	InvalidRequest               ErrorCode = "invalid_request"
 	ProxyInterferenceSuspected   ErrorCode = "proxy_interference_suspected"
+	NotCurrentHost               ErrorCode = "not_current_host"
+	LocalPortNotListening        ErrorCode = "local_port_not_listening"
+	ProcessInspectionLimited     ErrorCode = "process_inspection_limited"
+	RelayConfigFailed            ErrorCode = "relay_config_failed"
 	OperationTimeout             ErrorCode = "operation_timeout"
 )
 
