@@ -6,58 +6,51 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-	"time"
 )
 
 const (
-	DirName      = "ACBH"
-	FileName     = "config.yaml"
-	AgentVersion = "v0.4.0-alpha6-hotfix2"
-
-	DefaultServerStartTimeout = 120 * time.Second
-	MinServerStartTimeout     = 10 * time.Second
+	DirName        = "ACBH"
+	FileName       = "config.json"
+	LegacyFileName = "config.yaml"
+	AgentVersion   = "0.1.0"
 )
 
 type Config struct {
-	CoordinatorURL string       `json:"coordinatorUrl"`
-	GroupID        string       `json:"groupId"`
-	MemberID       string       `json:"memberId"`
-	HostID         string       `json:"hostId"`
-	HostToken      string       `json:"hostToken"`
-	DisplayName    string       `json:"displayName"`
-	DeviceName     string       `json:"deviceName"`
-	Platform       string       `json:"platform"`
-	AgentVersion   string       `json:"agentVersion"`
-	Server         ServerConfig `json:"server,omitempty"`
+	CoordinatorURL string              `json:"coordinatorUrl"`
+	GroupID        string              `json:"groupId"`
+	MemberID       string              `json:"memberId"`
+	HostID         string              `json:"hostId"`
+	HostToken      string              `json:"hostToken"`
+	DisplayName    string              `json:"displayName"`
+	DeviceName     string              `json:"deviceName"`
+	Platform       string              `json:"platform"`
+	AgentVersion   string              `json:"agentVersion"`
+	Server         ServerConfig        `json:"server,omitempty"`
+	BackupProfile  BackupProfileConfig `json:"backupProfile,omitempty"`
 }
 
 type ServerConfig struct {
-	Dir          string   `json:"dir,omitempty"`
-	LaunchType   string   `json:"launchType,omitempty"`
-	LaunchPath   string   `json:"launchPath,omitempty"`
-	Command      string   `json:"command,omitempty"`
-	JavaPath     string   `json:"javaPath,omitempty"`
-	WorkingDir   string   `json:"workingDir,omitempty"`
-	StartArgs    []string `json:"startArgs,omitempty"`
-	LogDir       string   `json:"logDir,omitempty"`
-	StopTimeout  string   `json:"stopTimeout,omitempty"`
-	StartTimeout string   `json:"startTimeout,omitempty"`
+	Dir         string `json:"dir,omitempty"`
+	Command     string `json:"command,omitempty"`
+	LogDir      string `json:"logDir,omitempty"`
+	StopTimeout string `json:"stopTimeout,omitempty"`
+	LaunchPath  string `json:"launchPath,omitempty"`
+	JavaPath    string `json:"javaPath,omitempty"`
+	WorkingDir  string `json:"workingDir,omitempty"`
+	UpdatedAt   string `json:"updatedAt,omitempty"`
 }
 
-func (s ServerConfig) ResolvedStartTimeout() (time.Duration, error) {
-	raw := strings.TrimSpace(s.StartTimeout)
-	if raw == "" {
-		return DefaultServerStartTimeout, nil
-	}
-	parsed, err := time.ParseDuration(raw)
-	if err != nil {
-		return 0, fmt.Errorf("invalid server.startTimeout %q: %w", s.StartTimeout, err)
-	}
-	if parsed < MinServerStartTimeout {
-		return 0, fmt.Errorf("server.startTimeout must be at least %s", MinServerStartTimeout)
-	}
-	return parsed, nil
+type BackupProfileConfig struct {
+	ProfileID       string   `json:"profileId,omitempty"`
+	ProfileName     string   `json:"profileName,omitempty"`
+	PresetID        string   `json:"presetId,omitempty"`
+	PresetName      string   `json:"presetName,omitempty"`
+	ServerDir       string   `json:"serverDir,omitempty"`
+	IncludeFiles    []string `json:"includeFiles,omitempty"`
+	IncludeDirs     []string `json:"includeDirs,omitempty"`
+	WorldRoots      []string `json:"worldRoots,omitempty"`
+	UpdatedAt       string   `json:"updatedAt,omitempty"`
+	MigrationNotice string   `json:"migrationNotice,omitempty"`
 }
 
 func DefaultPath() (string, error) {
@@ -67,6 +60,15 @@ func DefaultPath() (string, error) {
 	}
 
 	return filepath.Join(dir, FileName), nil
+}
+
+func LegacyPath() (string, error) {
+	dir, err := DefaultDir()
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(dir, LegacyFileName), nil
 }
 
 func DefaultDir() (string, error) {
@@ -103,7 +105,15 @@ func Exists(path string) bool {
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, fmt.Errorf("read config: %w", err)
+		if errors.Is(err, os.ErrNotExist) && filepath.Base(path) == FileName {
+			legacyPath := filepath.Join(filepath.Dir(path), LegacyFileName)
+			data, err = os.ReadFile(legacyPath)
+			if err != nil {
+				return Config{}, fmt.Errorf("read config: %w", err)
+			}
+		} else {
+			return Config{}, fmt.Errorf("read config: %w", err)
+		}
 	}
 
 	var cfg Config
@@ -136,8 +146,32 @@ func Save(path string, cfg Config) error {
 	}
 	data = append(data, '\n')
 
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write config: %w", err)
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp config: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("write temp config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("sync temp config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("close temp config: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("chmod temp config: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("rename temp config: %w", err)
 	}
 
 	return nil

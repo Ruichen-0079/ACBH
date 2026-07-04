@@ -15,40 +15,25 @@ import (
 
 func main() {
 	if len(os.Args) == 1 || os.Args[1] == "--gui" {
-		if err := launchGoDesktop(); err == nil {
+		if err := launchGUI(); err == nil {
 			return
 		} else {
-			fmt.Fprintf(os.Stderr, "桌面 GUI 启动失败：%v\n", err)
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "桌面 GUI 启动失败，将回退到命令行模式：%v\n", err)
 		}
-	}
-	if os.Args[1] == "--legacy-powershell-gui" {
-		if err := launchLegacyPowerShellGUI(); err != nil {
-			fmt.Fprintf(os.Stderr, "Legacy PowerShell GUI 启动失败：%v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-	if os.Args[1] == "--cli" {
-		runCLI()
-		return
 	}
 	runCLI()
 }
 
-func launchGoDesktop() error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return desktop.RunDesktopRuntime(ctx, desktop.Options{}, desktop.RuntimeOptions{OpenBrowser: true}, os.Stdout)
-}
-
-func launchLegacyPowerShellGUI() error {
+func launchGUI() error {
 	exePath, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	exeDir := filepath.Dir(exePath)
-	guiScript := filepath.Join(exeDir, "scripts", "acbh-desktop-gui.ps1")
+	guiScript := filepath.Join(exeDir, "scripts", "acbh-minimal-core-gui.ps1")
+	if _, err := os.Stat(guiScript); err != nil {
+		guiScript = filepath.Join(exeDir, "scripts", "acbh-desktop-gui.ps1")
+	}
 	if _, err := os.Stat(guiScript); err != nil {
 		return fmt.Errorf("找不到 GUI 脚本 %s: %w", guiScript, err)
 	}
@@ -61,7 +46,9 @@ func launchLegacyPowerShellGUI() error {
 		"-STA",
 		"-File", guiScript,
 		"-AgentPath", agentPath,
-		"-CoordinatorPath", coordinatorPath,
+	}
+	if filepath.Base(guiScript) == "acbh-desktop-gui.ps1" {
+		args = append(args, "-CoordinatorPath", coordinatorPath)
 	}
 	cmd := exec.Command("powershell.exe", args...)
 	cmd.Stdout = os.Stdout
