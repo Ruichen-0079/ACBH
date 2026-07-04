@@ -252,10 +252,13 @@ func TestBodyProbeAndInit(t *testing.T) {
 		t.Fatalf("init op = %#v", op)
 	}
 	body := rec.Body.String()
-	for _, forbidden := range []string{"groupId", "memberId", "hostToken", "whoami", "lease"} {
+	for _, forbidden := range []string{"memberId", "hostToken", "lease"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("init response contains user-visible legacy wording %q: %s", forbidden, body)
 		}
+	}
+	if !strings.Contains(body, `"actualRequestUrl"`) || !strings.Contains(body, `/whoami`) {
+		t.Fatalf("init response missing coordinator network diagnostics: %s", body)
 	}
 	if !strings.Contains(body, "私人实例已连接") {
 		t.Fatalf("init response missing single-owner wording: %s", body)
@@ -490,6 +493,9 @@ func TestBodyBackupSnapshotAPIs(t *testing.T) {
 	if op.State != operations.Success {
 		t.Fatalf("backup upload op = %#v", op)
 	}
+	if !strings.Contains(rec.Body.String(), `"networkRequests"`) || !strings.Contains(rec.Body.String(), "/world-backups/plan") || !strings.Contains(rec.Body.String(), "/world-backups/commit") {
+		t.Fatalf("backup upload missing coordinator network diagnostics: %s", rec.Body.String())
+	}
 
 	rec = httptest.NewRecorder()
 	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/snapshots", nil))
@@ -498,6 +504,9 @@ func TestBodyBackupSnapshotAPIs(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "hostToken") || strings.Contains(rec.Body.String(), "groupId") {
 		t.Fatalf("snapshots leaked legacy fields: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"actualRequestUrl"`) || !strings.Contains(rec.Body.String(), "/world-backups") {
+		t.Fatalf("snapshots missing actualRequestUrl diagnostics: %s", rec.Body.String())
 	}
 
 	target := filepath.Join(t.TempDir(), "restore")
@@ -509,6 +518,9 @@ func TestBodyBackupSnapshotAPIs(t *testing.T) {
 	}
 	if got, err := os.ReadFile(filepath.Join(target, "banned-ips.json")); err != nil || string(got) != "[]" {
 		t.Fatalf("downloaded top-level file got=%q err=%v", got, err)
+	}
+	if !strings.Contains(rec.Body.String(), `"actualRequestUrl"`) || !strings.Contains(rec.Body.String(), "/world-backups/latest") {
+		t.Fatalf("download operation missing actualRequestUrl diagnostics: %s", rec.Body.String())
 	}
 }
 

@@ -165,6 +165,16 @@ type ProbeResult struct {
 	RouteProbes            []RouteProbe  `json:"routeProbes"`
 }
 
+type NetworkRequest struct {
+	Stage            string               `json:"stage"`
+	Method           string               `json:"method"`
+	ActualRequestURL string               `json:"actualRequestUrl"`
+	HTTPStatus       int                  `json:"httpStatus,omitempty"`
+	ErrorCode        coreerrors.ErrorCode `json:"errorCode,omitempty"`
+	ResponseBody     string               `json:"responseBody,omitempty"`
+	Suggestion       string               `json:"suggestion,omitempty"`
+}
+
 func New(baseURL string) (*Client, *coreerrors.Error) {
 	return NewWithHTTPClient(baseURL, nil)
 }

@@ -174,6 +174,33 @@ func TestBackupDefaultsDoNotOverwriteCustomRules(t *testing.T) {
 	}
 }
 
+func TestLegacyMinimalBackupDefaultsUpgradeToPhase3Defaults(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := validConfig()
+	cfg.Backup = BackupConfig{
+		ProfileID: "minecraft-migratable",
+		Include:   legacyMinimalBackupInclude(),
+		Exclude:   legacyMinimalBackupExclude(),
+	}
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	for _, want := range []string{"dir:defaultconfigs", "dir:datapacks", "dir:resourcepacks", "dir:global_packs", "dir:patchouli_books", "file:server-icon.png", "file:manifest.json", "file:HOW-TO-RUN.md"} {
+		if !containsString(got.Backup.Include, want) {
+			t.Fatalf("legacy minimal include was not upgraded, missing %q in %#v", want, got.Backup.Include)
+		}
+	}
+	for _, want := range []string{"dir:versions", "dir:.cache", "dir:cache"} {
+		if !containsString(got.Backup.Exclude, want) {
+			t.Fatalf("legacy minimal exclude was not upgraded, missing %q in %#v", want, got.Backup.Exclude)
+		}
+	}
+}
+
 func TestOldConfigJSONMigratesToSchemaVersion2(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)

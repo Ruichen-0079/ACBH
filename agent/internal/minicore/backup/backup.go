@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -64,16 +65,17 @@ type AnalyzeResult struct {
 }
 
 type UploadResult struct {
-	OK               bool   `json:"ok"`
-	Outcome          string `json:"outcome"`
-	SnapshotID       string `json:"snapshotId"`
-	LogicalSize      int64  `json:"logicalSize"`
-	UploadedSize     int64  `json:"uploadedSize"`
-	DeduplicatedSize int64  `json:"deduplicatedSize"`
-	FileCount        int    `json:"fileCount"`
-	RootCount        int    `json:"rootCount"`
-	ActualRequestURL string `json:"actualRequestUrl,omitempty"`
-	CoordinatorURL   string `json:"coordinatorUrl"`
+	OK               bool                               `json:"ok"`
+	Outcome          string                             `json:"outcome"`
+	SnapshotID       string                             `json:"snapshotId"`
+	LogicalSize      int64                              `json:"logicalSize"`
+	UploadedSize     int64                              `json:"uploadedSize"`
+	DeduplicatedSize int64                              `json:"deduplicatedSize"`
+	FileCount        int                                `json:"fileCount"`
+	RootCount        int                                `json:"rootCount"`
+	ActualRequestURL string                             `json:"actualRequestUrl,omitempty"`
+	CoordinatorURL   string                             `json:"coordinatorUrl"`
+	NetworkRequests  []coordinatorclient.NetworkRequest `json:"networkRequests,omitempty"`
 }
 
 type SnapshotSummary struct {
@@ -90,8 +92,10 @@ type SnapshotSummary struct {
 }
 
 type ListResult struct {
-	OK        bool              `json:"ok"`
-	Snapshots []SnapshotSummary `json:"snapshots"`
+	OK               bool                               `json:"ok"`
+	Snapshots        []SnapshotSummary                  `json:"snapshots"`
+	ActualRequestURL string                             `json:"actualRequestUrl,omitempty"`
+	NetworkRequests  []coordinatorclient.NetworkRequest `json:"networkRequests,omitempty"`
 }
 
 type DownloadRequest struct {
@@ -101,13 +105,14 @@ type DownloadRequest struct {
 }
 
 type DownloadResult struct {
-	OK               bool     `json:"ok"`
-	SnapshotID       string   `json:"snapshotId"`
-	TargetDir        string   `json:"targetDir"`
-	DownloadedFiles  int      `json:"downloadedFiles"`
-	LogicalSize      int64    `json:"logicalSize"`
-	AppliedRoots     []string `json:"appliedRoots"`
-	ActualRequestURL string   `json:"actualRequestUrl,omitempty"`
+	OK               bool                               `json:"ok"`
+	SnapshotID       string                             `json:"snapshotId"`
+	TargetDir        string                             `json:"targetDir"`
+	DownloadedFiles  int                                `json:"downloadedFiles"`
+	LogicalSize      int64                              `json:"logicalSize"`
+	AppliedRoots     []string                           `json:"appliedRoots"`
+	ActualRequestURL string                             `json:"actualRequestUrl,omitempty"`
+	NetworkRequests  []coordinatorclient.NetworkRequest `json:"networkRequests,omitempty"`
 }
 
 type Service struct {
@@ -149,10 +154,12 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 	if probeErr != nil {
 		return UploadResult{}, probeErr
 	}
+	requests := []coordinatorclient.NetworkRequest{{Stage: "coordinator_probe", Method: http.MethodGet, ActualRequestURL: probe.ActualRequestURL, HTTPStatus: http.StatusOK}}
 	lease, leaseErr := client.EnsureActiveLeaseWithGeneration(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken, nil)
 	if leaseErr != nil {
 		return UploadResult{}, leaseErr
 	}
+	requests = append(requests, networkRequest("ensure_active", http.MethodPost, cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/lease/ensure-active", http.StatusOK))
 	generation := lease.Lease.Generation
 	scanned, scanErr := scan(cfg, req, true)
 	if scanErr != nil {
@@ -161,6 +168,7 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 	var parent *worldbackup.Manifest
 	if latest, latestErr := client.GetLatestWorldBackup(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken, false); latestErr == nil {
 		parent = &latest.Manifest
+		requests = append(requests, networkRequest("latest_manifest", http.MethodGet, cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/world-backups/latest", http.StatusOK))
 	}
 	snapshotID := "ws_" + time.Now().UTC().Format("20060102_150405")
 	manifest, changed, objects := buildManifest(scanned.files, parent, snapshotID, coordIdentity.GroupID, coordIdentity.HostID, generation)
@@ -174,6 +182,7 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 	if planErr != nil {
 		return UploadResult{}, planErr
 	}
+	requests = append(requests, networkRequest("backup_plan", http.MethodPost, cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/world-backups/plan", http.StatusOK))
 	bySHA := map[string]scannedFile{}
 	for _, file := range changed {
 		if _, ok := bySHA[file.SHA256]; !ok {
@@ -199,6 +208,7 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 			return UploadResult{}, coreerrors.New(coreerrors.InvalidRequest, "close backup object failed", coreerrors.Details{Path: file.Path}, closeErr.Error())
 		}
 		uploadedSize += object.Size
+		requests = append(requests, networkRequest("object_upload", http.MethodPut, cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/world-objects/"+url.PathEscape(object.SHA256), http.StatusOK))
 	}
 	manifest.UploadedSize = uploadedSize
 	if err := worldbackup.ValidateManifest(manifest); err != nil {
@@ -213,6 +223,7 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 	if commitErr != nil {
 		return UploadResult{}, commitErr
 	}
+	requests = append(requests, networkRequest("snapshot_commit", http.MethodPost, cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/world-backups/commit", http.StatusOK))
 	return UploadResult{
 		OK:               true,
 		Outcome:          "success",
@@ -224,6 +235,7 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 		RootCount:        scanned.analyze.RootCount,
 		ActualRequestURL: probe.ActualRequestURL,
 		CoordinatorURL:   cfg.CoordinatorURL,
+		NetworkRequests:  requests,
 	}, nil
 }
 
@@ -240,6 +252,7 @@ func (s Service) List(ctx context.Context, cfg coreconfig.Config) (ListResult, *
 	if listErr != nil {
 		return ListResult{}, listErr
 	}
+	actualURL := requestURL(cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/world-backups")
 	snapshots := make([]SnapshotSummary, 0, len(out.Snapshots))
 	for _, item := range out.Snapshots {
 		completed := ""
@@ -268,7 +281,12 @@ func (s Service) List(ctx context.Context, cfg coreconfig.Config) (ListResult, *
 		})
 	}
 	sort.SliceStable(snapshots, func(i, j int) bool { return snapshots[i].CreatedAt > snapshots[j].CreatedAt })
-	return ListResult{OK: true, Snapshots: snapshots}, nil
+	return ListResult{
+		OK:               true,
+		Snapshots:        snapshots,
+		ActualRequestURL: actualURL,
+		NetworkRequests:  []coordinatorclient.NetworkRequest{{Stage: "snapshot_list", Method: http.MethodGet, ActualRequestURL: actualURL, HTTPStatus: http.StatusOK}},
+	}, nil
 }
 
 func (s Service) Download(ctx context.Context, cfg coreconfig.Config, snapshotID string, req DownloadRequest) (DownloadResult, *coreerrors.Error) {
@@ -292,7 +310,9 @@ func (s Service) Download(ctx context.Context, cfg coreconfig.Config, snapshotID
 	}
 	var remote coordinatorclient.WorldBackupManifestResponse
 	var dlErr *coreerrors.Error
+	manifestPath := "/v1/groups/" + url.PathEscape(coordIdentity.GroupID) + "/world-backups/" + url.PathEscape(snapshotID)
 	if snapshotID == "" || snapshotID == "latest" {
+		manifestPath = "/v1/groups/" + url.PathEscape(coordIdentity.GroupID) + "/world-backups/latest"
 		remote, dlErr = client.GetLatestWorldBackup(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken, false)
 	} else {
 		remote, dlErr = client.GetWorldBackup(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken, snapshotID)
@@ -304,8 +324,10 @@ func (s Service) Download(ctx context.Context, cfg coreconfig.Config, snapshotID
 		return DownloadResult{}, dlErr
 	}
 	if req.DryRun {
-		return DownloadResult{OK: true, SnapshotID: remote.Manifest.SnapshotID, TargetDir: targetDir, LogicalSize: remote.Manifest.LogicalSize}, nil
+		actualURL := requestURL(cfg, manifestPath)
+		return DownloadResult{OK: true, SnapshotID: remote.Manifest.SnapshotID, TargetDir: targetDir, LogicalSize: remote.Manifest.LogicalSize, ActualRequestURL: actualURL, NetworkRequests: []coordinatorclient.NetworkRequest{{Stage: "snapshot_manifest", Method: http.MethodGet, ActualRequestURL: actualURL, HTTPStatus: http.StatusOK}}}, nil
 	}
+	requests := []coordinatorclient.NetworkRequest{networkRequest("snapshot_manifest", http.MethodGet, cfg, manifestPath, http.StatusOK)}
 	var downloaded int
 	var roots []string
 	seenRoots := map[string]bool{}
@@ -325,6 +347,7 @@ func (s Service) Download(ctx context.Context, cfg coreconfig.Config, snapshotID
 		if err := writeDownloadedObject(body, target, file.SHA256, file.Size); err != nil {
 			return DownloadResult{}, err
 		}
+		requests = append(requests, networkRequest("object_download", http.MethodGet, cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/world-objects/"+url.PathEscape(sha), http.StatusOK))
 		downloaded++
 		root := strings.Split(file.Path, "/")[0]
 		if root != "" && !seenRoots[root] {
@@ -333,7 +356,7 @@ func (s Service) Download(ctx context.Context, cfg coreconfig.Config, snapshotID
 		}
 	}
 	sort.Strings(roots)
-	return DownloadResult{OK: true, SnapshotID: remote.Manifest.SnapshotID, TargetDir: targetDir, DownloadedFiles: downloaded, LogicalSize: remote.Manifest.LogicalSize, AppliedRoots: roots}, nil
+	return DownloadResult{OK: true, SnapshotID: remote.Manifest.SnapshotID, TargetDir: targetDir, DownloadedFiles: downloaded, LogicalSize: remote.Manifest.LogicalSize, AppliedRoots: roots, ActualRequestURL: requestURL(cfg, manifestPath), NetworkRequests: requests}, nil
 }
 
 func (s Service) client(cfg coreconfig.Config) (Client, *coreerrors.Error) {
@@ -376,7 +399,7 @@ func scan(cfg coreconfig.Config, req AnalyzeRequest, hash bool) (scanResult, *co
 		if err := collect(abs, rootAbs, rule, excludes, hash, &summary, &files); err != nil {
 			return scanResult{}, err
 		}
-		if summary.FileCount > 0 || rule.kind == "file" {
+		if summary.FileCount > 0 || rule.kind == "file" || rule.kind == "dir" {
 			result.Roots = append(result.Roots, summary)
 			result.FileCount += summary.FileCount
 			result.LogicalSize += summary.Size
@@ -435,7 +458,10 @@ func collect(root string, start string, include rule, excludes []rule, hash bool
 		if entry.IsDir() {
 			return nil
 		}
-		return addFile(root, filePath, rel, hash, summary, files)
+		if err := addFile(root, filePath, rel, hash, summary, files); err != nil {
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		var coreErr *coreerrors.Error
@@ -681,6 +707,14 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func requestURL(cfg coreconfig.Config, path string) string {
+	return strings.TrimRight(cfg.CoordinatorURL, "/") + path
+}
+
+func networkRequest(stage string, method string, cfg coreconfig.Config, path string, status int) coordinatorclient.NetworkRequest {
+	return coordinatorclient.NetworkRequest{Stage: stage, Method: method, ActualRequestURL: requestURL(cfg, path), HTTPStatus: status}
 }
 
 func normalizeObjectID(objectID string) string {

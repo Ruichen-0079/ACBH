@@ -326,13 +326,33 @@ func applyDefaults(cfg Config) Config {
 	if cfg.Backup.ProfileID == "" {
 		cfg.Backup.ProfileID = defaults.Backup.ProfileID
 	}
-	if len(cfg.Backup.Include) == 0 {
+	if len(cfg.Backup.Include) == 0 || (cfg.Backup.ProfileID == defaults.Backup.ProfileID && sameStrings(cfg.Backup.Include, legacyMinimalBackupInclude())) {
 		cfg.Backup.Include = append([]string{}, defaults.Backup.Include...)
 	}
-	if len(cfg.Backup.Exclude) == 0 {
+	if len(cfg.Backup.Exclude) == 0 || (cfg.Backup.ProfileID == defaults.Backup.ProfileID && sameStrings(cfg.Backup.Exclude, legacyMinimalBackupExclude())) {
 		cfg.Backup.Exclude = append([]string{}, defaults.Backup.Exclude...)
 	}
 	return cfg
+}
+
+func legacyMinimalBackupInclude() []string {
+	return []string{"dir:world", "dir:mods", "dir:config", "file:server.properties", "file:eula.txt", "file:ops.json", "file:whitelist.json", "file:banned-ips.json", "file:banned-players.json"}
+}
+
+func legacyMinimalBackupExclude() []string {
+	return []string{"dir:libraries", "dir:jre", "dir:logs", "dir:crash-reports"}
+}
+
+func sameStrings(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func validate(cfg Config, path string) *coreerrors.Error {

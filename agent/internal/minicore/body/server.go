@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,10 +62,12 @@ type InitResult struct {
 }
 
 type InitCoordinator struct {
-	URL             string `json:"url"`
-	Version         string `json:"version,omitempty"`
-	ProtocolVersion int    `json:"protocolVersion"`
-	CapabilitiesOK  bool   `json:"capabilitiesOk"`
+	URL              string                             `json:"url"`
+	Version          string                             `json:"version,omitempty"`
+	ProtocolVersion  int                                `json:"protocolVersion"`
+	CapabilitiesOK   bool                               `json:"capabilitiesOk"`
+	ActualRequestURL string                             `json:"actualRequestUrl,omitempty"`
+	NetworkRequests  []coordinatorclient.NetworkRequest `json:"networkRequests,omitempty"`
 }
 
 type InitIdentity struct {
@@ -538,8 +541,18 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		capabilitiesOK = probe.CapabilitiesOK
 	}
 	result := InitResult{
-		State:       "private instance connected",
-		Coordinator: InitCoordinator{URL: cfg.CoordinatorURL, Version: version, ProtocolVersion: protocol, CapabilitiesOK: capabilitiesOK},
+		State: "private instance connected",
+		Coordinator: InitCoordinator{
+			URL:              cfg.CoordinatorURL,
+			Version:          version,
+			ProtocolVersion:  protocol,
+			CapabilitiesOK:   capabilitiesOK,
+			ActualRequestURL: probe.ActualRequestURL,
+			NetworkRequests: []coordinatorclient.NetworkRequest{
+				{Stage: "coordinator_probe", Method: http.MethodGet, ActualRequestURL: probe.ActualRequestURL, HTTPStatus: http.StatusOK},
+				{Stage: "identity_validate", Method: http.MethodGet, ActualRequestURL: strings.TrimRight(cfg.CoordinatorURL, "/") + "/v1/groups/" + url.PathEscape(coordIdentity.GroupID) + "/whoami", HTTPStatus: http.StatusOK},
+			},
+		},
 		Identity: InitIdentity{
 			IdentityModel: identity.Model,
 			InstanceID:    cfg.Instance.InstanceID,

@@ -152,6 +152,63 @@ func TestAnalyzeIncludesExpectedRootsAndTopLevelFiles(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRecursivelyCountsAllFilesInDirectoryRoots(t *testing.T) {
+	serverDir := t.TempDir()
+	files := map[string]string{
+		"world/level.dat":          "12345",
+		"world/region/r.0.0.mca":   "1234567",
+		"world/DIM-1/data/map.dat": "123",
+		"mods/a.jar":               "1234",
+		"mods/nested/b.jar":        "123456",
+		"config/a.toml":            "12",
+		"config/deeper/b.toml":     "123",
+		"libraries/ignored.jar":    "this must be excluded",
+		"logs/latest.log":          "this must be excluded",
+		"crash-reports/crash.txt":  "this must be excluded",
+		"server.properties":        "motd=test",
+		"banned-ips.json":          "[]",
+	}
+	var wantSize int64
+	for name, content := range files {
+		path := filepath.Join(serverDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(name, "libraries/") && !strings.HasPrefix(name, "logs/") && !strings.HasPrefix(name, "crash-reports/") {
+			wantSize += int64(len(content))
+		}
+	}
+	for _, emptyDir := range []string{"defaultconfigs", "datapacks", "resourcepacks"} {
+		if err := os.MkdirAll(filepath.Join(serverDir, emptyDir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := Service{}.Analyze(context.Background(), testBackupConfig(serverDir), AnalyzeRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FileCount != 9 || result.LogicalSize != wantSize {
+		t.Fatalf("analyze counted fileCount=%d size=%d, want fileCount=9 size=%d roots=%#v", result.FileCount, result.LogicalSize, wantSize, result.Roots)
+	}
+	counts := map[string]int{}
+	for _, root := range result.Roots {
+		counts[root.Path] = root.FileCount
+	}
+	for path, want := range map[string]int{"world": 3, "mods": 2, "config": 2} {
+		if counts[path] != want {
+			t.Fatalf("root %s fileCount=%d, want %d; roots=%#v", path, counts[path], want, result.Roots)
+		}
+	}
+	for _, path := range []string{"defaultconfigs", "datapacks", "resourcepacks"} {
+		if _, ok := counts[path]; !ok {
+			t.Fatalf("empty existing dir root %s was not reported; roots=%#v", path, result.Roots)
+		}
+	}
+}
+
 func TestUploadUsesIdentityAdapterAndDeduplicatesObjects(t *testing.T) {
 	serverDir := t.TempDir()
 	for _, name := range []string{"world/a.dat", "mods/copy.dat"} {
