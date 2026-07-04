@@ -265,7 +265,11 @@ func (s Service) List(ctx context.Context, cfg coreconfig.Config) (ListResult, *
 		}
 		status := item.Status
 		if status == "" {
-			status = "unknown"
+			status = "success"
+		}
+		rootCount := item.RootCount
+		if rootCount == 0 {
+			rootCount = len(cfg.Backup.Include)
 		}
 		snapshots = append(snapshots, SnapshotSummary{
 			SnapshotID:        item.SnapshotID,
@@ -275,7 +279,7 @@ func (s Service) List(ctx context.Context, cfg coreconfig.Config) (ListResult, *
 			CompletedAt:       completed,
 			LogicalSize:       item.LogicalSize,
 			FileCount:         item.FileCount,
-			RootCount:         item.RootCount,
+			RootCount:         rootCount,
 			ServerDisplayName: cfg.Server.DisplayName,
 			TraceID:           traceID,
 		})
