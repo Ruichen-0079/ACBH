@@ -15,6 +15,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
+	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/identity"
 	minilistener "github.com/Ruichen-0079/ACBH/agent/internal/minicore/listener"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/operations"
 	minirelay "github.com/Ruichen-0079/ACBH/agent/internal/minicore/relay"
@@ -44,6 +45,10 @@ type HealthResponse struct {
 	ConfigPath     string            `json:"configPath"`
 	CoordinatorURL string            `json:"coordinatorUrl,omitempty"`
 	BodyAPI        string            `json:"bodyApi"`
+	IdentityModel  string            `json:"identityModel"`
+	InstanceID     string            `json:"instanceId,omitempty"`
+	DeviceID       string            `json:"deviceId,omitempty"`
+	ServerID       string            `json:"serverId,omitempty"`
 	ConfigError    *coreerrors.Error `json:"configError,omitempty"`
 }
 
@@ -61,9 +66,54 @@ type InitCoordinator struct {
 }
 
 type InitIdentity struct {
-	GroupID string `json:"groupId"`
-	HostID  string `json:"hostId"`
-	Valid   bool   `json:"valid"`
+	IdentityModel string `json:"identityModel"`
+	InstanceID    string `json:"instanceId"`
+	DeviceID      string `json:"deviceId"`
+	Valid         bool   `json:"valid"`
+	Message       string `json:"message"`
+}
+
+type IdentityResponse struct {
+	OK            bool                `json:"ok"`
+	IdentityModel string              `json:"identityModel"`
+	Instance      IdentityInstance    `json:"instance"`
+	Device        IdentityDevice      `json:"device"`
+	Server        IdentityServer      `json:"server"`
+	Coordinator   IdentityCoordinator `json:"coordinator"`
+	Compat        IdentityCompat      `json:"compat"`
+}
+
+type IdentityInstance struct {
+	InstanceID  string `json:"instanceId"`
+	DisplayName string `json:"displayName"`
+}
+
+type IdentityDevice struct {
+	DeviceID    string `json:"deviceId"`
+	DisplayName string `json:"displayName"`
+	Platform    string `json:"platform"`
+}
+
+type IdentityServer struct {
+	ServerID    string `json:"serverId"`
+	DisplayName string `json:"displayName"`
+	Dir         string `json:"dir"`
+}
+
+type IdentityCoordinator struct {
+	URL             string `json:"url"`
+	ProtocolVersion int    `json:"protocolVersion"`
+}
+
+type IdentityCompat struct {
+	UsesLegacyGroupAPI      bool `json:"usesLegacyGroupApi"`
+	LegacyGroupIDPresent    bool `json:"legacyGroupIdPresent"`
+	LegacyHostIDPresent     bool `json:"legacyHostIdPresent"`
+	LegacyHostTokenPresent  bool `json:"legacyHostTokenPresent"`
+	LegacyMemberIDPresent   bool `json:"legacyMemberIdPresent"`
+	OwnerTokenPresent       bool `json:"ownerTokenPresent"`
+	FullLegacyTokenRedacted bool `json:"fullLegacyTokenRedacted"`
+	FullOwnerTokenRedacted  bool `json:"fullOwnerTokenRedacted"`
 }
 
 func New(addr string, appDataDir string) *Server {
@@ -98,6 +148,7 @@ func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/body/health", s.handleHealth)
 	mux.HandleFunc("/v1/config", s.handleConfig)
+	mux.HandleFunc("/v1/identity", s.handleIdentity)
 	mux.HandleFunc("/v1/coordinator/probe", s.handleCoordinatorProbe)
 	mux.HandleFunc("/v1/init", s.handleInit)
 	mux.HandleFunc("/v1/listener/status", s.handleListenerStatus)
@@ -218,12 +269,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg, cfgErr := s.ConfigStore.Load()
-	resp := HealthResponse{OK: true, Service: ServiceName, Version: Version, ConfigPath: s.ConfigStore.Path, BodyAPI: "http://" + s.Addr}
+	resp := HealthResponse{OK: true, Service: ServiceName, Version: Version, ConfigPath: s.ConfigStore.Path, BodyAPI: "http://" + s.Addr, IdentityModel: identity.Model}
 	if cfgErr != nil {
 		resp.ConfigError = cfgErr
 	} else {
 		resp.Mode = cfg.Mode
 		resp.CoordinatorURL = cfg.CoordinatorURL
+		resp.InstanceID = cfg.Instance.InstanceID
+		resp.DeviceID = cfg.Device.DeviceID
+		resp.ServerID = cfg.Server.ServerID
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -236,21 +290,67 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, cfg)
+		writeJSON(w, http.StatusOK, coreconfig.Sanitized(cfg))
 	case http.MethodPut:
 		var cfg coreconfig.Config
 		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 			writeError(w, http.StatusBadRequest, coreerrors.New(coreerrors.ConfigParseError, "request body is not valid JSON", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, err.Error()))
 			return
 		}
+		if existing, loadErr := s.ConfigStore.Load(); loadErr == nil {
+			preserveRedactedTokens(&cfg, existing)
+		}
 		if err := s.ConfigStore.Save(cfg); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, cfg)
+		writeJSON(w, http.StatusOK, coreconfig.Sanitized(cfg))
 	default:
 		methodNotAllowed(w, r)
 	}
+}
+
+func preserveRedactedTokens(next *coreconfig.Config, existing coreconfig.Config) {
+	if next.Instance.InstanceID == "" {
+		next.Instance.InstanceID = existing.Instance.InstanceID
+	}
+	if next.Device.DeviceID == "" {
+		next.Device.DeviceID = existing.Device.DeviceID
+	}
+	if next.Server.ServerID == "" {
+		next.Server.ServerID = existing.Server.ServerID
+	}
+	if next.Compat.LegacyGroupID == "" {
+		next.Compat.LegacyGroupID = existing.Compat.LegacyGroupID
+	}
+	if next.Compat.LegacyMemberID == "" {
+		next.Compat.LegacyMemberID = existing.Compat.LegacyMemberID
+	}
+	if next.Compat.LegacyHostID == "" {
+		next.Compat.LegacyHostID = existing.Compat.LegacyHostID
+	}
+	if next.Instance.OwnerToken == "[redacted]" {
+		next.Instance.OwnerToken = existing.Instance.OwnerToken
+	}
+	if next.Compat.LegacyHostToken == "[redacted]" {
+		next.Compat.LegacyHostToken = existing.Compat.LegacyHostToken
+	}
+	if next.Identity.HostToken == "[redacted]" {
+		next.Identity.HostToken = existing.Compat.LegacyHostToken
+	}
+}
+
+func (s *Server) handleIdentity(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r)
+		return
+	}
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeError(w, statusForCoreError(cfgErr), cfgErr)
+		return
+	}
+	writeJSON(w, http.StatusOK, identityResponse(cfg))
 }
 
 func (s *Server) handleCoordinatorProbe(w http.ResponseWriter, r *http.Request) {
@@ -290,9 +390,14 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 	op.Stage = "identity"
 	op.Progress = 80
-	op.Message = "validating host identity"
+	op.Message = "validating private instance token"
 	s.Operations.Update(op)
-	if _, whoErr := client.WhoAmI(r.Context(), cfg.Identity.GroupID, cfg.Identity.HostID, cfg.Identity.HostToken); whoErr != nil {
+	coordIdentity, identityErr := identity.Adapter(cfg)
+	if identityErr != nil {
+		writeJSON(w, statusForCoreError(identityErr), s.Operations.Fail(op, identityErr))
+		return
+	}
+	if _, whoErr := client.WhoAmI(r.Context(), coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken); whoErr != nil {
 		whoErr.Details.ConfigPath = s.ConfigStore.Path
 		whoErr.Details.CoordinatorURL = cfg.CoordinatorURL
 		writeJSON(w, statusForCoreError(whoErr), s.Operations.Fail(op, whoErr))
@@ -307,11 +412,17 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		capabilitiesOK = probe.CapabilitiesOK
 	}
 	result := InitResult{
-		State:       "ready",
+		State:       "private instance connected",
 		Coordinator: InitCoordinator{URL: cfg.CoordinatorURL, Version: version, ProtocolVersion: protocol, CapabilitiesOK: capabilitiesOK},
-		Identity:    InitIdentity{GroupID: cfg.Identity.GroupID, HostID: cfg.Identity.HostID, Valid: true},
+		Identity: InitIdentity{
+			IdentityModel: identity.Model,
+			InstanceID:    cfg.Instance.InstanceID,
+			DeviceID:      cfg.Device.DeviceID,
+			Valid:         true,
+			Message:       "私人实例已连接；当前设备已验证；VPS Coordinator 已连接；访问令牌有效；备份/中转能力可用",
+		},
 	}
-	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "init completed"))
+	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "private instance connected"))
 }
 
 func (s *Server) handleOperations(w http.ResponseWriter, r *http.Request) {
@@ -415,6 +526,8 @@ func statusForCoreError(err *coreerrors.Error) int {
 	switch err.ErrorCode {
 	case coreerrors.ConfigMissing, coreerrors.ConfigInvalid, coreerrors.ConfigParseError, coreerrors.InvalidRequest:
 		return http.StatusBadRequest
+	case coreerrors.IdentityIncomplete:
+		return http.StatusBadRequest
 	case coreerrors.AuthMissing, coreerrors.AuthInvalid:
 		return http.StatusUnauthorized
 	case coreerrors.LeaseExpired, coreerrors.NotCurrentHost:
@@ -435,18 +548,42 @@ func WriteExampleConfig(appDataDir string, coordinatorURL string, serverDir stri
 	cfg := coreconfig.DefaultConfig()
 	cfg.CoordinatorURL = coordinatorURL
 	cfg.Server.Dir = serverDir
-	cfg.Identity.GroupID = "grp_xxx"
-	cfg.Identity.MemberID = "mem_xxx"
-	cfg.Identity.HostID = "host_xxx"
-	cfg.Identity.HostToken = "ht_xxx"
-	cfg.Identity.DisplayName = "私人本地主机"
+	cfg.Instance.InstanceID = "inst_xxx"
+	cfg.Instance.OwnerToken = "ht_xxx"
+	cfg.Compat.LegacyGroupID = "grp_xxx"
+	cfg.Compat.LegacyMemberID = "mem_xxx"
+	cfg.Compat.LegacyHostID = "host_xxx"
+	cfg.Compat.LegacyHostToken = "ht_xxx"
 	hostname, _ := os.Hostname()
-	cfg.Identity.DeviceName = hostname
-	cfg.Identity.Platform = "windows"
+	cfg.Device.DeviceID = "dev_xxx"
+	cfg.Device.DisplayName = hostname
+	cfg.Device.Platform = "windows"
+	cfg.Server.ServerID = "srv_xxx"
 	if err := store.Save(cfg); err != nil {
 		return "", err
 	}
 	return filepath.Clean(store.Path), nil
+}
+
+func identityResponse(cfg coreconfig.Config) IdentityResponse {
+	return IdentityResponse{
+		OK:            true,
+		IdentityModel: identity.Model,
+		Instance:      IdentityInstance{InstanceID: cfg.Instance.InstanceID, DisplayName: cfg.Instance.DisplayName},
+		Device:        IdentityDevice{DeviceID: cfg.Device.DeviceID, DisplayName: cfg.Device.DisplayName, Platform: cfg.Device.Platform},
+		Server:        IdentityServer{ServerID: cfg.Server.ServerID, DisplayName: cfg.Server.DisplayName, Dir: cfg.Server.Dir},
+		Coordinator:   IdentityCoordinator{URL: cfg.CoordinatorURL, ProtocolVersion: cfg.Compat.CoordinatorProtocol},
+		Compat: IdentityCompat{
+			UsesLegacyGroupAPI:      true,
+			LegacyGroupIDPresent:    cfg.Compat.LegacyGroupID != "",
+			LegacyHostIDPresent:     cfg.Compat.LegacyHostID != "",
+			LegacyHostTokenPresent:  cfg.Compat.LegacyHostToken != "",
+			LegacyMemberIDPresent:   cfg.Compat.LegacyMemberID != "",
+			OwnerTokenPresent:       cfg.Instance.OwnerToken != "",
+			FullLegacyTokenRedacted: true,
+			FullOwnerTokenRedacted:  true,
+		},
+	}
 }
 
 func Endpoint(addr string) string {

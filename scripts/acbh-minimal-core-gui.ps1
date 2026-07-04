@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$AgentPath,
     [string]$AppDataDir,
     [string]$BodyListen = "127.0.0.1:6120",
@@ -17,7 +17,11 @@ if ($SelfTest) {
         "txtPublicEndpoint",
         "txtListenerProcess",
         "txtRelayError",
-        "`$script:BodyUrl"
+        "私人实例",
+        "当前设备",
+        "VPS 中转",
+        "访问令牌状态",
+        '$script:BodyUrl'
     )
     foreach ($check in $checks) {
         if (-not $source.Contains($check)) {
@@ -30,7 +34,7 @@ if ($SelfTest) {
         ("Repair" + "Lock"),
         ("server" + ".lock"),
         ("super" + "visor"),
-        ("take over " + "election")
+        ("take over " + "elec" + "tion")
     )
     foreach ($token in $forbidden) {
         if ($source.Contains($token)) {
@@ -39,6 +43,17 @@ if ($SelfTest) {
     }
     if ($source -match ("Invoke-RestMethod\s+[^\r\n]*" + "txtCoordinator")) {
         throw "GUI self-test failed: direct coordinator REST call found"
+    }
+    $visibleForbidden = @(
+        ('Add-Label "' + 'Group' + ' ID"'),
+        ('Add-Label "' + 'Member' + ' ID"'),
+        ('Add-Label "' + 'Host' + ' ID"'),
+        ('Add-Label "' + 'Host' + ' Token"')
+    )
+    foreach ($token in $visibleForbidden) {
+        if ($source.Contains($token)) {
+            throw "GUI self-test failed: legacy identity label found"
+        }
     }
     Write-Output "ACBH minimal-core GUI self-test ok"
     exit 0
@@ -66,8 +81,9 @@ function Redact-Secrets {
     param([string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $safe = $Text
-    $safe = [regex]::Replace($safe, '(?i)(hostToken|accessKey)(\s*[:=]\s*)[^\s,;}"]+', '$1$2[hidden]')
-    $safe = [regex]::Replace($safe, 'ht_[A-Za-z0-9_\-]+', 'ht_[hidden]')
+    $tokenPattern = "(?i)(hostToken|ownerToken|legacyHostToken|accessKey)\s*[:=]\s*\S+"
+    $safe = [regex]::Replace($safe, $tokenPattern, "[hidden]")
+    $safe = [regex]::Replace($safe, "ht_[A-Za-z0-9_\-]+", "ht_[hidden]")
     return $safe
 }
 
@@ -110,7 +126,9 @@ function Start-Body {
     $args = @("body", "serve", "--listen", $BodyListen, "--app-data-dir", $AppDataDir)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $AgentPath
-    $psi.Arguments = ($args | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join " "
+    foreach ($arg in $args) {
+        [void]$psi.ArgumentList.Add($arg)
+    }
     $psi.WorkingDirectory = Split-Path -Parent $AgentPath
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
@@ -169,13 +187,16 @@ function Load-Config {
         $cfg = Invoke-BodyJson -Method "GET" -Path "/v1/config"
         $cmbMode.SelectedItem = $cfg.mode
         $txtCoordinator.Text = $cfg.coordinatorUrl
-        $txtGroupId.Text = $cfg.identity.groupId
-        $txtMemberId.Text = $cfg.identity.memberId
-        $txtHostId.Text = $cfg.identity.hostId
-        $txtHostToken.Text = $cfg.identity.hostToken
-        $txtDisplayName.Text = $cfg.identity.displayName
-        $txtDeviceName.Text = $cfg.identity.deviceName
+        $txtInstanceName.Text = $cfg.instance.displayName
+        $txtInstanceId.Text = $cfg.instance.instanceId
+        $txtDeviceName.Text = $cfg.device.displayName
+        $txtDeviceId.Text = $cfg.device.deviceId
+        $txtServerName.Text = $cfg.server.displayName
         $txtServerDir.Text = $cfg.server.dir
+        $txtTokenStatus.Text = "not configured"
+        if ($cfg.instance.ownerToken -eq "[redacted]" -or $cfg.compat.legacyHostToken -eq "[redacted]") {
+            $txtTokenStatus.Text = "configured (redacted)"
+        }
         if ($cfg.listener) {
             $txtListenerHost.Text = $cfg.listener.localHost
             $txtListenerPort.Text = [string]$cfg.listener.localPort
@@ -193,19 +214,28 @@ function Load-Config {
 function Save-Config {
     try {
         $cfg = @{
-            schemaVersion = 1
+            schemaVersion = 2
             mode = [string]$cmbMode.SelectedItem
             coordinatorUrl = $txtCoordinator.Text.Trim()
-            identity = @{
-                groupId = $txtGroupId.Text.Trim()
-                memberId = $txtMemberId.Text.Trim()
-                hostId = $txtHostId.Text.Trim()
-                hostToken = $txtHostToken.Text.Trim()
-                displayName = $txtDisplayName.Text.Trim()
-                deviceName = $txtDeviceName.Text.Trim()
+            instance = @{
+                instanceId = $txtInstanceId.Text.Trim()
+                displayName = $txtInstanceName.Text.Trim()
+                ownerToken = "[redacted]"
+            }
+            device = @{
+                deviceId = $txtDeviceId.Text.Trim()
+                displayName = $txtDeviceName.Text.Trim()
                 platform = "windows"
             }
-            server = @{ dir = $txtServerDir.Text.Trim() }
+            server = @{
+                serverId = $txtServerId.Text.Trim()
+                displayName = $txtServerName.Text.Trim()
+                dir = $txtServerDir.Text.Trim()
+            }
+            compat = @{
+                coordinatorProtocol = 2
+                legacyHostToken = "[redacted]"
+            }
             listener = @{ enabled = $true; localHost = "127.0.0.1"; localPort = 25565 }
             relay = @{ enabled = $true; publicHost = $txtPublicHost.Text.Trim(); coordinatorPort = 6121; minecraftPort = [int]$txtPublicPort.Text.Trim() }
             backup = @{
@@ -232,6 +262,7 @@ function Test-Coordinator {
             $txtActualRequestUrl.Text = $op.result.actualRequestUrl
             $txtProtocol.Text = [string]$op.result.capabilities.protocolVersion
             $txtCapabilities.Text = (($op.result.capabilities.capabilities) -join ", ")
+            Refresh-Identity
         } else {
             $lblState.Text = "State: coordinator probe failed"
             if ($op.error) {
@@ -245,12 +276,32 @@ function Test-Coordinator {
     }
 }
 
+function Refresh-Identity {
+    try {
+        $id = Invoke-BodyJson -Method "GET" -Path "/v1/identity"
+        $txtInstanceId.Text = $id.instance.instanceId
+        $txtInstanceName.Text = $id.instance.displayName
+        $txtDeviceId.Text = $id.device.deviceId
+        $txtDeviceName.Text = $id.device.displayName
+        $txtServerId.Text = $id.server.serverId
+        $txtServerName.Text = $id.server.displayName
+        $txtTokenStatus.Text = "not configured"
+        if ($id.compat.ownerTokenPresent -or $id.compat.legacyHostTokenPresent) {
+            $txtTokenStatus.Text = "configured (redacted)"
+        }
+        $txtAdvancedDiagnostics.Text = "usesLegacyGroupApi=$($id.compat.usesLegacyGroupApi); legacyGroupIdPresent=$($id.compat.legacyGroupIdPresent); legacyHostIdPresent=$($id.compat.legacyHostIdPresent)"
+        Add-Log "Private instance identity refreshed."
+    } catch {
+        Add-Log ("Identity not loaded yet: " + $_.Exception.Message)
+    }
+}
+
 function Run-Init {
     try {
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/init"
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
-            $lblState.Text = "State: ready"
+            $lblState.Text = "State: private instance ready"
         } else {
             $lblState.Text = "State: init failed"
         }
@@ -326,7 +377,7 @@ function Set-RelayFields {
     param([object]$Relay)
     $txtPublicEndpoint.Text = [string]$Relay.publicEndpoint
     $txtLocalEndpoint.Text = [string]$Relay.localEndpoint
-    $txtRelayState.Text = "configured=$($Relay.configured) active=$($Relay.active) currentHost=$($Relay.currentHost) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
+    $txtRelayState.Text = "configured=$($Relay.configured) active=$($Relay.active) currentDevice=$($Relay.currentDevice) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
     $txtRelayError.Text = ""
     if ($Relay.errors) {
         $txtRelayError.Text = (($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + $_.details.responseBody }) -join "; ")
@@ -437,39 +488,42 @@ $cmbMode.DropDownStyle = "DropDownList"
 $cmbMode.SelectedItem = "remote-public"
 $form.Controls.Add($cmbMode)
 
-Add-Label "Coordinator URL" 24 172 | Out-Null
+Add-Label "VPS 地址" 24 172 | Out-Null
 $txtCoordinator = Add-TextBox 170 170 650
 $txtCoordinator.Text = "http://121.40.101.224:6121"
-Add-Label "Group ID" 24 206 | Out-Null
-$txtGroupId = Add-TextBox 170 204 250
-Add-Label "Member ID" 450 206 | Out-Null
-$txtMemberId = Add-TextBox 560 204 260
-Add-Label "Host ID" 24 240 | Out-Null
-$txtHostId = Add-TextBox 170 238 250
-Add-Label "Host Token" 450 240 | Out-Null
-$txtHostToken = Add-TextBox 560 238 260
-$txtHostToken.UseSystemPasswordChar = $true
-Add-Label "Display name" 24 274 | Out-Null
-$txtDisplayName = Add-TextBox 170 272 250
-$txtDisplayName.Text = "私人本地主机"
-Add-Label "Device name" 450 274 | Out-Null
-$txtDeviceName = Add-TextBox 560 272 260
+Add-Label "私人实例" 24 206 | Out-Null
+$txtInstanceName = Add-TextBox 170 204 250
+$txtInstanceName.Text = "私人 ACBH 实例"
+Add-Label "实例 ID" 450 206 | Out-Null
+$txtInstanceId = Add-TextBox 560 204 260 $true
+Add-Label "当前设备" 24 240 | Out-Null
+$txtDeviceName = Add-TextBox 170 238 250
 $txtDeviceName.Text = $env:COMPUTERNAME
-Add-Label "Server dir" 24 308 | Out-Null
+Add-Label "设备 ID" 450 240 | Out-Null
+$txtDeviceId = Add-TextBox 560 238 260 $true
+Add-Label "服务端名称" 24 274 | Out-Null
+$txtServerName = Add-TextBox 170 272 250
+$txtServerName.Text = "Minecraft 服务端"
+Add-Label "访问令牌状态" 450 274 | Out-Null
+$txtTokenStatus = Add-TextBox 560 272 260 $true
+Add-Label "服务端目录" 24 308 | Out-Null
 $txtServerDir = Add-TextBox 170 306 500
 Add-Button "Choose dir" 680 303 { Choose-ServerDir } | Out-Null
 
-Add-Label "Actual probe URL" 24 342 | Out-Null
+Add-Label "实际请求 URL" 24 342 | Out-Null
 $txtActualRequestUrl = Add-TextBox 170 340 650 $true
-Add-Label "Protocol" 24 376 | Out-Null
+Add-Label "协议版本" 24 376 | Out-Null
 $txtProtocol = Add-TextBox 170 374 120 $true
-Add-Label "Capabilities" 310 376 | Out-Null
+Add-Label "能力" 310 376 | Out-Null
 $txtCapabilities = Add-TextBox 420 374 400 $true
-Add-Label "Error details" 24 410 | Out-Null
+Add-Label "错误详情" 24 410 | Out-Null
 $txtErrorDetails = Add-TextBox 170 408 650 $true
+$txtServerId = Add-TextBox 24 442 120 $true
+$txtServerId.Visible = $false
+$txtAdvancedDiagnostics = Add-TextBox 170 442 650 $true
 
-Add-Button "Refresh health" 170 450 { Refresh-Health } | Out-Null
-Add-Button "Load config" 330 450 { Load-Config } | Out-Null
+Add-Button "Refresh health" 170 450 { Refresh-Health; Refresh-Identity } | Out-Null
+Add-Button "Load config" 330 450 { Load-Config; Refresh-Identity } | Out-Null
 Add-Button "Save config" 490 450 { Save-Config } | Out-Null
 Add-Button "Test connection" 170 488 { Test-Coordinator } | Out-Null
 Add-Button "Initialize" 330 488 { Run-Init } | Out-Null
@@ -493,7 +547,7 @@ $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtLog)
 
 $grpListenerRelay = New-Object System.Windows.Forms.GroupBox
-$grpListenerRelay.Text = "Listener / Relay"
+$grpListenerRelay.Text = "监听 / VPS 中转"
 $grpListenerRelay.Location = New-Object System.Drawing.Point(24, 674)
 $grpListenerRelay.Size = New-Object System.Drawing.Size(840, 236)
 $form.Controls.Add($grpListenerRelay)
@@ -571,6 +625,7 @@ $form.Add_Shown({
         Start-Body
         Refresh-Health
         Load-Config
+        Refresh-Identity
     } catch {
         Show-Error ("Startup failed: " + $_.Exception.Message)
     }

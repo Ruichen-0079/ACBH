@@ -12,6 +12,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
+	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/identity"
 )
 
 type Client interface {
@@ -32,6 +33,7 @@ type State struct {
 	PublicEndpoint  string              `json:"publicEndpoint"`
 	LocalEndpoint   string              `json:"localEndpoint"`
 	CurrentHost     bool                `json:"currentHost"`
+	CurrentDevice   bool                `json:"currentDevice"`
 	LastHeartbeatAt string              `json:"lastHeartbeatAt,omitempty"`
 	Errors          []*coreerrors.Error `json:"errors"`
 }
@@ -50,6 +52,10 @@ func (s Service) Configure(ctx context.Context, cfg coreconfig.Config, req Confi
 	if err := validate(cfg); err != nil {
 		return ConfigureResult{}, err
 	}
+	coordIdentity, identityErr := identity.Adapter(cfg)
+	if identityErr != nil {
+		return ConfigureResult{}, identityErr
+	}
 	req = applyRequestDefaults(cfg, req)
 	client := s.Client
 	if client == nil {
@@ -59,14 +65,14 @@ func (s Service) Configure(ctx context.Context, cfg coreconfig.Config, req Confi
 		}
 		client = created
 	}
-	lease, leaseErr := client.EnsureActiveLease(ctx, cfg.Identity.GroupID, cfg.Identity.HostID, cfg.Identity.HostToken)
+	lease, leaseErr := client.EnsureActiveLease(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken)
 	if leaseErr != nil {
 		return ConfigureResult{}, leaseErr
 	}
 	_, hbErr := client.SendHeartbeat(ctx, coordinatorclient.HeartbeatRequest{
-		GroupID:   cfg.Identity.GroupID,
-		HostID:    cfg.Identity.HostID,
-		HostToken: cfg.Identity.HostToken,
+		GroupID:   coordIdentity.GroupID,
+		HostID:    coordIdentity.HostID,
+		HostToken: coordIdentity.HostToken,
 		Status:    "hosting",
 		Connection: &coordinatorclient.HostConnection{
 			Host:    req.LocalMinecraftHost,
@@ -87,6 +93,10 @@ func (s Service) Status(ctx context.Context, cfg coreconfig.Config) (State, *cor
 	if err := validate(cfg); err != nil {
 		return State{}, err
 	}
+	coordIdentity, identityErr := identity.Adapter(cfg)
+	if identityErr != nil {
+		return State{}, identityErr
+	}
 	req := applyRequestDefaults(cfg, ConfigureRequest{})
 	client := s.Client
 	if client == nil {
@@ -96,7 +106,7 @@ func (s Service) Status(ctx context.Context, cfg coreconfig.Config) (State, *cor
 		}
 		client = created
 	}
-	lease, leaseErr := client.GetLeaseStatus(ctx, cfg.Identity.GroupID, cfg.Identity.HostID, cfg.Identity.HostToken)
+	lease, leaseErr := client.GetLeaseStatus(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken)
 	if leaseErr != nil {
 		state := stateFromLease(cfg, req, coordinatorclient.HostLeaseStatus{})
 		state.Errors = append(state.Errors, leaseErr)
@@ -106,13 +116,14 @@ func (s Service) Status(ctx context.Context, cfg coreconfig.Config) (State, *cor
 }
 
 func stateFromLease(cfg coreconfig.Config, req ConfigureRequest, lease coordinatorclient.HostLeaseStatus) State {
-	current := lease.CurrentHostIDMatches || (lease.CurrentHostID != "" && lease.CurrentHostID == cfg.Identity.HostID)
+	current := lease.CurrentHostIDMatches || (lease.CurrentHostID != "" && lease.CurrentHostID == cfg.Compat.LegacyHostID)
 	return State{
 		Configured:      cfg.Relay.Enabled,
 		Active:          cfg.Relay.Enabled && current && lease.LeaseValid,
 		PublicEndpoint:  net.JoinHostPort(publicHost(cfg), strconv.Itoa(req.PublicMinecraftPort)),
 		LocalEndpoint:   net.JoinHostPort(req.LocalMinecraftHost, strconv.Itoa(req.LocalMinecraftPort)),
 		CurrentHost:     current,
+		CurrentDevice:   current,
 		LastHeartbeatAt: lease.ServerTime,
 	}
 }
@@ -133,9 +144,6 @@ func applyRequestDefaults(cfg coreconfig.Config, req ConfigureRequest) Configure
 func validate(cfg coreconfig.Config) *coreerrors.Error {
 	if strings.TrimSpace(cfg.CoordinatorURL) == "" {
 		return coreerrors.New(coreerrors.ConfigInvalid, "coordinatorUrl is required", coreerrors.Details{}, "Set coordinatorUrl in config.json.")
-	}
-	if cfg.Identity.GroupID == "" || cfg.Identity.HostID == "" || cfg.Identity.HostToken == "" {
-		return coreerrors.New(coreerrors.ConfigInvalid, "relay requires identity groupId, hostId and hostToken", coreerrors.Details{CoordinatorURL: cfg.CoordinatorURL}, "Initialize identity before configuring relay.")
 	}
 	req := applyRequestDefaults(cfg, ConfigureRequest{})
 	for name, port := range map[string]int{"listener.localPort": req.LocalMinecraftPort, "relay.minecraftPort": req.PublicMinecraftPort} {

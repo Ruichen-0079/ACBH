@@ -21,6 +21,7 @@ const (
 	LocalPortNotListening        ErrorCode = "local_port_not_listening"
 	ProcessInspectionLimited     ErrorCode = "process_inspection_limited"
 	RelayConfigFailed            ErrorCode = "relay_config_failed"
+	IdentityIncomplete           ErrorCode = "identity_incomplete"
 	OperationTimeout             ErrorCode = "operation_timeout"
 )
 

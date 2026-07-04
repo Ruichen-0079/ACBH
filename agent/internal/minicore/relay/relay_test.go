@@ -49,7 +49,10 @@ func (f *fakeClient) GetLeaseStatus(ctx context.Context, groupID string, hostID 
 func testConfig() coreconfig.Config {
 	cfg := coreconfig.DefaultConfig()
 	cfg.CoordinatorURL = "http://121.40.101.224:6121"
-	cfg.Identity = coreconfig.Identity{GroupID: "grp", MemberID: "mem", HostID: "host", HostToken: "ht", DisplayName: "host", DeviceName: "pc", Platform: "windows"}
+	cfg.Instance = coreconfig.InstanceConfig{InstanceID: "inst", DisplayName: "private", OwnerToken: "ht"}
+	cfg.Device = coreconfig.DeviceConfig{DeviceID: "dev", DisplayName: "pc", Platform: "windows"}
+	cfg.Server.ServerID = "srv"
+	cfg.Compat = coreconfig.CompatConfig{CoordinatorProtocol: 2, LegacyGroupID: "grp", LegacyMemberID: "mem", LegacyHostID: "host", LegacyHostToken: "ht"}
 	cfg.Relay.PublicHost = "121.40.101.224"
 	return cfg
 }

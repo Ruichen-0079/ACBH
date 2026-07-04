@@ -275,11 +275,13 @@ func responseError(method string, rawURL string, status int, body string) *coree
 	message := "coordinator request failed"
 	switch code {
 	case coreerrors.CoordinatorRouteMissing:
-		message = "coordinator route is missing"
+		message = "VPS Coordinator 接口探测失败。请查看实际请求 URL、HTTP 状态和响应体。"
 	case coreerrors.AuthMissing:
 		message = "host authentication is required"
 	case coreerrors.LeaseExpired:
-		message = "host lease has expired"
+		message = "当前设备的 VPS 会话已过期，需要重新验证。"
+	case coreerrors.NotCurrentHost:
+		message = "当前设备不是此私人实例的活动设备。"
 	case coreerrors.InvalidRequest:
 		message = "coordinator rejected invalid request"
 	case coreerrors.ProxyInterferenceSuspected:

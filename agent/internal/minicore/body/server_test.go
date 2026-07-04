@@ -127,7 +127,7 @@ func TestBodyHealthAndConfig(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &health); err != nil {
 		t.Fatal(err)
 	}
-	if health.CoordinatorURL != coord.URL || health.ConfigPath == "" || health.Service != ServiceName {
+	if health.CoordinatorURL != coord.URL || health.ConfigPath == "" || health.Service != ServiceName || health.IdentityModel != "single-owner" || health.InstanceID == "" || health.DeviceID == "" || health.ServerID == "" {
 		t.Fatalf("health = %#v", health)
 	}
 }
@@ -148,6 +148,13 @@ func TestBodyConfigPutGet(t *testing.T) {
 	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/config", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /v1/config status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got coreconfig.Config
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != 2 || got.Instance.OwnerToken != "[redacted]" || got.Compat.LegacyHostToken != "[redacted]" {
+		t.Fatalf("GET /v1/config = %#v, want schema v2 with redacted tokens", got)
 	}
 }
 
@@ -182,6 +189,15 @@ func TestBodyProbeAndInit(t *testing.T) {
 	}
 	if op.State != operations.Success {
 		t.Fatalf("init op = %#v", op)
+	}
+	body := rec.Body.String()
+	for _, forbidden := range []string{"groupId", "memberId", "hostToken", "whoami", "lease"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("init response contains user-visible legacy wording %q: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, "私人实例已连接") {
+		t.Fatalf("init response missing single-owner wording: %s", body)
 	}
 }
 
@@ -264,6 +280,7 @@ func TestBodySmokeAPISet(t *testing.T) {
 		{http.MethodGet, "/v1/body/health", nil},
 		{http.MethodPut, "/v1/config", data},
 		{http.MethodGet, "/v1/config", nil},
+		{http.MethodGet, "/v1/identity", nil},
 		{http.MethodGet, "/v1/coordinator/probe", nil},
 		{http.MethodPost, "/v1/init", nil},
 		{http.MethodGet, "/v1/operations", nil},
@@ -276,6 +293,31 @@ func TestBodySmokeAPISet(t *testing.T) {
 				t.Fatalf("%s %s status = %d body=%s", tc.method, tc.path, rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestBodyIdentityAPI(t *testing.T) {
+	coord := mockCoordinator(t)
+	defer coord.Close()
+	srv := New("127.0.0.1:6120", t.TempDir())
+	if err := srv.ConfigStore.Save(testConfig(coord.URL)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/identity", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("identity status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var got IdentityResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.OK || got.IdentityModel != "single-owner" || got.Instance.InstanceID == "" || !got.Compat.UsesLegacyGroupAPI || !got.Compat.LegacyGroupIDPresent || !got.Compat.LegacyHostTokenPresent {
+		t.Fatalf("identity = %#v", got)
+	}
+	if strings.Contains(rec.Body.String(), "ht_123") {
+		t.Fatalf("identity response leaked token: %s", rec.Body.String())
 	}
 }
 

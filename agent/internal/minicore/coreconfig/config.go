@@ -24,11 +24,14 @@ type Config struct {
 	SchemaVersion  int            `json:"schemaVersion"`
 	Mode           string         `json:"mode"`
 	CoordinatorURL string         `json:"coordinatorUrl"`
-	Identity       Identity       `json:"identity"`
+	Instance       InstanceConfig `json:"instance"`
+	Device         DeviceConfig   `json:"device"`
 	Server         ServerConfig   `json:"server"`
+	Compat         CompatConfig   `json:"compat"`
 	Listener       ListenerConfig `json:"listener"`
 	Relay          RelayConfig    `json:"relay"`
 	Backup         BackupConfig   `json:"backup"`
+	Identity       Identity       `json:"identity,omitempty"`
 }
 
 type Identity struct {
@@ -41,8 +44,30 @@ type Identity struct {
 	Platform    string `json:"platform"`
 }
 
+type InstanceConfig struct {
+	InstanceID  string `json:"instanceId"`
+	DisplayName string `json:"displayName"`
+	OwnerToken  string `json:"ownerToken,omitempty"`
+}
+
+type DeviceConfig struct {
+	DeviceID    string `json:"deviceId"`
+	DisplayName string `json:"displayName"`
+	Platform    string `json:"platform"`
+}
+
 type ServerConfig struct {
-	Dir string `json:"dir,omitempty"`
+	ServerID    string `json:"serverId"`
+	DisplayName string `json:"displayName"`
+	Dir         string `json:"dir,omitempty"`
+}
+
+type CompatConfig struct {
+	CoordinatorProtocol int    `json:"coordinatorProtocol"`
+	LegacyGroupID       string `json:"legacyGroupId,omitempty"`
+	LegacyMemberID      string `json:"legacyMemberId,omitempty"`
+	LegacyHostID        string `json:"legacyHostId,omitempty"`
+	LegacyHostToken     string `json:"legacyHostToken,omitempty"`
 }
 
 type ListenerConfig struct {
@@ -90,8 +115,12 @@ func NewStore(appDataDir string) Store {
 
 func DefaultConfig() Config {
 	return Config{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		Mode:          "remote-public",
+		Instance:      InstanceConfig{DisplayName: "私人 ACBH 实例"},
+		Device:        DeviceConfig{Platform: runtime.GOOS},
+		Server:        ServerConfig{DisplayName: "Minecraft 服务端"},
+		Compat:        CompatConfig{CoordinatorProtocol: 2},
 		Listener:      ListenerConfig{Enabled: true, LocalHost: "127.0.0.1", LocalPort: 25565, ExpectedProcessNames: []string{"java.exe", "javaw.exe"}},
 		Relay:         RelayConfig{Enabled: true, CoordinatorPort: 6121, MinecraftPort: 25565},
 		Backup: BackupConfig{
@@ -106,8 +135,11 @@ func DefaultConfig() Config {
 }
 
 func (s Store) Load() (Config, *coreerrors.Error) {
-	cfg, err := loadStrict(s.Path)
+	cfg, migrated, err := s.loadConfigJSON()
 	if err == nil {
+		if migrated {
+			return cfg, nil
+		}
 		return cfg, nil
 	}
 	var osPathErr *os.PathError
@@ -167,6 +199,7 @@ func (s Store) MigrateLegacy() (Config, MigrationReport, *coreerrors.Error) {
 	}
 	cfg.Server.Dir = legacy.Server.Dir
 	cfg.Backup.ProfileID = firstNonEmpty(legacy.BackupProfile.ProfileID, cfg.Backup.ProfileID)
+	cfg = applyDefaults(migrateLegacyIdentity(cfg))
 	if err := validate(cfg, s.Path); err != nil {
 		return Config{}, report, err
 	}
@@ -181,11 +214,41 @@ func (s Store) MigrateLegacy() (Config, MigrationReport, *coreerrors.Error) {
 	return cfg, report, nil
 }
 
-func loadStrict(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+func (s Store) loadConfigJSON() (Config, bool, error) {
+	data, err := os.ReadFile(s.Path)
 	if err != nil {
-		return Config{}, err
+		return Config{}, false, err
 	}
+	cfg, err := decodeConfig(data, s.Path)
+	if err != nil {
+		return Config{}, false, err
+	}
+	migrated := needsV2Migration(cfg)
+	cfg = applyDefaults(cfg)
+	if err := validate(cfg, s.Path); err != nil {
+		return Config{}, false, err
+	}
+	if migrated {
+		report := MigrationReport{
+			Migrated:      true,
+			SourceFiles:   []string{s.Path},
+			CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+			LegacyBackups: nil,
+		}
+		if backup, backupErr := backupConfigJSON(s.AppDataDir, s.Path); backupErr == nil && backup != "" {
+			report.LegacyBackups = append(report.LegacyBackups, backup)
+		} else if backupErr != nil {
+			report.Warnings = append(report.Warnings, backupErr.Error())
+		}
+		if err := s.Save(cfg); err != nil {
+			return Config{}, false, err
+		}
+		_ = writeMigrationReport(s.AppDataDir, report)
+	}
+	return cfg, migrated, nil
+}
+
+func decodeConfig(data []byte, path string) (Config, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		line, col := jsonLineColumn(data, err)
@@ -200,20 +263,41 @@ func loadStrict(path string) (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
-	cfg = applyDefaults(cfg)
-	if err := validate(cfg, path); err != nil {
-		return Config{}, err
-	}
 	return cfg, nil
 }
 
 func applyDefaults(cfg Config) Config {
 	defaults := DefaultConfig()
 	if cfg.SchemaVersion == 0 {
-		cfg.SchemaVersion = 1
+		cfg.SchemaVersion = 2
 	}
+	cfg = migrateLegacyIdentity(cfg)
 	if cfg.Mode == "" {
 		cfg.Mode = defaults.Mode
+	}
+	if cfg.Instance.DisplayName == "" {
+		cfg.Instance.DisplayName = defaults.Instance.DisplayName
+	}
+	if cfg.Device.Platform == "" {
+		cfg.Device.Platform = firstNonEmpty(cfg.Identity.Platform, defaults.Device.Platform)
+	}
+	if cfg.Device.DisplayName == "" {
+		cfg.Device.DisplayName = firstNonEmpty(cfg.Identity.DeviceName, cfg.Identity.DisplayName)
+	}
+	if cfg.Server.DisplayName == "" {
+		cfg.Server.DisplayName = defaults.Server.DisplayName
+	}
+	if cfg.Compat.CoordinatorProtocol == 0 {
+		cfg.Compat.CoordinatorProtocol = defaults.Compat.CoordinatorProtocol
+	}
+	if cfg.Instance.InstanceID == "" {
+		cfg.Instance.InstanceID = derivedID("inst", cfg.Compat.LegacyGroupID)
+	}
+	if cfg.Device.DeviceID == "" {
+		cfg.Device.DeviceID = derivedID("dev", cfg.Compat.LegacyHostID)
+	}
+	if cfg.Server.ServerID == "" {
+		cfg.Server.ServerID = derivedID("srv", firstNonEmpty(cfg.Server.Dir, cfg.Compat.LegacyGroupID))
 	}
 	if cfg.Listener.LocalHost == "" {
 		cfg.Listener.LocalHost = defaults.Listener.LocalHost
@@ -242,8 +326,8 @@ func applyDefaults(cfg Config) Config {
 }
 
 func validate(cfg Config, path string) *coreerrors.Error {
-	if cfg.SchemaVersion != 1 {
-		return coreerrors.New(coreerrors.ConfigInvalid, "unsupported config schemaVersion", coreerrors.Details{ConfigPath: path}, "Use schemaVersion 1.")
+	if cfg.SchemaVersion != 2 {
+		return coreerrors.New(coreerrors.ConfigInvalid, "unsupported config schemaVersion", coreerrors.Details{ConfigPath: path}, "Use schemaVersion 2.")
 	}
 	if strings.TrimSpace(cfg.CoordinatorURL) == "" {
 		return coreerrors.New(coreerrors.ConfigInvalid, "coordinatorUrl is required", coreerrors.Details{ConfigPath: path}, "Set coordinatorUrl to your VPS URL.")
@@ -265,10 +349,59 @@ func validate(cfg Config, path string) *coreerrors.Error {
 	if cfg.Relay.MinecraftPort < 1 || cfg.Relay.MinecraftPort > 65535 {
 		return coreerrors.New(coreerrors.ConfigInvalid, "relay.minecraftPort must be between 1 and 65535", coreerrors.Details{ConfigPath: path}, "Set relay.minecraftPort to the public Minecraft port.")
 	}
-	if cfg.Identity.GroupID == "" || cfg.Identity.HostID == "" || cfg.Identity.HostToken == "" {
-		return coreerrors.New(coreerrors.ConfigInvalid, "identity.groupId, identity.hostId and identity.hostToken are required", coreerrors.Details{ConfigPath: path}, "Restore identity from legacy config or join/create a group.")
+	if cfg.Instance.InstanceID == "" || cfg.Device.DeviceID == "" || cfg.Server.ServerID == "" {
+		return coreerrors.New(coreerrors.ConfigInvalid, "instanceId, deviceId and serverId are required", coreerrors.Details{ConfigPath: path}, "Save or migrate config.json before running body.")
+	}
+	if cfg.Instance.OwnerToken == "" || cfg.Compat.LegacyGroupID == "" || cfg.Compat.LegacyHostID == "" || cfg.Compat.LegacyHostToken == "" {
+		return coreerrors.New(coreerrors.IdentityIncomplete, "private instance identity is incomplete", coreerrors.Details{ConfigPath: path}, "Restore identity from legacy config or reinitialize this private instance.")
 	}
 	return nil
+}
+
+func needsV2Migration(cfg Config) bool {
+	return cfg.SchemaVersion != 2 || cfg.Identity.GroupID != "" || cfg.Identity.HostID != "" || cfg.Identity.HostToken != ""
+}
+
+func migrateLegacyIdentity(cfg Config) Config {
+	if cfg.SchemaVersion < 2 {
+		cfg.SchemaVersion = 2
+	}
+	if cfg.Identity.GroupID != "" && cfg.Compat.LegacyGroupID == "" {
+		cfg.Compat.LegacyGroupID = cfg.Identity.GroupID
+	}
+	if cfg.Identity.MemberID != "" && cfg.Compat.LegacyMemberID == "" {
+		cfg.Compat.LegacyMemberID = cfg.Identity.MemberID
+	}
+	if cfg.Identity.HostID != "" && cfg.Compat.LegacyHostID == "" {
+		cfg.Compat.LegacyHostID = cfg.Identity.HostID
+	}
+	if cfg.Identity.HostToken != "" && cfg.Compat.LegacyHostToken == "" {
+		cfg.Compat.LegacyHostToken = cfg.Identity.HostToken
+	}
+	if cfg.Identity.HostToken != "" && cfg.Instance.OwnerToken == "" {
+		cfg.Instance.OwnerToken = cfg.Identity.HostToken
+	}
+	if cfg.Identity.DisplayName != "" && cfg.Instance.DisplayName == "" {
+		cfg.Instance.DisplayName = "私人 ACBH 实例"
+	}
+	if cfg.Identity.HostID != "" && cfg.Device.DeviceID == "" {
+		cfg.Device.DeviceID = cfg.Identity.HostID
+	}
+	if cfg.Identity.DeviceName != "" && cfg.Device.DisplayName == "" {
+		cfg.Device.DisplayName = cfg.Identity.DeviceName
+	}
+	if cfg.Identity.Platform != "" && cfg.Device.Platform == "" {
+		cfg.Device.Platform = cfg.Identity.Platform
+	}
+	cfg.Identity = Identity{}
+	return cfg
+}
+
+func Sanitized(cfg Config) Config {
+	cfg.Instance.OwnerToken = redactToken(cfg.Instance.OwnerToken)
+	cfg.Compat.LegacyHostToken = redactToken(cfg.Compat.LegacyHostToken)
+	cfg.Identity.HostToken = redactToken(cfg.Identity.HostToken)
+	return cfg
 }
 
 func normalizeConfigLoadError(err error, path string) *coreerrors.Error {
@@ -295,6 +428,25 @@ func backupLegacyFile(appDataDir string, path string) (string, error) {
 		return "", err
 	}
 	target := filepath.Join(legacyDir, filepath.Base(path)+".bak-"+time.Now().UTC().Format("20060102T150405Z"))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if err := atomicWriteFile(target, data, 0o600); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func backupConfigJSON(appDataDir string, path string) (string, error) {
+	if _, err := os.Stat(path); err != nil {
+		return "", nil
+	}
+	legacyDir := filepath.Join(appDataDir, LegacyDirName)
+	if err := os.MkdirAll(legacyDir, 0o700); err != nil {
+		return "", err
+	}
+	target := filepath.Join(legacyDir, "config."+time.Now().UTC().Format("20060102T150405Z")+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -377,4 +529,36 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func derivedID(prefix string, seed string) string {
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		return prefix + "_" + time.Now().UTC().Format("20060102T150405Z")
+	}
+	var b strings.Builder
+	for _, r := range seed {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '_' || r == '-':
+			b.WriteRune(r)
+		}
+	}
+	value := strings.Trim(b.String(), "_-")
+	if value == "" {
+		value = time.Now().UTC().Format("20060102T150405Z")
+	}
+	if strings.HasPrefix(value, prefix+"_") {
+		return value
+	}
+	return prefix + "_" + value
+}
+
+func redactToken(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	return "[redacted]"
 }

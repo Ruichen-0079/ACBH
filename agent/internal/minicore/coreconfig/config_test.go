@@ -12,10 +12,10 @@ import (
 func validConfig() Config {
 	cfg := DefaultConfig()
 	cfg.CoordinatorURL = "http://121.40.101.224:6121"
-	cfg.Identity = Identity{
-		GroupID: "grp_123", MemberID: "mem_123", HostID: "host_123", HostToken: "ht_123",
-		DisplayName: "私人本地主机", DeviceName: "MSI", Platform: "windows",
-	}
+	cfg.Instance = InstanceConfig{InstanceID: "inst_123", DisplayName: "私人 ACBH 实例", OwnerToken: "ht_123"}
+	cfg.Device = DeviceConfig{DeviceID: "dev_123", DisplayName: "MSI", Platform: "windows"}
+	cfg.Server = ServerConfig{ServerID: "srv_123", DisplayName: "弥散往生1.2.4", Dir: `C:\server`}
+	cfg.Compat = CompatConfig{CoordinatorProtocol: 2, LegacyGroupID: "grp_123", LegacyMemberID: "mem_123", LegacyHostID: "host_123", LegacyHostToken: "ht_123"}
 	cfg.Server.Dir = `C:\server`
 	cfg.Relay.PublicHost = "121.40.101.224"
 	return cfg
@@ -31,7 +31,7 @@ func TestValidConfigLoads(t *testing.T) {
 	if loadErr != nil {
 		t.Fatalf("Load() error = %v", loadErr)
 	}
-	if got.CoordinatorURL != want.CoordinatorURL || got.Identity.HostToken != want.Identity.HostToken {
+	if got.CoordinatorURL != want.CoordinatorURL || got.Instance.OwnerToken != want.Instance.OwnerToken || got.Compat.LegacyHostToken != want.Compat.LegacyHostToken {
 		t.Fatalf("Load() = %#v, want coordinator/token preserved", got)
 	}
 }
@@ -100,8 +100,8 @@ func TestConfigWriteIsAtomicAndNoSilentTokenReset(t *testing.T) {
 	if loadErr != nil {
 		t.Fatalf("Load() error = %v", loadErr)
 	}
-	if got.Identity.HostToken != cfg.Identity.HostToken || got.Identity.GroupID != cfg.Identity.GroupID {
-		t.Fatalf("identity changed on save/load: %#v", got.Identity)
+	if got.Compat.LegacyHostToken != cfg.Compat.LegacyHostToken || got.Compat.LegacyGroupID != cfg.Compat.LegacyGroupID {
+		t.Fatalf("identity changed on save/load: %#v", got.Compat)
 	}
 }
 
@@ -125,6 +125,75 @@ func TestOldConfigDefaultsListenerRelay(t *testing.T) {
 	}
 	if got.Relay.PublicHost != "121.40.101.224" || got.Relay.MinecraftPort != 25565 {
 		t.Fatalf("relay defaults = %#v", got.Relay)
+	}
+}
+
+func TestOldConfigJSONMigratesToSchemaVersion2(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	old := Config{
+		SchemaVersion:  1,
+		Mode:           "remote-public",
+		CoordinatorURL: "http://121.40.101.224:6121",
+		Identity: Identity{
+			GroupID: "grp_old", MemberID: "mem_old", HostID: "host_old", HostToken: "ht_old",
+			DisplayName: "私人本地主机", DeviceName: "MSI", Platform: "windows",
+		},
+		Server: ServerConfig{Dir: `C:\server`},
+	}
+	data, _ := json.Marshal(old)
+	if err := os.WriteFile(store.Path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.SchemaVersion != 2 || got.Compat.LegacyGroupID != "grp_old" || got.Compat.LegacyHostToken != "ht_old" || got.Instance.OwnerToken != "ht_old" {
+		t.Fatalf("migrated config = %#v", got)
+	}
+	if got.Instance.InstanceID == "" || got.Device.DeviceID == "" || got.Server.ServerID == "" {
+		t.Fatalf("generated ids missing: %#v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "migration-report.json")); err != nil {
+		t.Fatalf("migration report missing: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, LegacyDirName, "config.*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("legacy config backups = %v", matches)
+	}
+}
+
+func TestLegacyConfigYAMLMigratesToSchemaVersion2(t *testing.T) {
+	dir := t.TempDir()
+	store := NewStore(dir)
+	legacy := map[string]any{
+		"coordinatorUrl": "http://121.40.101.224:6121",
+		"groupId":        "grp_yaml",
+		"memberId":       "mem_yaml",
+		"hostId":         "host_yaml",
+		"hostToken":      "ht_yaml",
+		"displayName":    "私人本地主机",
+		"deviceName":     "MSI",
+		"platform":       "windows",
+		"agentVersion":   "0.1.0",
+		"server":         map[string]any{"dir": `C:\server`},
+	}
+	data, _ := json.Marshal(legacy)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.SchemaVersion != 2 || got.Compat.LegacyGroupID != "grp_yaml" || got.Compat.LegacyHostToken != "ht_yaml" {
+		t.Fatalf("migrated config = %#v", got)
 	}
 }
 
