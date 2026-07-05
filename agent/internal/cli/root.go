@@ -1585,7 +1585,6 @@ func newServerSuperviseCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			startOpts := mcserver.StartOptions{
 				ServerDir:   opts.serverDir,
-				WorkingDir:  opts.workingDir,
 				Command:     opts.command,
 				CommandArgv: mcserver.DecodeCommandArgv(opts.commandArgv),
 				LogDir:      opts.logDir,
@@ -2143,7 +2142,6 @@ func resolveServerStartOptions(opts serverStartOptions) (mcserver.StartOptions, 
 	}
 	return mcserver.StartOptions{
 		ServerDir:   opts.serverDir,
-		WorkingDir:  opts.workingDir,
 		Command:     opts.command,
 		LogDir:      opts.logDir,
 		RuntimeDir:  filepath.Join(configDir, "runtime"),
