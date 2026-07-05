@@ -8,6 +8,7 @@ const (
 	ConfigParseError             ErrorCode = "config_parse_error"
 	ConfigMissing                ErrorCode = "config_missing"
 	ConfigInvalid                ErrorCode = "config_invalid"
+	ConfigWriteFailed            ErrorCode = "config_write_failed"
 	CoordinatorUnreachable       ErrorCode = "coordinator_unreachable"
 	CoordinatorProtocolMismatch  ErrorCode = "coordinator_protocol_mismatch"
 	CoordinatorCapabilityMissing ErrorCode = "coordinator_capability_missing"

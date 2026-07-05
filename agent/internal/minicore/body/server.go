@@ -207,7 +207,7 @@ func (s *Server) handleListenerConfig(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w, r)
 		return
 	}
-	cfg, cfgErr := s.ConfigStore.Load()
+	cfg, cfgErr := s.ConfigStore.LoadOrCreate()
 	if cfgErr != nil {
 		writeError(w, statusForCoreError(cfgErr), cfgErr)
 		return
@@ -578,6 +578,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		if existing, loadErr := s.ConfigStore.Load(); loadErr == nil {
 			preserveRedactedTokens(&cfg, existing)
+		} else {
+			clearRedactedTokens(&cfg)
 		}
 		if err := s.ConfigStore.Save(cfg); err != nil {
 			writeError(w, http.StatusBadRequest, err)
@@ -586,6 +588,18 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, coreconfig.Sanitized(cfg))
 	default:
 		methodNotAllowed(w, r)
+	}
+}
+
+func clearRedactedTokens(next *coreconfig.Config) {
+	if next.Instance.OwnerToken == "[redacted]" {
+		next.Instance.OwnerToken = ""
+	}
+	if next.Compat.LegacyHostToken == "[redacted]" {
+		next.Compat.LegacyHostToken = ""
+	}
+	if next.Identity.HostToken == "[redacted]" {
+		next.Identity.HostToken = ""
 	}
 }
 
@@ -638,7 +652,7 @@ func (s *Server) handleCoordinatorProbe(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	op := s.Operations.Start("coordinator.probe", "load_config", "loading config")
-	result, err := s.probe(r.Context(), &op)
+	result, err := s.probe(r.Context(), &op, false)
 	if err != nil {
 		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
 		return
@@ -652,12 +666,12 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	op := s.Operations.Start("init", "load_config", "loading config")
-	probe, err := s.probe(r.Context(), &op)
+	probe, err := s.probe(r.Context(), &op, true)
 	if err != nil {
 		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
 		return
 	}
-	cfg, cfgErr := s.ConfigStore.Load()
+	cfg, cfgErr := s.ConfigStore.LoadOrCreate()
 	if cfgErr != nil {
 		writeJSON(w, statusForCoreError(cfgErr), s.Operations.Fail(op, cfgErr))
 		return
@@ -740,10 +754,19 @@ func (s *Server) handleOperation(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, op)
 }
 
-func (s *Server) probe(ctx context.Context, op *operations.Operation) (coordinatorclient.ProbeResult, *coreerrors.Error) {
-	cfg, cfgErr := s.ConfigStore.Load()
+func (s *Server) probe(ctx context.Context, op *operations.Operation, createConfig bool) (coordinatorclient.ProbeResult, *coreerrors.Error) {
+	var cfg coreconfig.Config
+	var cfgErr *coreerrors.Error
+	if createConfig {
+		cfg, cfgErr = s.ConfigStore.LoadOrCreate()
+	} else {
+		cfg, cfgErr = s.ConfigStore.Load()
+	}
 	if cfgErr != nil {
 		return coordinatorclient.ProbeResult{}, cfgErr
+	}
+	if strings.TrimSpace(cfg.CoordinatorURL) == "" {
+		return coordinatorclient.ProbeResult{}, coreerrors.New(coreerrors.ConfigInvalid, "coordinatorUrl is required", coreerrors.Details{ConfigPath: s.ConfigStore.Path}, "Set coordinatorUrl to your VPS URL.")
 	}
 	client, clientErr := coordinatorclient.NewWithHTTPClient(cfg.CoordinatorURL, s.HTTPClient)
 	if clientErr != nil {
@@ -826,7 +849,7 @@ func statusForCoreError(err *coreerrors.Error) int {
 		return http.StatusInternalServerError
 	}
 	switch err.ErrorCode {
-	case coreerrors.ConfigMissing, coreerrors.ConfigInvalid, coreerrors.ConfigParseError, coreerrors.InvalidRequest, coreerrors.TargetDirRequired, coreerrors.TargetDirNotEmpty, coreerrors.RestorePathEscapeBlocked, coreerrors.SnapshotDownloadFailed:
+	case coreerrors.ConfigMissing, coreerrors.ConfigInvalid, coreerrors.ConfigParseError, coreerrors.ConfigWriteFailed, coreerrors.InvalidRequest, coreerrors.TargetDirRequired, coreerrors.TargetDirNotEmpty, coreerrors.RestorePathEscapeBlocked, coreerrors.SnapshotDownloadFailed:
 		return http.StatusBadRequest
 	case coreerrors.IdentityIncomplete:
 		return http.StatusBadRequest

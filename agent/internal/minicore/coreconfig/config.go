@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -165,13 +166,29 @@ func (s Store) Load() (Config, *coreerrors.Error) {
 	return Config{}, coreerrors.New(coreerrors.ConfigMissing, "config.json does not exist", coreerrors.Details{ConfigPath: s.Path}, "Run init or save a config.json first.")
 }
 
+func (s Store) LoadOrCreate() (Config, *coreerrors.Error) {
+	cfg, err := s.Load()
+	if err == nil {
+		return cfg, nil
+	}
+	if err.ErrorCode != coreerrors.ConfigMissing {
+		return Config{}, err
+	}
+	cfg = DefaultConfig()
+	if saveErr := s.Save(cfg); saveErr != nil {
+		return Config{}, saveErr
+	}
+	log.Printf("Created default config at %s", s.Path)
+	return cfg, nil
+}
+
 func (s Store) Save(cfg Config) *coreerrors.Error {
 	cfg = applyDefaults(cfg)
 	if err := validate(cfg, s.Path); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
-		return coreerrors.New(coreerrors.ConfigInvalid, "create config directory failed", coreerrors.Details{ConfigPath: s.Path}, err.Error())
+		return coreerrors.New(coreerrors.ConfigWriteFailed, "create config directory failed", coreerrors.Details{ConfigPath: s.Path}, err.Error())
 	}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -179,7 +196,7 @@ func (s Store) Save(cfg Config) *coreerrors.Error {
 	}
 	data = append(data, '\n')
 	if err := atomicWriteFile(s.Path, data, 0o600); err != nil {
-		return coreerrors.New(coreerrors.ConfigInvalid, "write config failed", coreerrors.Details{ConfigPath: s.Path}, err.Error())
+		return coreerrors.New(coreerrors.ConfigWriteFailed, "write config failed", coreerrors.Details{ConfigPath: s.Path}, err.Error())
 	}
 	return nil
 }
@@ -359,16 +376,15 @@ func validate(cfg Config, path string) *coreerrors.Error {
 	if cfg.SchemaVersion != 2 {
 		return coreerrors.New(coreerrors.ConfigInvalid, "unsupported config schemaVersion", coreerrors.Details{ConfigPath: path}, "Use schemaVersion 2.")
 	}
-	if strings.TrimSpace(cfg.CoordinatorURL) == "" {
-		return coreerrors.New(coreerrors.ConfigInvalid, "coordinatorUrl is required", coreerrors.Details{ConfigPath: path}, "Set coordinatorUrl to your VPS URL.")
-	}
-	parsed, err := url.Parse(cfg.CoordinatorURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return coreerrors.New(coreerrors.ConfigInvalid, "coordinatorUrl is invalid", coreerrors.Details{ConfigPath: path, CoordinatorURL: cfg.CoordinatorURL}, "Use a full URL such as http://121.40.101.224:6121.")
-	}
-	host := parsed.Hostname()
-	if cfg.Mode == "remote-public" && isLoopbackHost(host) {
-		return coreerrors.New(coreerrors.ConfigInvalid, "remote-public mode cannot use a localhost coordinatorUrl", coreerrors.Details{ConfigPath: path, CoordinatorURL: cfg.CoordinatorURL}, "Use the VPS coordinator URL, or explicitly switch mode to local-private.")
+	if strings.TrimSpace(cfg.CoordinatorURL) != "" {
+		parsed, err := url.Parse(cfg.CoordinatorURL)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return coreerrors.New(coreerrors.ConfigInvalid, "coordinatorUrl is invalid", coreerrors.Details{ConfigPath: path, CoordinatorURL: cfg.CoordinatorURL}, "Use a full URL such as http://121.40.101.224:6121.")
+		}
+		host := parsed.Hostname()
+		if cfg.Mode == "remote-public" && isLoopbackHost(host) {
+			return coreerrors.New(coreerrors.ConfigInvalid, "remote-public mode cannot use a localhost coordinatorUrl", coreerrors.Details{ConfigPath: path, CoordinatorURL: cfg.CoordinatorURL}, "Use the VPS coordinator URL, or explicitly switch mode to local-private.")
+		}
 	}
 	if cfg.Listener.LocalPort < 1 || cfg.Listener.LocalPort > 65535 {
 		return coreerrors.New(coreerrors.ConfigInvalid, "listener.localPort must be between 1 and 65535", coreerrors.Details{ConfigPath: path}, "Set listener.localPort to the Minecraft server port.")
@@ -381,9 +397,6 @@ func validate(cfg Config, path string) *coreerrors.Error {
 	}
 	if cfg.Instance.InstanceID == "" || cfg.Device.DeviceID == "" || cfg.Server.ServerID == "" {
 		return coreerrors.New(coreerrors.ConfigInvalid, "instanceId, deviceId and serverId are required", coreerrors.Details{ConfigPath: path}, "Save or migrate config.json before running body.")
-	}
-	if cfg.Instance.OwnerToken == "" || cfg.Compat.LegacyGroupID == "" || cfg.Compat.LegacyHostID == "" || cfg.Compat.LegacyHostToken == "" {
-		return coreerrors.New(coreerrors.IdentityIncomplete, "private instance identity is incomplete", coreerrors.Details{ConfigPath: path}, "Restore identity from legacy config or reinitialize this private instance.")
 	}
 	return nil
 }
