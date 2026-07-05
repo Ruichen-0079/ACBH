@@ -10,6 +10,8 @@ import {
 } from "./store.js";
 import { getStatePath, loadState, saveState } from "./persistence.js";
 import { RelayManager } from "./relay.js";
+import { loadConfig } from "./config.js";
+import { PublicRelayIngress } from "./public-relay.js";
 
 export async function buildApp(options?: {
   store?: InMemoryCoordinatorStore;
@@ -72,6 +74,15 @@ export async function buildApp(options?: {
   const storage = options?.storage ?? createLocalFilesystemStorageFromEnv();
 
   const relay = options?.relay ?? new RelayManager(store);
+  const config = loadConfig();
+  const publicRelay = new PublicRelayIngress({
+    host: config.relayPublicHost,
+    port: config.relayPublicPort,
+    coordinatorBaseURL: `http://127.0.0.1:${config.port}`,
+    store,
+    relay,
+    logger: (msg, meta) => app.log.info({ ...meta }, msg),
+  });
 
   await app.register(cors, {
     origin: true,
@@ -86,11 +97,13 @@ export async function buildApp(options?: {
   await registerDashboardRoutes(app);
   await registerRoutes(app, store, storage, relay, {
     maxObjectBytes: options?.maxObjectBytes,
+    publicRelay,
   });
 
   // Expose for public relay ingress and tests (v0.3.2)
   (app as any).store = store;
   (app as any).relay = relay;
+  (app as any).publicRelay = publicRelay;
 
   return app;
 }

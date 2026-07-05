@@ -19,11 +19,15 @@ Default endpoint: `http://127.0.0.1:6120`.
 - `PUT /v1/listener/config`
 - `POST /v1/listener/probe`
 - `POST /v1/relay/configure`
+- `POST /v1/relay/start`
+- `POST /v1/relay/stop`
 - `GET /v1/relay/status`
 
 Listener APIs inspect the configured local Minecraft TCP port and process metadata. They do not start, stop, kill, repair, or supervise the Minecraft server.
 
-Relay APIs configure runtime coordinator state for the current host by ensuring the host lease and sending a heartbeat with the configured local endpoint. They do not perform backup, snapshot, restore, or byte-stream tunnel work in this phase.
+Relay APIs configure runtime coordinator state for the current host by ensuring the host lease and sending a heartbeat with the configured local endpoint. Phase 2.6 adds the actual public TCP tunnel: players connect to the VPS public port, Coordinator creates relay tunnel sessions, the agent opens outbound host WebSockets, and byte streams are forwarded to the configured local Minecraft endpoint.
+
+`GET /v1/relay/status` reports `configured`, `localServerListening`, `tunnelConnected`, `publicListenerActive`, `publicEndpoint`, `localEndpoint`, `activeConnections`, and `lastError`. Relay APIs do not perform backup, snapshot, restore, or Minecraft server lifecycle work.
 
 ## Implemented in Phase 2.5
 

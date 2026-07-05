@@ -83,6 +83,38 @@ type EnsureActiveLeaseResponse struct {
 	Message string          `json:"message"`
 }
 
+type TunnelSession struct {
+	SessionID             string `json:"sessionId"`
+	GroupID               string `json:"groupId"`
+	HostID                string `json:"hostId"`
+	PlayerID              string `json:"playerId"`
+	Mode                  string `json:"mode"`
+	Status                string `json:"status"`
+	CurrentHostGeneration int    `json:"currentHostGeneration"`
+	CreatedAt             string `json:"createdAt"`
+	ExpiresAt             string `json:"expiresAt"`
+}
+
+type PublicRelayControlRequest struct {
+	GroupID    string `json:"groupId"`
+	HostID     string `json:"hostId"`
+	HostToken  string `json:"hostToken"`
+	PublicPort int    `json:"publicPort,omitempty"`
+}
+
+type PublicRelayState struct {
+	Configured           bool   `json:"configured"`
+	PublicListenerActive bool   `json:"publicListenerActive"`
+	PublicEndpoint       string `json:"publicEndpoint,omitempty"`
+	ActiveConnections    int    `json:"activeConnections"`
+	LastError            string `json:"lastError,omitempty"`
+}
+
+type PublicRelayControlResponse struct {
+	OK    bool             `json:"ok"`
+	Relay PublicRelayState `json:"relay"`
+}
+
 type WorldBackupPlanRequest struct {
 	HostID           string                      `json:"hostId"`
 	HostToken        string                      `json:"hostToken"`
@@ -243,6 +275,30 @@ func (c *Client) EnsureActiveLeaseWithGeneration(ctx context.Context, groupID st
 func (c *Client) SendHeartbeat(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, *coreerrors.Error) {
 	var out HeartbeatResponse
 	err := c.doJSON(ctx, http.MethodPost, "/v1/hosts/heartbeat", req, nil, &out)
+	return out, err
+}
+
+func (c *Client) ListTunnelSessions(ctx context.Context, groupID string) ([]TunnelSession, *coreerrors.Error) {
+	var out []TunnelSession
+	err := c.doJSON(ctx, http.MethodGet, "/v1/groups/"+url.PathEscape(groupID)+"/tunnel-sessions", nil, nil, &out)
+	return out, err
+}
+
+func (c *Client) StartPublicRelay(ctx context.Context, req PublicRelayControlRequest) (PublicRelayControlResponse, *coreerrors.Error) {
+	var out PublicRelayControlResponse
+	err := c.doJSON(ctx, http.MethodPost, "/v1/public-relay/start", req, nil, &out)
+	return out, err
+}
+
+func (c *Client) StopPublicRelay(ctx context.Context, req PublicRelayControlRequest) (PublicRelayControlResponse, *coreerrors.Error) {
+	var out PublicRelayControlResponse
+	err := c.doJSON(ctx, http.MethodPost, "/v1/public-relay/stop", req, nil, &out)
+	return out, err
+}
+
+func (c *Client) PublicRelayStatus(ctx context.Context) (PublicRelayState, *coreerrors.Error) {
+	var out PublicRelayState
+	err := c.doJSON(ctx, http.MethodGet, "/v1/public-relay/status", nil, nil, &out)
 	return out, err
 }
 

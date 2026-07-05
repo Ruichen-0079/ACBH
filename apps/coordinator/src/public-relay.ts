@@ -12,7 +12,13 @@ export interface PublicRelayOptions {
   logger?: (msg: string, meta?: any) => void;
 }
 
-const defaultBufferSize = 32 * 1024;
+export interface PublicRelayStatus {
+  configured: boolean;
+  publicListenerActive: boolean;
+  publicEndpoint: string | null;
+  activeConnections: number;
+  lastError: string | null;
+}
 
 export function selectPublicRelayGroup(
   groups: PublicGroupState[],
@@ -49,38 +55,110 @@ export function selectPublicRelayGroup(
 export class PublicRelayIngress {
   private server: net.Server | null = null;
   private opts: PublicRelayOptions;
+  private activeConnections = 0;
+  private lastError: string | null = null;
+  private readonly sockets = new Set<net.Socket>();
+  private readonly playerSockets = new Set<WebSocket>();
+  private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: PublicRelayOptions) {
     this.opts = opts;
   }
 
-  start(): void {
+  async start(port?: number): Promise<void> {
+    const nextPort = port !== undefined && Number.isFinite(port) && port > 0 ? port : this.opts.port;
+    if (this.server) {
+      if (nextPort === this.opts.port) {
+        return;
+      }
+      this.stop();
+    }
+    this.opts.port = nextPort;
     if (this.opts.port <= 0) {
       this.opts.logger?.("Public relay ingress disabled (port <= 0)");
       return;
     }
+    this.lastError = null;
 
-    this.server = net.createServer((socket) => {
+    const server = net.createServer((socket) => {
+      this.sockets.add(socket);
+      this.activeConnections += 1;
+      socket.once("close", () => {
+        this.sockets.delete(socket);
+        this.activeConnections = Math.max(0, this.activeConnections - 1);
+      });
       this.handleIncoming(socket).catch((err) => {
+        this.lastError = String(err);
         this.opts.logger?.("Public relay ingress connection handler error", { err: String(err) });
         try { socket.destroy(); } catch {}
       });
     });
+    this.server = server;
 
-    this.server.listen(this.opts.port, this.opts.host, () => {
-      this.opts.logger?.(`ACBH public relay ingress listening on ${this.opts.host}:${this.opts.port} (players connect here)`);
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        server.off("error", onError);
+        server.off("listening", onListening);
+      };
+      const onError = (err: Error) => {
+        cleanup();
+        this.lastError = String(err);
+        if (this.server === server) {
+          this.server = null;
+        }
+        reject(err);
+      };
+      const onListening = () => {
+        cleanup();
+        this.opts.logger?.(`ACBH public relay ingress listening on ${this.opts.host}:${this.opts.port} (players connect here)`);
+        this.startStaleCheck();
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(this.opts.port, this.opts.host);
     });
 
-    this.server.on("error", (err) => {
+    server.on("error", (err) => {
+      this.lastError = String(err);
       this.opts.logger?.("Public relay ingress server error", { err: String(err) });
     });
   }
 
   stop(): void {
+    if (this.staleCheckTimer) {
+      clearInterval(this.staleCheckTimer);
+      this.staleCheckTimer = null;
+    }
     if (this.server) {
       this.server.close();
       this.server = null;
     }
+    for (const socket of this.sockets) {
+      try { socket.destroy(); } catch {}
+    }
+    this.sockets.clear();
+    for (const ws of this.playerSockets) {
+      try {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close(1001, "public relay stopped");
+        } else {
+          ws.terminate();
+        }
+      } catch {}
+    }
+    this.playerSockets.clear();
+    this.activeConnections = 0;
+  }
+
+  status(): PublicRelayStatus {
+    return {
+      configured: this.opts.port > 0,
+      publicListenerActive: this.server !== null && this.server.listening,
+      publicEndpoint: this.opts.port > 0 ? `${this.opts.host}:${this.opts.port}` : null,
+      activeConnections: this.activeConnections,
+      lastError: this.lastError,
+    };
   }
 
   private async handleIncoming(tcpConn: net.Socket): Promise<void> {
@@ -141,11 +219,12 @@ export class PublicRelayIngress {
     }
 
     // Bidirectional forward (same as playerproxy logic)
-    const bufSize = defaultBufferSize;
+    this.playerSockets.add(ws);
     let closed = false;
     const closeAll = () => {
       if (closed) return;
       closed = true;
+      this.playerSockets.delete(ws);
       try { tcpConn.destroy(); } catch {}
       try { if (ws.readyState === WebSocket.OPEN) ws.close(1000, "public relay close"); } catch {}
     };
@@ -178,5 +257,21 @@ export class PublicRelayIngress {
     // ensure no trailing slash issues
     if (base.endsWith("/")) base = base.slice(0, -1);
     return `${base}/v1/groups/${groupId}/relay/tunnel-sessions/${sessionId}/player`;
+  }
+
+  private startStaleCheck(): void {
+    if (this.staleCheckTimer) {
+      clearInterval(this.staleCheckTimer);
+    }
+    this.staleCheckTimer = setInterval(() => {
+      const group = selectPublicRelayGroup(this.opts.store.listGroups(), new Date(), this.opts.store.heartbeatTimeoutMs);
+      if (group !== null) {
+        return;
+      }
+      this.lastError = "public relay stopped because no current host heartbeat is fresh";
+      this.opts.logger?.("Public relay ingress stopped because no current host heartbeat is fresh");
+      this.stop();
+    }, Math.min(5_000, Math.max(100, this.opts.store.heartbeatTimeoutMs)));
+    this.staleCheckTimer.unref?.();
   }
 }

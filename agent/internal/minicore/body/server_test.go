@@ -133,6 +133,20 @@ func mockCoordinator(t *testing.T) *httptest.Server {
 			})
 		case "/v1/hosts/heartbeat":
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "hostId": "host_123", "status": "hosting"})
+		case "/v1/public-relay/start":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "relay": map[string]any{
+				"configured": true, "publicListenerActive": true, "publicEndpoint": "127.0.0.1:25565", "activeConnections": 0,
+			}})
+		case "/v1/public-relay/stop":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "relay": map[string]any{
+				"configured": true, "publicListenerActive": false, "publicEndpoint": "127.0.0.1:25565", "activeConnections": 0,
+			}})
+		case "/v1/public-relay/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"configured": true, "publicListenerActive": true, "publicEndpoint": "127.0.0.1:25565", "activeConnections": 0,
+			})
+		case "/v1/groups/grp_123/tunnel-sessions":
+			_ = json.NewEncoder(w).Encode([]map[string]any{})
 		case "/v1/groups/grp_123/world-backups/plan":
 			var req struct {
 				Objects []worldbackup.PlannedObject `json:"objects"`
@@ -460,6 +474,44 @@ func TestBodyRelayAPIs(t *testing.T) {
 	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/relay/status", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("relay/status status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBodyRelayTunnelStartStopStatus(t *testing.T) {
+	coord := mockCoordinator(t)
+	defer coord.Close()
+	srv := New("127.0.0.1:6120", t.TempDir())
+	if err := srv.ConfigStore.Save(testConfig(coord.URL)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/relay/start", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("relay/start status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"tunnelConnected":true`) || !strings.Contains(rec.Body.String(), `"publicListenerActive":true`) {
+		t.Fatalf("relay/start missing tunnel status: %s", rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/relay/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("relay/status status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{`"configured":true`, `"localServerListening"`, `"tunnelConnected":true`, `"publicListenerActive":true`, `"activeConnections"`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Fatalf("relay/status missing %s: %s", want, rec.Body.String())
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/relay/stop", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("relay/stop status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"tunnelConnected":false`) || !strings.Contains(rec.Body.String(), `"publicListenerActive":false`) {
+		t.Fatalf("relay/stop missing stopped status: %s", rec.Body.String())
 	}
 }
 

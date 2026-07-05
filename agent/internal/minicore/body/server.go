@@ -160,6 +160,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/listener/config", s.handleListenerConfig)
 	mux.HandleFunc("/v1/listener/probe", s.handleListenerProbe)
 	mux.HandleFunc("/v1/relay/configure", s.handleRelayConfigure)
+	mux.HandleFunc("/v1/relay/start", s.handleRelayStart)
+	mux.HandleFunc("/v1/relay/stop", s.handleRelayStop)
 	mux.HandleFunc("/v1/relay/status", s.handleRelayStatus)
 	mux.HandleFunc("/v1/backup/analyze", s.handleBackupAnalyze)
 	mux.HandleFunc("/v1/backup/upload", s.handleBackupUpload)
@@ -253,6 +255,60 @@ func (s *Server) handleRelayConfigure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "relay configured"))
+}
+
+func (s *Server) handleRelayStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r)
+		return
+	}
+	op := s.Operations.Start("relay.start", "load_config", "loading config")
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeJSON(w, statusForCoreError(cfgErr), s.Operations.Fail(op, cfgErr))
+		return
+	}
+	var req minirelay.ConfigureRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			parseErr := coreerrors.New(coreerrors.ConfigParseError, "request body is not valid JSON", coreerrors.Details{URL: r.URL.Path, Method: r.Method}, err.Error())
+			writeJSON(w, http.StatusBadRequest, s.Operations.Fail(op, parseErr))
+			return
+		}
+	}
+	op.Stage = "relay_start"
+	op.Progress = 50
+	op.Message = "starting public relay tunnel"
+	s.Operations.Update(op)
+	result, err := s.relayService().Start(r.Context(), cfg, req)
+	if err != nil {
+		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "relay tunnel started"))
+}
+
+func (s *Server) handleRelayStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r)
+		return
+	}
+	op := s.Operations.Start("relay.stop", "load_config", "loading config")
+	cfg, cfgErr := s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeJSON(w, statusForCoreError(cfgErr), s.Operations.Fail(op, cfgErr))
+		return
+	}
+	op.Stage = "relay_stop"
+	op.Progress = 50
+	op.Message = "stopping public relay tunnel"
+	s.Operations.Update(op)
+	result, err := s.relayService().Stop(r.Context(), cfg)
+	if err != nil {
+		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "relay tunnel stopped"))
 }
 
 func (s *Server) handleRelayStatus(w http.ResponseWriter, r *http.Request) {
@@ -724,12 +780,14 @@ func (s *Server) listenerStatus(ctx context.Context) (minilistener.Status, *core
 	return service.Status(ctx, cfg)
 }
 
-func (s *Server) relayService() minirelay.Service {
-	service := s.Relay
-	if service.HTTPClient == nil {
-		service.HTTPClient = s.HTTPClient
+func (s *Server) relayService() *minirelay.Service {
+	if s.Relay.HTTPClient == nil {
+		s.Relay.HTTPClient = s.HTTPClient
 	}
-	return service
+	if s.Relay.Tunnel == nil {
+		s.Relay.Tunnel = minirelay.NewTunnelManager()
+	}
+	return &s.Relay
 }
 
 func (s *Server) backupService() minibackup.Service {

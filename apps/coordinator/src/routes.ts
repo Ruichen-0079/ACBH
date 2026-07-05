@@ -14,6 +14,7 @@ import type { ArtifactMetadata, InMemoryCoordinatorStore, GcBackend } from "./st
 import { GcBlockedError, StoreError } from "./store.js";
 import type { TunnelSession, PlayerSession } from "./network.js";
 import type { RelayManager } from "./relay.js";
+import type { PublicRelayIngress } from "./public-relay.js";
 import { coordinatorVersion } from "./version.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
@@ -325,14 +326,22 @@ const streamingUploadHeaderSchema = z.object({
   hostToken: z.string().min(1),
 });
 
+const publicRelayControlSchema = z.object({
+  groupId: z.string().min(1),
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  publicPort: z.number().int().min(1).max(65535).optional(),
+});
+
 export async function registerRoutes(
   app: FastifyInstance,
   store: InMemoryCoordinatorStore,
   storage: CoordinatorStorage,
   relay: RelayManager,
-  options?: { maxObjectBytes?: number },
+  options?: { maxObjectBytes?: number; publicRelay?: PublicRelayIngress },
 ): Promise<void> {
   const maxObjectBytes = resolveMaxObjectBytes(options?.maxObjectBytes);
+  const publicRelay = options?.publicRelay;
   app.get("/health", async () => {
     return {
       ok: true,
@@ -362,6 +371,54 @@ export async function registerRoutes(
       v1NonGoal: "hot-migration",
       persistence: "none",
     };
+  });
+
+  app.get("/v1/public-relay/status", async () => {
+    return publicRelay?.status() ?? {
+      configured: false,
+      publicListenerActive: false,
+      publicEndpoint: null,
+      activeConnections: 0,
+      lastError: "public relay is not available in this Coordinator process",
+    };
+  });
+
+  app.post("/v1/public-relay/start", async (request, reply) => {
+    const body = parseBody(publicRelayControlSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    return handleStoreCall(reply, async () => {
+      store.verifyHost({ groupId: body.groupId, hostId: body.hostId, hostToken: body.hostToken });
+      const lease = store.getHostLeaseStatus({ groupId: body.groupId, hostId: body.hostId, hostToken: body.hostToken });
+      if (!lease.leaseValid) {
+        throw new StoreError(403, "Host lease has expired", "host_lease_expired");
+      }
+      if (!publicRelay) {
+        throw new StoreError(503, "Public relay is not available in this Coordinator process", "public_relay_unavailable");
+      }
+      try {
+        await publicRelay.start(body.publicPort);
+      } catch (error) {
+        throw new StoreError(502, `Public relay failed to start: ${String(error)}`, "public_relay_start_failed");
+      }
+      return { ok: true, relay: publicRelay.status() };
+    });
+  });
+
+  app.post("/v1/public-relay/stop", async (request, reply) => {
+    const body = parseBody(publicRelayControlSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      store.verifyHost({ groupId: body.groupId, hostId: body.hostId, hostToken: body.hostToken });
+      if (!publicRelay) {
+        throw new StoreError(503, "Public relay is not available in this Coordinator process", "public_relay_unavailable");
+      }
+      publicRelay.stop();
+      return { ok: true, relay: publicRelay.status() };
+    });
   });
 
   app.get("/v1/bootstrap/manifest", async (request) => {
@@ -1715,6 +1772,8 @@ function statusText(statusCode: number): string {
       return "Conflict";
     case 413:
       return "Payload Too Large";
+    case 503:
+      return "Service Unavailable";
     default:
       return "Error";
   }

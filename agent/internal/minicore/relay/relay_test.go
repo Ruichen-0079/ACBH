@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
@@ -14,11 +15,15 @@ type fakeClient struct {
 	hbErr     *coreerrors.Error
 	statusErr *coreerrors.Error
 	lease     coordinatorclient.HostLeaseStatus
+	public    coordinatorclient.PublicRelayState
+	sessions  []coordinatorclient.TunnelSession
 
 	ensureGroupID string
 	ensureHostID  string
 	ensureToken   string
 	heartbeat     coordinatorclient.HeartbeatRequest
+	startPublic   coordinatorclient.PublicRelayControlRequest
+	stopPublic    coordinatorclient.PublicRelayControlRequest
 }
 
 func (f *fakeClient) EnsureActiveLease(ctx context.Context, groupID string, hostID string, hostToken string) (coordinatorclient.EnsureActiveLeaseResponse, *coreerrors.Error) {
@@ -44,6 +49,29 @@ func (f *fakeClient) GetLeaseStatus(ctx context.Context, groupID string, hostID 
 		return coordinatorclient.HostLeaseStatus{}, f.statusErr
 	}
 	return f.lease, nil
+}
+
+func (f *fakeClient) ListTunnelSessions(ctx context.Context, groupID string) ([]coordinatorclient.TunnelSession, *coreerrors.Error) {
+	return f.sessions, nil
+}
+
+func (f *fakeClient) StartPublicRelay(ctx context.Context, req coordinatorclient.PublicRelayControlRequest) (coordinatorclient.PublicRelayControlResponse, *coreerrors.Error) {
+	f.startPublic = req
+	if f.public.PublicEndpoint == "" {
+		f.public.PublicEndpoint = "121.40.101.224:25565"
+	}
+	f.public.PublicListenerActive = true
+	return coordinatorclient.PublicRelayControlResponse{OK: true, Relay: f.public}, nil
+}
+
+func (f *fakeClient) StopPublicRelay(ctx context.Context, req coordinatorclient.PublicRelayControlRequest) (coordinatorclient.PublicRelayControlResponse, *coreerrors.Error) {
+	f.stopPublic = req
+	f.public.PublicListenerActive = false
+	return coordinatorclient.PublicRelayControlResponse{OK: true, Relay: f.public}, nil
+}
+
+func (f *fakeClient) PublicRelayStatus(ctx context.Context) (coordinatorclient.PublicRelayState, *coreerrors.Error) {
+	return f.public, nil
 }
 
 func testConfig() coreconfig.Config {
@@ -77,13 +105,33 @@ func TestConfigureUsesConfigIdentity(t *testing.T) {
 
 func TestStatusReturnsStructuredState(t *testing.T) {
 	cfg := testConfig()
-	client := &fakeClient{lease: coordinatorclient.HostLeaseStatus{CurrentHostID: "host", CurrentHostIDMatches: true, LeaseValid: true, ServerTime: "2026-07-04T00:00:00Z"}}
-	state, err := Service{Client: client}.Status(context.Background(), cfg)
+	client := &fakeClient{
+		lease:  coordinatorclient.HostLeaseStatus{CurrentHostID: "host", CurrentHostIDMatches: true, LeaseValid: true, ServerTime: "2026-07-04T00:00:00Z"},
+		public: coordinatorclient.PublicRelayState{PublicListenerActive: true, PublicEndpoint: "121.40.101.224:25565", ActiveConnections: 2},
+	}
+	state, err := (&Service{Client: client}).Status(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Status() error = %v", err)
 	}
-	if !state.Active || !state.CurrentHost || state.PublicEndpoint != "121.40.101.224:25565" {
+	if !state.Active || !state.CurrentHost || !state.PublicListenerActive || state.ActiveConnections != 2 || state.PublicEndpoint != "121.40.101.224:25565" {
 		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestStartStartsPublicRelayAndTunnelManager(t *testing.T) {
+	cfg := testConfig()
+	client := &fakeClient{lease: coordinatorclient.HostLeaseStatus{CurrentHostID: "host", CurrentHostIDMatches: true, LeaseValid: true, ServerTime: "now"}}
+	service := &Service{Client: client, PollInterval: time.Hour}
+	result, err := service.Start(context.Background(), cfg, ConfigureRequest{})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	t.Cleanup(func() { service.Tunnel.Stop() })
+	if !result.Relay.TunnelConnected || !result.Relay.PublicListenerActive {
+		t.Fatalf("relay start result = %#v", result.Relay)
+	}
+	if client.startPublic.GroupID != "grp" || client.startPublic.HostID != "host" || client.startPublic.PublicPort != 25565 {
+		t.Fatalf("public relay start request = %#v", client.startPublic)
 	}
 }
 

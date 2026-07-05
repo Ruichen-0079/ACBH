@@ -1,13 +1,12 @@
 # Known Limits
 
-v0.5 minimal-core currently implements config, local body/runtime, Coordinator probe/init, local listener detection, relay state configuration, backup upload, snapshot listing/download, and the minimal GUI path for those flows.
+v0.5 minimal-core currently implements config, local body/runtime, Coordinator probe/init, local listener detection, public relay tunneling, backup upload, snapshot listing/download, and the minimal GUI path for those flows.
 
 Not yet on the v0.5 main path:
 
 - diagnostic bundle export
 - Windows release artifact assembly
 - Coordinator artifact repackaging and `SHA256SUMS`
-- actual relay byte-stream tunneling from players through the public node
 - Minecraft server lifecycle control from the GUI
 
 Compatibility limits:

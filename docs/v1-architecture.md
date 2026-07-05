@@ -19,8 +19,9 @@ A low-cost public IPv4 server that provides:
   outward to discover the current host and request tunnel sessions.
 - **Relay fallback** -- when direct host<->player connectivity fails, the
   public node can mediate a relay stream so players can still reach the host.
-  *Relay byte forwarding is not implemented in this PR; the control-plane
-  session groundwork is laid here.*
+  In v0.5 minimal-core Phase 2.6, the public relay accepts Minecraft TCP on
+  the VPS public port, creates tunnel sessions, and forwards bytes through the
+  current host agent's outbound WebSocket connection.
 
 ### Local Host
 

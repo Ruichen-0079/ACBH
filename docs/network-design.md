@@ -11,8 +11,9 @@ The Public Node is the single routable address all clients know:
 
 - **Coordinator API** -- REST endpoints for group management, host heartbeat,
   election, artifact sync, takeover, and tunnel session planning.
-- **Future relay listener** -- a WebSocket (or QUIC) port for byte-stream
-  relay. Not built in this PR.
+- **Public relay listener** -- a Minecraft TCP listener on the VPS public port
+  that creates tunnel sessions and forwards byte streams through host outbound
+  WebSocket connections.
 
 Hosts and players both initiate outbound connections to the Public Node.
 The Public Node never initiates connections to NAT-ed hosts or players.
@@ -24,9 +25,8 @@ The Public Node never initiates connections to NAT-ed hosts or players.
   participate in takeover.
 - A host that is the current host (elected and completed takeover) is the
   target of all tunnel sessions.
-- The Host agent will (in future PRs) maintain a persistent outbound
-  connection (WebSocket or QUIC) to the Public Node for relay and direct
-  candidate signaling.
+- The Host agent maintains outbound WebSocket tunnel connections to the Public
+  Node for relay sessions. Direct candidate signaling remains future work.
 
 ### Player connectivity
 

@@ -17,6 +17,12 @@ if ($SelfTest) {
         "txtPublicEndpoint",
         "txtListenerProcess",
         "txtRelayError",
+        "txtTunnelConnected",
+        "txtPublicListenerActive",
+        "txtActiveConnections",
+        "Start relay tunnel",
+        "Stop relay tunnel",
+        "Refresh relay status",
         "Analyze-Backup",
         "Upload-Backup",
         "Wait-BodyOperation",
@@ -486,8 +492,15 @@ function Set-RelayFields {
     if ($null -eq $Relay) { return }
     Set-ControlText $txtPublicEndpoint $Relay.publicEndpoint
     Set-ControlText $txtLocalEndpoint $Relay.localEndpoint
-    Set-ControlText $txtRelayState "configured=$($Relay.configured) active=$($Relay.active) currentDevice=$($Relay.currentDevice) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
+    Set-ControlText $txtLocalServerListening $Relay.localServerListening
+    Set-ControlText $txtTunnelConnected $Relay.tunnelConnected
+    Set-ControlText $txtPublicListenerActive $Relay.publicListenerActive
+    Set-ControlText $txtActiveConnections $Relay.activeConnections
+    Set-ControlText $txtRelayState "configured=$($Relay.configured) localServerListening=$($Relay.localServerListening) tunnelConnected=$($Relay.tunnelConnected) publicListenerActive=$($Relay.publicListenerActive) activeConnections=$($Relay.activeConnections)"
     Set-ControlText $txtRelayError ""
+    if ($Relay.lastError) {
+        Set-ControlText $txtRelayError $Relay.lastError
+    }
     if ($Relay.errors) {
         Set-ControlText $txtRelayError (($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + $_.details.responseBody }) -join "; ")
     }
@@ -510,6 +523,41 @@ function Configure-Relay {
         }
     } catch {
         Show-Error ("Relay configure failed: " + $_.Exception.Message)
+    }
+}
+
+function Start-RelayTunnel {
+    try {
+        $body = @{
+            localMinecraftHost = $txtListenerHost.Text.Trim()
+            localMinecraftPort = [int]$txtListenerPort.Text.Trim()
+            publicMinecraftPort = [int]$txtPublicPort.Text.Trim()
+        }
+        $op = Invoke-BodyJson -Method "POST" -Path "/v1/relay/start" -Body $body
+        $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
+        if ($op.state -eq "success") {
+            Set-RelayFields $op.result.relay
+            Add-Log "Relay tunnel started through body API."
+        } elseif ($op.error) {
+            Set-ControlText $txtRelayError "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
+        }
+    } catch {
+        Show-Error ("Relay tunnel start failed: " + $_.Exception.Message)
+    }
+}
+
+function Stop-RelayTunnel {
+    try {
+        $op = Invoke-BodyJson -Method "POST" -Path "/v1/relay/stop"
+        $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
+        if ($op.state -eq "success") {
+            Set-RelayFields $op.result.relay
+            Add-Log "Relay tunnel stopped through body API."
+        } elseif ($op.error) {
+            Set-ControlText $txtRelayError "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
+        }
+    } catch {
+        Show-Error ("Relay tunnel stop failed: " + $_.Exception.Message)
     }
 }
 
@@ -775,7 +823,7 @@ $form.Controls.Add($txtOperation)
 $grpListenerRelay = New-Object System.Windows.Forms.GroupBox
 $grpListenerRelay.Text = "监听 / VPS 中转"
 $grpListenerRelay.Location = New-Object System.Drawing.Point(24, 662)
-$grpListenerRelay.Size = New-Object System.Drawing.Size(986, 250)
+$grpListenerRelay.Size = New-Object System.Drawing.Size(986, 304)
 $form.Controls.Add($grpListenerRelay)
 
 function Add-GroupLabel {
@@ -825,30 +873,40 @@ Add-GroupButton "Save listener" 240 62 { Save-ListenerConfig } | Out-Null
 Add-GroupButton "Refresh listener" 396 62 { Refresh-ListenerStatus } | Out-Null
 Add-GroupButton "Probe listener" 552 62 { Probe-Listener } | Out-Null
 Add-GroupButton "Configure relay" 708 62 { Configure-Relay } | Out-Null
-Add-GroupButton "Relay status" 824 96 { Refresh-RelayStatus } | Out-Null
+Add-GroupButton "Start relay tunnel" 16 96 { Start-RelayTunnel } | Out-Null
+Add-GroupButton "Stop relay tunnel" 178 96 { Stop-RelayTunnel } | Out-Null
+Add-GroupButton "Refresh relay status" 340 96 { Refresh-RelayStatus } | Out-Null
 
-Add-GroupLabel "Listening" 16 108 | Out-Null
-$txtListening = Add-GroupTextBox 130 106 90 $true
-Add-GroupLabel "PID" 248 108 | Out-Null
-$txtListenerPid = Add-GroupTextBox 300 106 100 $true
-Add-GroupLabel "Process" 430 108 | Out-Null
-$txtListenerProcess = Add-GroupTextBox 520 106 250 $true
-Add-GroupLabel "Dir matched" 760 108 | Out-Null
-$txtServerDirMatched = Add-GroupTextBox 880 106 90 $true
-Add-GroupLabel "Local endpoint" 16 142 | Out-Null
-$txtLocalEndpoint = Add-GroupTextBox 130 140 270 $true
-Add-GroupLabel "Public endpoint" 430 142 | Out-Null
-$txtPublicEndpoint = Add-GroupTextBox 560 140 410 $true
-Add-GroupLabel "Command" 16 176 | Out-Null
-$txtListenerCommand = Add-GroupTextBox 130 174 370 $true
-Add-GroupLabel "Warnings" 520 176 | Out-Null
-$txtListenerWarnings = Add-GroupTextBox 620 174 350 $true
-$txtRelayState = Add-GroupTextBox 16 210 460 $true
-$txtRelayError = Add-GroupTextBox 510 210 460 $true
+Add-GroupLabel "Listening" 16 138 | Out-Null
+$txtListening = Add-GroupTextBox 130 136 90 $true
+Add-GroupLabel "Local MC" 248 138 | Out-Null
+$txtLocalServerListening = Add-GroupTextBox 340 136 90 $true
+Add-GroupLabel "Tunnel" 458 138 | Out-Null
+$txtTunnelConnected = Add-GroupTextBox 540 136 90 $true
+Add-GroupLabel "VPS port" 658 138 | Out-Null
+$txtPublicListenerActive = Add-GroupTextBox 750 136 90 $true
+Add-GroupLabel "Connections" 16 172 | Out-Null
+$txtActiveConnections = Add-GroupTextBox 130 170 90 $true
+Add-GroupLabel "PID" 248 172 | Out-Null
+$txtListenerPid = Add-GroupTextBox 300 170 100 $true
+Add-GroupLabel "Process" 430 172 | Out-Null
+$txtListenerProcess = Add-GroupTextBox 520 170 250 $true
+Add-GroupLabel "Dir matched" 760 172 | Out-Null
+$txtServerDirMatched = Add-GroupTextBox 880 170 90 $true
+Add-GroupLabel "Local endpoint" 16 206 | Out-Null
+$txtLocalEndpoint = Add-GroupTextBox 130 204 270 $true
+Add-GroupLabel "Public endpoint" 430 206 | Out-Null
+$txtPublicEndpoint = Add-GroupTextBox 560 204 410 $true
+Add-GroupLabel "Command" 16 240 | Out-Null
+$txtListenerCommand = Add-GroupTextBox 130 238 370 $true
+Add-GroupLabel "Warnings" 520 240 | Out-Null
+$txtListenerWarnings = Add-GroupTextBox 620 238 350 $true
+$txtRelayState = Add-GroupTextBox 16 270 460 $true
+$txtRelayError = Add-GroupTextBox 510 270 460 $true
 
 $grpBackup = New-Object System.Windows.Forms.GroupBox
 $grpBackup.Text = "备份 / 快照"
-$grpBackup.Location = New-Object System.Drawing.Point(24, 930)
+$grpBackup.Location = New-Object System.Drawing.Point(24, 984)
 $grpBackup.Size = New-Object System.Drawing.Size(986, 250)
 $form.Controls.Add($grpBackup)
 
@@ -908,7 +966,7 @@ Add-BackupLabel "Error" 510 160 | Out-Null
 $txtBackupError = Add-BackupTextBox 610 158 360 $true
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(24, 1198)
+$txtLog.Location = New-Object System.Drawing.Point(24, 1252)
 $txtLog.Size = New-Object System.Drawing.Size(986, 120)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
