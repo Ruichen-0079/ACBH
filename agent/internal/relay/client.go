@@ -18,18 +18,34 @@ const (
 )
 
 type HostRelayOptions struct {
-	CoordinatorURL  string
-	GroupID         string
-	SessionID       string
-	HostID          string
-	HostToken       string
-	HostGeneration  int
-	TargetAddress   string
-	BufferSize      int
+	CoordinatorURL string
+	GroupID        string
+	SessionID      string
+	HostID         string
+	HostToken      string
+	HostGeneration int
+	TargetAddress  string
+	BufferSize     int
+	Diagnostics    func(HostRelayDiagnostics)
 }
 
 type HostRelayClient struct {
 	opts HostRelayOptions
+}
+
+type HostRelayDiagnostics struct {
+	ConnectionID       string
+	SessionID          string
+	HostConnected      bool
+	LocalDialAttempted bool
+	LocalDialSucceeded bool
+	LocalEndpoint      string
+	BytesHostToLocal   int64
+	BytesLocalToHost   int64
+	CloseReason        string
+	LastError          string
+	OpenedAt           time.Time
+	ClosedAt           time.Time
 }
 
 func NewHostRelayClient(opts HostRelayOptions) *HostRelayClient {
@@ -39,7 +55,43 @@ func NewHostRelayClient(opts HostRelayOptions) *HostRelayClient {
 	return &HostRelayClient{opts: opts}
 }
 
-func (c *HostRelayClient) Run(ctx context.Context) error {
+func (c *HostRelayClient) Run(ctx context.Context) (runErr error) {
+	diag := HostRelayDiagnostics{
+		ConnectionID:  c.opts.SessionID,
+		SessionID:     c.opts.SessionID,
+		LocalEndpoint: c.opts.TargetAddress,
+		OpenedAt:      time.Now().UTC(),
+	}
+	var diagMu sync.Mutex
+	report := func(update func(*HostRelayDiagnostics)) {
+		diagMu.Lock()
+		if update != nil {
+			update(&diag)
+		}
+		snapshot := diag
+		diagMu.Unlock()
+		if c.opts.Diagnostics != nil {
+			c.opts.Diagnostics(snapshot)
+		}
+	}
+	report(nil)
+	defer func() {
+		report(func(d *HostRelayDiagnostics) {
+			if !d.ClosedAt.IsZero() {
+				return
+			}
+			d.ClosedAt = time.Now().UTC()
+			if runErr != nil {
+				d.LastError = runErr.Error()
+				if d.CloseReason == "" {
+					d.CloseReason = runErr.Error()
+				}
+			} else if d.CloseReason == "" {
+				d.CloseReason = "normal"
+			}
+		})
+	}()
+
 	wsURL := fmt.Sprintf("%s/v1/groups/%s/relay/tunnel-sessions/%s/host",
 		wsScheme(c.opts.CoordinatorURL), c.opts.GroupID, c.opts.SessionID)
 	if wsURL == "" {
@@ -77,15 +129,24 @@ func (c *HostRelayClient) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("relay: websocket dial failed: %w", err)
 	}
+	report(func(d *HostRelayDiagnostics) {
+		d.HostConnected = true
+	})
 
 	dialCtx, dialCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer dialCancel()
 	var dialer net.Dialer
+	report(func(d *HostRelayDiagnostics) {
+		d.LocalDialAttempted = true
+	})
 	rawTCPConn, err := dialer.DialContext(dialCtx, "tcp", c.opts.TargetAddress)
 	if err != nil {
 		return fmt.Errorf("relay: target dial to %s failed: %w", c.opts.TargetAddress, err)
 	}
 	tcpConn = rawTCPConn.(*net.TCPConn)
+	report(func(d *HostRelayDiagnostics) {
+		d.LocalDialSucceeded = true
+	})
 
 	go func() {
 		<-ctx.Done()
@@ -97,11 +158,19 @@ func (c *HostRelayClient) Run(ctx context.Context) error {
 	errCh := make(chan error, 2)
 
 	go func() {
-		errCh <- forwardTCPToWS(ctx, tcpConn, wsConn, bufSize)
+		errCh <- forwardTCPToWS(ctx, tcpConn, wsConn, bufSize, func(n int) {
+			report(func(d *HostRelayDiagnostics) {
+				d.BytesLocalToHost += int64(n)
+			})
+		})
 	}()
 
 	go func() {
-		errCh <- forwardWSToTCP(ctx, wsConn, tcpConn, bufSize)
+		errCh <- forwardWSToTCP(ctx, wsConn, tcpConn, bufSize, func(n int) {
+			report(func(d *HostRelayDiagnostics) {
+				d.BytesHostToLocal += int64(n)
+			})
+		})
 	}()
 
 	firstErr := <-errCh
@@ -127,7 +196,7 @@ func wsScheme(coordinatorURL string) string {
 	return ""
 }
 
-func forwardTCPToWS(ctx context.Context, tcpConn *net.TCPConn, wsConn *websocket.Conn, bufSize int) error {
+func forwardTCPToWS(ctx context.Context, tcpConn *net.TCPConn, wsConn *websocket.Conn, bufSize int, onBytes func(int)) error {
 	buf := make([]byte, bufSize)
 	for {
 		select {
@@ -144,6 +213,9 @@ func forwardTCPToWS(ctx context.Context, tcpConn *net.TCPConn, wsConn *websocket
 			if writeErr != nil {
 				return fmt.Errorf("relay: websocket write error: %w", writeErr)
 			}
+			if onBytes != nil {
+				onBytes(n)
+			}
 		}
 		if readErr != nil {
 			if errors.Is(readErr, net.ErrClosed) {
@@ -157,7 +229,7 @@ func forwardTCPToWS(ctx context.Context, tcpConn *net.TCPConn, wsConn *websocket
 	}
 }
 
-func forwardWSToTCP(ctx context.Context, wsConn *websocket.Conn, tcpConn *net.TCPConn, bufSize int) error {
+func forwardWSToTCP(ctx context.Context, wsConn *websocket.Conn, tcpConn *net.TCPConn, bufSize int, onBytes func(int)) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -179,6 +251,9 @@ func forwardWSToTCP(ctx context.Context, wsConn *websocket.Conn, tcpConn *net.TC
 				return fmt.Errorf("relay: tcp write error: %w", writeErr)
 			}
 			written += n
+		}
+		if onBytes != nil && len(data) > 0 {
+			onBytes(len(data))
 		}
 	}
 }

@@ -373,13 +373,14 @@ export async function registerRoutes(
     };
   });
 
-  app.get("/v1/public-relay/status", async () => {
-    return publicRelay?.status() ?? {
+  app.get("/v1/public-relay/status", async (request) => {
+    return publicRelay?.status(publicRelayEndpointHost(request)) ?? {
       configured: false,
       publicListenerActive: false,
       publicEndpoint: null,
       activeConnections: 0,
       lastError: "public relay is not available in this Coordinator process",
+      recentConnections: [],
     };
   });
 
@@ -402,7 +403,7 @@ export async function registerRoutes(
       } catch (error) {
         throw new StoreError(502, `Public relay failed to start: ${String(error)}`, "public_relay_start_failed");
       }
-      return { ok: true, relay: publicRelay.status() };
+      return { ok: true, relay: publicRelay.status(publicRelayEndpointHost(request)) };
     });
   });
 
@@ -417,7 +418,7 @@ export async function registerRoutes(
         throw new StoreError(503, "Public relay is not available in this Coordinator process", "public_relay_unavailable");
       }
       publicRelay.stop();
-      return { ok: true, relay: publicRelay.status() };
+      return { ok: true, relay: publicRelay.status(publicRelayEndpointHost(request)) };
     });
   });
 
@@ -1756,6 +1757,19 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
   if (value === undefined) return undefined;
   if (Array.isArray(value)) return value[0];
   return value;
+}
+
+function publicRelayEndpointHost(request: FastifyRequest): string | undefined {
+  const forwarded = singleHeader(request.headers["x-forwarded-host"]);
+  const host = (forwarded ?? singleHeader(request.headers.host) ?? request.hostname ?? "").split(",")[0].trim();
+  if (host === "") {
+    return undefined;
+  }
+  if (host.startsWith("[") && host.includes("]")) {
+    return host.slice(1, host.indexOf("]"));
+  }
+  const colon = host.lastIndexOf(":");
+  return colon > -1 ? host.slice(0, colon) : host;
 }
 
 function statusText(statusCode: number): string {

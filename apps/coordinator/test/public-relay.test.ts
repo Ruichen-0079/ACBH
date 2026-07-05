@@ -167,6 +167,162 @@ test("public relay start opens TCP listener and forwards bytes through host webs
   tcp.destroy();
 });
 
+test("public relay forwards client-first TCP payload through host websocket to local echo server", async (t) => {
+  const apiPort = await freePort();
+  const publicPort = await freePort();
+  const oldPort = process.env.PORT;
+  process.env.PORT = String(apiPort);
+  t.after(() => {
+    if (oldPort === undefined) {
+      delete process.env.PORT;
+    } else {
+      process.env.PORT = oldPort;
+    }
+  });
+
+  const store = createInMemoryCoordinatorStore();
+  const host = makeHost(store, "relay-client-first-host");
+  makeCurrent(store, host, "hosting");
+  const app = await buildApp({ store, logger: false });
+  await app.listen({ host: "127.0.0.1", port: apiPort });
+  t.after(async () => {
+    (app as any).publicRelay?.stop();
+    await app.close();
+  });
+
+  const echo = await startEchoServer(t);
+  const started = await app.inject({
+    method: "POST",
+    url: "/v1/public-relay/start",
+    headers: { host: "121.40.101.224:6121" },
+    payload: { groupId: host.groupId, hostId: host.hostId, hostToken: host.hostToken, publicPort },
+  });
+  assert.equal(started.statusCode, 200, started.body);
+  assert.equal(started.json().relay.publicEndpoint, `121.40.101.224:${publicPort}`);
+
+  const tcp = net.createConnection({ host: "127.0.0.1", port: publicPort });
+  t.after(() => tcp.destroy());
+  await onceEvent(tcp, "connect", 5_000);
+
+  const payload = Buffer.from([0x00, 0x0f, 0x01, 0x70, 0x69, 0x6e, 0x67]);
+  tcp.write(payload);
+
+  const session = await waitFor(() => store.listTunnelSessions(host.groupId)[0]);
+  const bridge = await connectHostBridge(t, apiPort, host, session.sessionId, session.currentHostGeneration, echo);
+  t.after(() => {
+    bridge.ws.close();
+    bridge.local.destroy();
+  });
+
+  const echoed = await onceData(tcp);
+  assert.deepEqual(echoed, payload);
+
+  const active = await waitFor(async () => {
+    const status = await app.inject({
+      method: "GET",
+      url: "/v1/public-relay/status",
+      headers: { host: "121.40.101.224:6121" },
+    });
+    assert.equal(status.statusCode, 200, status.body);
+    const body = status.json();
+    const debug = body.recentConnections?.[0];
+    if (
+      debug?.bytesPlayerToCoordinator >= payload.length &&
+      debug?.bytesCoordinatorToHost >= payload.length &&
+      debug?.bytesCoordinatorToPlayer >= payload.length
+    ) {
+      return body;
+    }
+    return undefined;
+  });
+  assert.equal(active.publicEndpoint, `121.40.101.224:${publicPort}`);
+  assert.equal(active.recentConnections[0].sessionId, session.sessionId);
+  assert.equal(active.recentConnections[0].hostConnected, true);
+
+  tcp.destroy();
+  bridge.ws.close();
+  bridge.local.destroy();
+  const inactive = await waitFor(() => {
+    const status = (app as any).publicRelay.status("121.40.101.224");
+    return status.activeConnections === 0 ? status : undefined;
+  }, 2_000);
+  assert.equal(inactive.activeConnections, 0);
+});
+
+test("public relay forwards concurrent client-first TCP clients", async (t) => {
+  const apiPort = await freePort();
+  const publicPort = await freePort();
+  const oldPort = process.env.PORT;
+  process.env.PORT = String(apiPort);
+  t.after(() => {
+    if (oldPort === undefined) {
+      delete process.env.PORT;
+    } else {
+      process.env.PORT = oldPort;
+    }
+  });
+
+  const store = createInMemoryCoordinatorStore();
+  const host = makeHost(store, "relay-concurrent-host");
+  makeCurrent(store, host, "hosting");
+  const app = await buildApp({ store, logger: false });
+  await app.listen({ host: "127.0.0.1", port: apiPort });
+  t.after(async () => {
+    (app as any).publicRelay?.stop();
+    await app.close();
+  });
+
+  const echo = await startEchoServer(t);
+  const started = await app.inject({
+    method: "POST",
+    url: "/v1/public-relay/start",
+    payload: { groupId: host.groupId, hostId: host.hostId, hostToken: host.hostToken, publicPort },
+  });
+  assert.equal(started.statusCode, 200, started.body);
+
+  const clients = [
+    { socket: net.createConnection({ host: "127.0.0.1", port: publicPort }), payload: Buffer.from("alpha") },
+    { socket: net.createConnection({ host: "127.0.0.1", port: publicPort }), payload: Buffer.from("bravo") },
+  ];
+  for (const client of clients) {
+    t.after(() => client.socket.destroy());
+  }
+  await Promise.all(clients.map((client) => onceEvent(client.socket, "connect", 5_000)));
+  for (const client of clients) {
+    client.socket.write(client.payload);
+  }
+
+  const sessions = await waitFor(() => {
+    const list = store.listTunnelSessions(host.groupId);
+    return list.length >= 2 ? list.slice(0, 2) : undefined;
+  });
+  const bridges = await Promise.all(sessions.map((session) => (
+    connectHostBridge(t, apiPort, host, session.sessionId, session.currentHostGeneration, echo)
+  )));
+  t.after(() => {
+    for (const bridge of bridges) {
+      bridge.ws.close();
+      bridge.local.destroy();
+    }
+  });
+
+  const echoed = await Promise.all(clients.map((client) => onceData(client.socket)));
+  assert.deepEqual(echoed.map((chunk) => chunk.toString()).sort(), ["alpha", "bravo"]);
+
+  for (const client of clients) {
+    client.socket.destroy();
+  }
+  for (const bridge of bridges) {
+    bridge.ws.close();
+    bridge.local.destroy();
+  }
+  const inactive = await waitFor(() => {
+    const status = (app as any).publicRelay.status("121.40.101.224");
+    return status.activeConnections === 0 ? status : undefined;
+  }, 2_000);
+  assert.equal(inactive.activeConnections, 0);
+});
+
 test("public relay stops when the current host heartbeat expires", async (t) => {
   const publicPort = await freePort();
   const store = createInMemoryCoordinatorStore({ heartbeatTimeoutMs: 50 });
@@ -319,4 +475,67 @@ async function onceData(socket: net.Socket): Promise<Buffer> {
       reject(err);
     });
   });
+}
+
+async function startEchoServer(t: Parameters<Parameters<typeof test>[1]>[0]): Promise<{ host: string; port: number }> {
+  const server = net.createServer((socket) => {
+    socket.on("data", (chunk) => {
+      socket.write(chunk);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => server.close());
+  const address = server.address();
+  assert.notEqual(address, null);
+  assert.notEqual(typeof address, "string");
+  return { host: (address as net.AddressInfo).address, port: (address as net.AddressInfo).port };
+}
+
+async function connectHostBridge(
+  t: Parameters<Parameters<typeof test>[1]>[0],
+  apiPort: number,
+  host: HostInfo,
+  sessionId: string,
+  generation: number,
+  localAddress: { host: string; port: number },
+): Promise<{ ws: WebSocket; local: net.Socket }> {
+  const local = net.createConnection(localAddress);
+  await onceEvent(local, "connect", 5_000);
+  const ws = new WebSocket(
+    `ws://127.0.0.1:${apiPort}/v1/groups/${host.groupId}/relay/tunnel-sessions/${sessionId}/host`,
+    {
+      headers: {
+        "X-ACBH-Host-ID": host.hostId,
+        "X-ACBH-Host-Token": host.hostToken,
+        "X-ACBH-Host-Generation": String(generation),
+      },
+    },
+  );
+  ws.on("message", (data) => {
+    local.write(messageDataToBuffer(data));
+  });
+  local.on("data", (chunk) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(chunk, { binary: true });
+    }
+  });
+  t.after(() => {
+    ws.close();
+    local.destroy();
+  });
+  await onceEvent(ws, "open", 5_000);
+  return { ws, local };
+}
+
+function messageDataToBuffer(data: unknown): Buffer {
+  if (Buffer.isBuffer(data)) {
+    return Buffer.from(data);
+  }
+  if (Array.isArray(data)) {
+    return Buffer.concat(data.map((part) => Buffer.from(part)));
+  }
+  return Buffer.from(data as ArrayBuffer);
 }

@@ -1,5 +1,7 @@
-import { WebSocket } from "ws";
+import { WebSocket, type RawData } from "ws";
 import type { InMemoryCoordinatorStore } from "./store.js";
+
+const maxQueuedBytesPerDirection = 1024 * 1024;
 
 export interface RelayPair {
   sessionId: string;
@@ -8,6 +10,12 @@ export interface RelayPair {
   player?: { ws: WebSocket };
   bytesHostToPlayer: number;
   bytesPlayerToHost: number;
+  queuedHostToPlayer: Buffer[];
+  queuedPlayerToHost: Buffer[];
+  queuedHostToPlayerBytes: number;
+  queuedPlayerToHostBytes: number;
+  closeReason?: string;
+  lastError?: string;
   closedAt?: string;
 }
 
@@ -32,6 +40,10 @@ export class RelayManager {
         groupId,
         bytesHostToPlayer: 0,
         bytesPlayerToHost: 0,
+        queuedHostToPlayer: [],
+        queuedPlayerToHost: [],
+        queuedHostToPlayerBytes: 0,
+        queuedPlayerToHostBytes: 0,
       };
       this.pairs.set(sessionId, pair);
     }
@@ -39,6 +51,7 @@ export class RelayManager {
     pair.host = { ws };
     this.setupForwarding(pair, "host", ws);
     this.maybeActivate(pair);
+    this.flushQueued(pair, "host");
   }
 
   registerPlayer(sessionId: string, groupId: string, ws: WebSocket): void {
@@ -54,6 +67,10 @@ export class RelayManager {
         groupId,
         bytesHostToPlayer: 0,
         bytesPlayerToHost: 0,
+        queuedHostToPlayer: [],
+        queuedPlayerToHost: [],
+        queuedHostToPlayerBytes: 0,
+        queuedPlayerToHostBytes: 0,
       };
       this.pairs.set(sessionId, pair);
     }
@@ -61,6 +78,7 @@ export class RelayManager {
     pair.player = { ws };
     this.setupForwarding(pair, "player", ws);
     this.maybeActivate(pair);
+    this.flushQueued(pair, "player");
   }
 
   getPair(sessionId: string): RelayPair | undefined {
@@ -72,25 +90,89 @@ export class RelayManager {
   }
 
   private setupForwarding(pair: RelayPair, side: "host" | "player", ws: WebSocket): void {
-    ws.on("message", (data: Buffer) => {
+    ws.on("message", (data) => {
+      const payload = rawDataToBuffer(data);
       const target = side === "host" ? pair.player?.ws : pair.host?.ws;
       if (target && target.readyState === WebSocket.OPEN) {
         if (side === "host") {
-          pair.bytesHostToPlayer += data.length;
+          pair.bytesHostToPlayer += payload.length;
         } else {
-          pair.bytesPlayerToHost += data.length;
+          pair.bytesPlayerToHost += payload.length;
         }
-        target.send(data);
+        target.send(payload, { binary: true }, (err) => {
+          if (err) {
+            pair.lastError = String(err);
+          }
+        });
+        return;
+      }
+
+      if (side === "host") {
+        this.enqueue(pair, "hostToPlayer", payload, ws);
+      } else {
+        this.enqueue(pair, "playerToHost", payload, ws);
       }
     });
 
-    ws.on("close", (_code: number) => {
-      this.cleanup(pair.sessionId, side);
+    ws.on("close", (code: number, reason: Buffer) => {
+      this.cleanup(pair.sessionId, side, `${code} ${reason.toString()}`.trim());
     });
 
-    ws.on("error", () => {
-      this.cleanup(pair.sessionId, side);
+    ws.on("error", (err) => {
+      pair.lastError = String(err);
+      this.cleanup(pair.sessionId, side, String(err));
     });
+  }
+
+  private enqueue(pair: RelayPair, direction: "hostToPlayer" | "playerToHost", payload: Buffer, source: WebSocket): void {
+    if (direction === "hostToPlayer") {
+      if (pair.queuedHostToPlayerBytes + payload.length > maxQueuedBytesPerDirection) {
+        pair.lastError = "relay queue overflow while waiting for player websocket";
+        source.close(1013, pair.lastError);
+        return;
+      }
+      pair.queuedHostToPlayer.push(Buffer.from(payload));
+      pair.queuedHostToPlayerBytes += payload.length;
+      return;
+    }
+
+    if (pair.queuedPlayerToHostBytes + payload.length > maxQueuedBytesPerDirection) {
+      pair.lastError = "relay queue overflow while waiting for host websocket";
+      source.close(1013, pair.lastError);
+      return;
+    }
+    pair.queuedPlayerToHost.push(Buffer.from(payload));
+    pair.queuedPlayerToHostBytes += payload.length;
+  }
+
+  private flushQueued(pair: RelayPair, connectedSide: "host" | "player"): void {
+    if (connectedSide === "host" && pair.host?.ws.readyState === WebSocket.OPEN) {
+      const target = pair.host.ws;
+      for (const payload of pair.queuedPlayerToHost) {
+        pair.bytesPlayerToHost += payload.length;
+        target.send(payload, { binary: true }, (err) => {
+          if (err) {
+            pair.lastError = String(err);
+          }
+        });
+      }
+      pair.queuedPlayerToHost = [];
+      pair.queuedPlayerToHostBytes = 0;
+    }
+
+    if (connectedSide === "player" && pair.player?.ws.readyState === WebSocket.OPEN) {
+      const target = pair.player.ws;
+      for (const payload of pair.queuedHostToPlayer) {
+        pair.bytesHostToPlayer += payload.length;
+        target.send(payload, { binary: true }, (err) => {
+          if (err) {
+            pair.lastError = String(err);
+          }
+        });
+      }
+      pair.queuedHostToPlayer = [];
+      pair.queuedHostToPlayerBytes = 0;
+    }
   }
 
   private maybeActivate(pair: RelayPair): void {
@@ -103,9 +185,10 @@ export class RelayManager {
     }
   }
 
-  private cleanup(sessionId: string, side: "host" | "player"): void {
+  private cleanup(sessionId: string, side: "host" | "player", reason: string): void {
     const pair = this.pairs.get(sessionId);
     if (!pair) return;
+    pair.closeReason = reason;
 
     if (side === "host") {
       pair.host = undefined;
@@ -135,4 +218,14 @@ export class RelayManager {
       }
     }
   }
+}
+
+function rawDataToBuffer(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) {
+    return Buffer.from(data);
+  }
+  if (Array.isArray(data)) {
+    return Buffer.concat(data.map((part) => Buffer.from(part)));
+  }
+  return Buffer.from(data);
 }

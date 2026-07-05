@@ -1,4 +1,4 @@
-import { WebSocket } from "ws";
+import { WebSocket, type RawData } from "ws";
 import * as net from "net";
 import type { InMemoryCoordinatorStore, PublicGroupState } from "./store.js";
 import type { RelayManager } from "./relay.js";
@@ -18,6 +18,27 @@ export interface PublicRelayStatus {
   publicEndpoint: string | null;
   activeConnections: number;
   lastError: string | null;
+  recentConnections: PublicRelayConnectionDebug[];
+}
+
+export interface PublicRelayConnectionDebug {
+  connectionId: string;
+  sessionId: string | null;
+  playerRemoteAddr: string | null;
+  hostConnected: boolean;
+  localDialAttempted: boolean;
+  localDialSucceeded: boolean;
+  localEndpoint: string | null;
+  bytesPlayerToCoordinator: number;
+  bytesCoordinatorToHost: number;
+  bytesHostToLocal: number;
+  bytesLocalToHost: number;
+  bytesHostToCoordinator: number;
+  bytesCoordinatorToPlayer: number;
+  closeReason: string | null;
+  lastError: string | null;
+  openedAt: string;
+  closedAt: string | null;
 }
 
 export function selectPublicRelayGroup(
@@ -59,7 +80,9 @@ export class PublicRelayIngress {
   private lastError: string | null = null;
   private readonly sockets = new Set<net.Socket>();
   private readonly playerSockets = new Set<WebSocket>();
+  private readonly connections = new Map<string, PublicRelayConnectionDebug>();
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private nextConnectionID = 1;
 
   constructor(opts: PublicRelayOptions) {
     this.opts = opts;
@@ -81,14 +104,18 @@ export class PublicRelayIngress {
     this.lastError = null;
 
     const server = net.createServer((socket) => {
+      const debug = this.newConnectionDebug(socket);
       this.sockets.add(socket);
       this.activeConnections += 1;
       socket.once("close", () => {
         this.sockets.delete(socket);
         this.activeConnections = Math.max(0, this.activeConnections - 1);
+        this.closeConnectionDebug(debug, "player tcp closed");
       });
       this.handleIncoming(socket).catch((err) => {
         this.lastError = String(err);
+        debug.lastError = String(err);
+        this.closeConnectionDebug(debug, String(err));
         this.opts.logger?.("Public relay ingress connection handler error", { err: String(err) });
         try { socket.destroy(); } catch {}
       });
@@ -151,25 +178,33 @@ export class PublicRelayIngress {
     this.activeConnections = 0;
   }
 
-  status(): PublicRelayStatus {
+  status(endpointHost?: string): PublicRelayStatus {
     return {
       configured: this.opts.port > 0,
       publicListenerActive: this.server !== null && this.server.listening,
-      publicEndpoint: this.opts.port > 0 ? `${this.opts.host}:${this.opts.port}` : null,
+      publicEndpoint: this.opts.port > 0 ? `${this.publicEndpointHost(endpointHost)}:${this.opts.port}` : null,
       activeConnections: this.activeConnections,
       lastError: this.lastError,
+      recentConnections: this.recentConnections(),
     };
   }
 
   private async handleIncoming(tcpConn: net.Socket): Promise<void> {
+    const debug = this.connectionDebugFor(tcpConn);
     const groups = this.opts.store.listGroups();
     if (groups.length === 0) {
+      if (debug) {
+        debug.closeReason = "no groups configured";
+      }
       tcpConn.end("No groups configured\n");
       return;
     }
 
     const group = selectPublicRelayGroup(groups, new Date(), this.opts.store.heartbeatTimeoutMs);
     if (group === null) {
+      if (debug) {
+        debug.closeReason = "no current host available for relay";
+      }
       tcpConn.end("No current host available for relay\n");
       return;
     }
@@ -196,6 +231,9 @@ export class PublicRelayIngress {
     }
 
     const sessionId = tun.sessionId;
+    if (debug) {
+      debug.sessionId = sessionId;
+    }
 
     // Connect as the player side (this will trigger the WS route handler and registerPlayer)
     const wsURL = this.buildWSURL(groupId, sessionId);
@@ -213,6 +251,10 @@ export class PublicRelayIngress {
         ws.once("close", () => { clearTimeout(t); reject(new Error("closed before open")); });
       });
     } catch (e) {
+      if (debug) {
+        debug.lastError = String(e);
+        this.closeConnectionDebug(debug, "player websocket connect failed");
+      }
       this.opts.logger?.("Public relay player WS connect failed", { err: String(e), sessionId });
       tcpConn.destroy();
       return;
@@ -231,21 +273,50 @@ export class PublicRelayIngress {
 
     // tcp -> ws
     tcpConn.on("data", (chunk: Buffer) => {
+      if (debug) {
+        debug.bytesPlayerToCoordinator += chunk.length;
+      }
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(chunk);
+        ws.send(chunk, { binary: true }, (err) => {
+          if (err && debug) {
+            debug.lastError = String(err);
+          }
+        });
       }
     });
-    tcpConn.on("close", closeAll);
-    tcpConn.on("error", closeAll);
+    tcpConn.on("close", () => {
+      this.closeConnectionDebug(debug, "player tcp closed");
+      closeAll();
+    });
+    tcpConn.on("error", (err) => {
+      if (debug) {
+        debug.lastError = String(err);
+      }
+      this.closeConnectionDebug(debug, String(err));
+      closeAll();
+    });
 
     // ws -> tcp
-    ws.on("message", (data: Buffer) => {
+    ws.on("message", (data) => {
+      const payload = rawDataToBuffer(data);
+      if (debug) {
+        debug.bytesCoordinatorToPlayer += payload.length;
+      }
       if (!tcpConn.destroyed) {
-        tcpConn.write(data);
+        tcpConn.write(payload);
       }
     });
-    ws.on("close", closeAll);
-    ws.on("error", closeAll);
+    ws.on("close", (code, reason) => {
+      this.closeConnectionDebug(debug, `player websocket closed ${code} ${reason.toString()}`.trim());
+      closeAll();
+    });
+    ws.on("error", (err) => {
+      if (debug) {
+        debug.lastError = String(err);
+      }
+      this.closeConnectionDebug(debug, String(err));
+      closeAll();
+    });
 
     // context cancel not needed for now
   }
@@ -274,4 +345,100 @@ export class PublicRelayIngress {
     }, Math.min(5_000, Math.max(100, this.opts.store.heartbeatTimeoutMs)));
     this.staleCheckTimer.unref?.();
   }
+
+  private newConnectionDebug(socket: net.Socket): PublicRelayConnectionDebug {
+    const debug: PublicRelayConnectionDebug = {
+      connectionId: `pub_${Date.now().toString(36)}_${this.nextConnectionID++}`,
+      sessionId: null,
+      playerRemoteAddr: socket.remoteAddress && socket.remotePort ? `${socket.remoteAddress}:${socket.remotePort}` : null,
+      hostConnected: false,
+      localDialAttempted: false,
+      localDialSucceeded: false,
+      localEndpoint: null,
+      bytesPlayerToCoordinator: 0,
+      bytesCoordinatorToHost: 0,
+      bytesHostToLocal: 0,
+      bytesLocalToHost: 0,
+      bytesHostToCoordinator: 0,
+      bytesCoordinatorToPlayer: 0,
+      closeReason: null,
+      lastError: null,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+    };
+    this.connections.set(debug.connectionId, debug);
+    (socket as net.Socket & { acbhConnectionID?: string }).acbhConnectionID = debug.connectionId;
+    this.trimConnections();
+    return debug;
+  }
+
+  private connectionDebugFor(socket: net.Socket): PublicRelayConnectionDebug | undefined {
+    const id = (socket as net.Socket & { acbhConnectionID?: string }).acbhConnectionID;
+    return id ? this.connections.get(id) : undefined;
+  }
+
+  private closeConnectionDebug(debug: PublicRelayConnectionDebug | undefined, reason: string): void {
+    if (!debug) {
+      return;
+    }
+    const pair = debug.sessionId ? this.opts.relay.getPair(debug.sessionId) : undefined;
+    if (pair) {
+      debug.hostConnected = pair.host?.ws.readyState === WebSocket.OPEN;
+      debug.bytesCoordinatorToHost = pair.bytesPlayerToHost;
+      debug.bytesHostToCoordinator = pair.bytesHostToPlayer;
+    }
+    if (debug.closedAt === null) {
+      debug.closedAt = new Date().toISOString();
+    }
+    debug.closeReason = debug.closeReason ?? reason;
+  }
+
+  private recentConnections(): PublicRelayConnectionDebug[] {
+    const out = Array.from(this.connections.values()).slice(-20).map((debug) => {
+      const pair = debug.sessionId ? this.opts.relay.getPair(debug.sessionId) : undefined;
+      if (pair) {
+        return {
+          ...debug,
+          hostConnected: pair.host?.ws.readyState === WebSocket.OPEN,
+          bytesCoordinatorToHost: pair.bytesPlayerToHost,
+          bytesHostToCoordinator: pair.bytesHostToPlayer,
+          lastError: debug.lastError ?? pair.lastError ?? null,
+          closeReason: debug.closeReason ?? pair.closeReason ?? null,
+        };
+      }
+      return { ...debug };
+    });
+    return out.reverse();
+  }
+
+  private trimConnections(): void {
+    const extra = this.connections.size - 20;
+    if (extra <= 0) {
+      return;
+    }
+    for (const key of Array.from(this.connections.keys()).slice(0, extra)) {
+      this.connections.delete(key);
+    }
+  }
+
+  private publicEndpointHost(endpointHost?: string): string {
+    if (this.opts.host !== "0.0.0.0" && this.opts.host !== "::" && this.opts.host !== "") {
+      return this.opts.host;
+    }
+    const cleaned = endpointHost?.split(":")[0]?.trim();
+    if (cleaned && cleaned !== "0.0.0.0" && cleaned !== "::") {
+      return cleaned;
+    }
+    return this.opts.host;
+  }
+}
+
+function rawDataToBuffer(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) {
+    return Buffer.from(data);
+  }
+  if (Array.isArray(data)) {
+    return Buffer.concat(data.map((part) => Buffer.from(part)));
+  }
+  return Buffer.from(data);
 }

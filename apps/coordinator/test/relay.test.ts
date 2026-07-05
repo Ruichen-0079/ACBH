@@ -233,6 +233,52 @@ test("player binary frame reaches host", async () => {
   }
 });
 
+test("client-first player payload is buffered until host websocket connects", async () => {
+  const ctx = await setupRelayTest();
+  try {
+    const { store, port, relay } = ctx;
+
+    const host = makeHost(store, "host");
+    heartbeat(store, host, "standby");
+    completeTakeover(store, host);
+
+    const player = store.createPlayerSession({ groupId: host.groupId, displayName: "Steve" });
+    const tunnel = store.createTunnelSession({ groupId: host.groupId, playerId: player.playerId });
+
+    const playerWs = connectRelayWS(port, host.groupId, tunnel.sessionId, "player",
+      { "x-acbh-player-id": player.playerId, "x-acbh-player-token": player.playerToken! });
+    await waitForOpen(playerWs);
+
+    const payload = Buffer.from([0x00, 0x0f, 0x01, 0x70, 0x69, 0x6e, 0x67]);
+    playerWs.send(payload);
+    await sleep(100);
+
+    const queuedPair = relay.getPair(tunnel.sessionId);
+    assert.ok(queuedPair);
+    assert.equal(queuedPair.queuedPlayerToHostBytes, payload.length);
+    assert.equal(queuedPair.bytesPlayerToHost, 0);
+
+    const hostWs = connectRelayWS(port, host.groupId, tunnel.sessionId, "host", hostHeaders(host, 1));
+    const hostMessage = waitForMessage(hostWs);
+    await waitForOpen(hostWs);
+
+    const received = await hostMessage;
+    assert.equal(received.isBinary, true);
+    assert.deepEqual(received.data, payload);
+
+    const activePair = relay.getPair(tunnel.sessionId);
+    assert.ok(activePair);
+    assert.equal(activePair.bytesPlayerToHost, payload.length);
+    assert.equal(activePair.queuedPlayerToHostBytes, 0);
+
+    hostWs.close();
+    playerWs.close();
+    await sleep(50);
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("multiple frames preserve order", async () => {
   const ctx = await setupRelayTest();
   try {
@@ -696,6 +742,22 @@ function forwardAndReceive(target: WebSocket, sender: WebSocket, data: Buffer): 
     target.once("message", (d: Buffer) => resolve(Buffer.from(d)));
     sender.send(data);
   });
+}
+
+function waitForMessage(ws: WebSocket): Promise<{ data: Buffer; isBinary: boolean }> {
+  return new Promise((resolve) => {
+    ws.once("message", (data, isBinary) => resolve({ data: messageDataToBuffer(data), isBinary }));
+  });
+}
+
+function messageDataToBuffer(data: unknown): Buffer {
+  if (Buffer.isBuffer(data)) {
+    return Buffer.from(data);
+  }
+  if (Array.isArray(data)) {
+    return Buffer.concat(data.map((part) => Buffer.from(part)));
+  }
+  return Buffer.from(data as ArrayBuffer);
 }
 
 function sleep(ms: number): Promise<void> {

@@ -8,6 +8,7 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
+	tunnelrelay "github.com/Ruichen-0079/ACBH/agent/internal/relay"
 )
 
 type fakeClient struct {
@@ -160,5 +161,73 @@ func TestRelayDoesNotFallbackLocalhost(t *testing.T) {
 	}
 	if result.Relay.PublicEndpoint != "public.test:25565" {
 		t.Fatalf("public endpoint = %q", result.Relay.PublicEndpoint)
+	}
+}
+
+func TestStatusNormalizesWildcardPublicEndpoint(t *testing.T) {
+	cfg := testConfig()
+	cfg.Relay.PublicHost = ""
+	client := &fakeClient{
+		lease:  coordinatorclient.HostLeaseStatus{CurrentHostID: "host", CurrentHostIDMatches: true, LeaseValid: true},
+		public: coordinatorclient.PublicRelayState{PublicListenerActive: true, PublicEndpoint: "0.0.0.0:25565"},
+	}
+	state, err := (&Service{Client: client}).Status(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if state.PublicEndpoint != "121.40.101.224:25565" {
+		t.Fatalf("public endpoint = %q", state.PublicEndpoint)
+	}
+}
+
+func TestStatusMergesPublicAndLocalRelayDiagnostics(t *testing.T) {
+	cfg := testConfig()
+	manager := NewTunnelManager()
+	manager.updateConnectionDiagnostics(tunnelrelay.HostRelayDiagnostics{
+		ConnectionID:       "tun_session",
+		SessionID:          "tun_session",
+		HostConnected:      true,
+		LocalDialAttempted: true,
+		LocalDialSucceeded: true,
+		LocalEndpoint:      "127.0.0.1:25565",
+		BytesHostToLocal:   7,
+		BytesLocalToHost:   5,
+		OpenedAt:           time.Date(2026, 7, 5, 1, 2, 3, 0, time.UTC),
+	})
+	client := &fakeClient{
+		lease: coordinatorclient.HostLeaseStatus{CurrentHostID: "host", CurrentHostIDMatches: true, LeaseValid: true},
+		public: coordinatorclient.PublicRelayState{
+			PublicListenerActive: true,
+			PublicEndpoint:       "121.40.101.224:25565",
+			RecentConnections: []coordinatorclient.RelayConnectionDiagnostics{{
+				ConnectionID:             "pub_1",
+				SessionID:                "tun_session",
+				PlayerRemoteAddr:         "203.0.113.10:50000",
+				BytesPlayerToCoordinator: 7,
+				BytesCoordinatorToHost:   7,
+				BytesCoordinatorToPlayer: 5,
+			}},
+		},
+	}
+	state, err := (&Service{Client: client, Tunnel: manager}).Status(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if len(state.RecentConnections) != 1 {
+		t.Fatalf("recent connections = %#v", state.RecentConnections)
+	}
+	got := state.RecentConnections[0]
+	if got.SessionID != "tun_session" ||
+		got.PlayerRemoteAddr != "203.0.113.10:50000" ||
+		!got.HostConnected ||
+		!got.LocalDialAttempted ||
+		!got.LocalDialSucceeded ||
+		got.LocalEndpoint != "127.0.0.1:25565" ||
+		got.BytesPlayerToCoordinator != 7 ||
+		got.BytesCoordinatorToHost != 7 ||
+		got.BytesHostToLocal != 7 ||
+		got.BytesLocalToHost != 5 ||
+		got.BytesCoordinatorToPlayer != 5 {
+		t.Fatalf("merged diagnostics = %#v", got)
 	}
 }

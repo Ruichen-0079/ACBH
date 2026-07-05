@@ -103,16 +103,37 @@ type PublicRelayControlRequest struct {
 }
 
 type PublicRelayState struct {
-	Configured           bool   `json:"configured"`
-	PublicListenerActive bool   `json:"publicListenerActive"`
-	PublicEndpoint       string `json:"publicEndpoint,omitempty"`
-	ActiveConnections    int    `json:"activeConnections"`
-	LastError            string `json:"lastError,omitempty"`
+	Configured           bool                         `json:"configured"`
+	PublicListenerActive bool                         `json:"publicListenerActive"`
+	PublicEndpoint       string                       `json:"publicEndpoint,omitempty"`
+	ActiveConnections    int                          `json:"activeConnections"`
+	LastError            string                       `json:"lastError,omitempty"`
+	RecentConnections    []RelayConnectionDiagnostics `json:"recentConnections,omitempty"`
 }
 
 type PublicRelayControlResponse struct {
 	OK    bool             `json:"ok"`
 	Relay PublicRelayState `json:"relay"`
+}
+
+type RelayConnectionDiagnostics struct {
+	ConnectionID             string `json:"connectionId"`
+	SessionID                string `json:"sessionId,omitempty"`
+	PlayerRemoteAddr         string `json:"playerRemoteAddr,omitempty"`
+	HostConnected            bool   `json:"hostConnected"`
+	LocalDialAttempted       bool   `json:"localDialAttempted"`
+	LocalDialSucceeded       bool   `json:"localDialSucceeded"`
+	LocalEndpoint            string `json:"localEndpoint,omitempty"`
+	BytesPlayerToCoordinator int64  `json:"bytesPlayerToCoordinator"`
+	BytesCoordinatorToHost   int64  `json:"bytesCoordinatorToHost"`
+	BytesHostToLocal         int64  `json:"bytesHostToLocal"`
+	BytesLocalToHost         int64  `json:"bytesLocalToHost"`
+	BytesHostToCoordinator   int64  `json:"bytesHostToCoordinator"`
+	BytesCoordinatorToPlayer int64  `json:"bytesCoordinatorToPlayer"`
+	CloseReason              string `json:"closeReason,omitempty"`
+	LastError                string `json:"lastError,omitempty"`
+	OpenedAt                 string `json:"openedAt,omitempty"`
+	ClosedAt                 string `json:"closedAt,omitempty"`
 }
 
 type WorldBackupPlanRequest struct {

@@ -35,19 +35,20 @@ type ConfigureRequest struct {
 }
 
 type State struct {
-	Configured           bool                `json:"configured"`
-	Active               bool                `json:"active"`
-	LocalServerListening bool                `json:"localServerListening"`
-	TunnelConnected      bool                `json:"tunnelConnected"`
-	PublicListenerActive bool                `json:"publicListenerActive"`
-	PublicEndpoint       string              `json:"publicEndpoint"`
-	LocalEndpoint        string              `json:"localEndpoint"`
-	CurrentHost          bool                `json:"currentHost"`
-	CurrentDevice        bool                `json:"currentDevice"`
-	ActiveConnections    int                 `json:"activeConnections"`
-	LastHeartbeatAt      string              `json:"lastHeartbeatAt,omitempty"`
-	LastError            string              `json:"lastError,omitempty"`
-	Errors               []*coreerrors.Error `json:"errors"`
+	Configured           bool                                           `json:"configured"`
+	Active               bool                                           `json:"active"`
+	LocalServerListening bool                                           `json:"localServerListening"`
+	TunnelConnected      bool                                           `json:"tunnelConnected"`
+	PublicListenerActive bool                                           `json:"publicListenerActive"`
+	PublicEndpoint       string                                         `json:"publicEndpoint"`
+	LocalEndpoint        string                                         `json:"localEndpoint"`
+	CurrentHost          bool                                           `json:"currentHost"`
+	CurrentDevice        bool                                           `json:"currentDevice"`
+	ActiveConnections    int                                            `json:"activeConnections"`
+	LastHeartbeatAt      string                                         `json:"lastHeartbeatAt,omitempty"`
+	LastError            string                                         `json:"lastError,omitempty"`
+	Errors               []*coreerrors.Error                            `json:"errors"`
+	RecentConnections    []coordinatorclient.RelayConnectionDiagnostics `json:"recentConnections,omitempty"`
 }
 
 type ConfigureResult struct {
@@ -140,8 +141,8 @@ func (s *Service) Start(ctx context.Context, cfg coreconfig.Config, req Configur
 	state.TunnelConnected = manager.Running()
 	state.PublicListenerActive = public.Relay.PublicListenerActive
 	state.ActiveConnections = public.Relay.ActiveConnections
-	if public.Relay.PublicEndpoint != "" {
-		state.PublicEndpoint = public.Relay.PublicEndpoint
+	if endpoint := normalizePublicEndpoint(public.Relay.PublicEndpoint, cfg); endpoint != "" {
+		state.PublicEndpoint = endpoint
 	}
 	state.LocalServerListening = localServerListening(req.LocalMinecraftHost, req.LocalMinecraftPort)
 	return ConfigureResult{OK: true, Relay: state}, nil
@@ -201,7 +202,7 @@ func (s *Service) Status(ctx context.Context, cfg coreconfig.Config) (State, *co
 			state.Errors = append(state.Errors, publicErr)
 			state.LastError = publicErr.Message
 		}
-		applyRuntimeState(&state, public, s.Tunnel)
+		applyRuntimeState(&state, public, s.Tunnel, cfg)
 		return state, nil
 	}
 	state := stateFromLease(cfg, req, lease)
@@ -209,7 +210,7 @@ func (s *Service) Status(ctx context.Context, cfg coreconfig.Config) (State, *co
 		state.Errors = append(state.Errors, publicErr)
 		state.LastError = publicErr.Message
 	}
-	applyRuntimeState(&state, public, s.Tunnel)
+	applyRuntimeState(&state, public, s.Tunnel, cfg)
 	return state, nil
 }
 
@@ -241,18 +242,20 @@ func (s *Service) manager() *TunnelManager {
 	return s.Tunnel
 }
 
-func applyRuntimeState(state *State, public coordinatorclient.PublicRelayState, manager *TunnelManager) {
-	if public.PublicEndpoint != "" {
-		state.PublicEndpoint = public.PublicEndpoint
+func applyRuntimeState(state *State, public coordinatorclient.PublicRelayState, manager *TunnelManager, cfg coreconfig.Config) {
+	if endpoint := normalizePublicEndpoint(public.PublicEndpoint, cfg); endpoint != "" {
+		state.PublicEndpoint = endpoint
 	}
 	state.PublicListenerActive = public.PublicListenerActive
 	state.ActiveConnections = public.ActiveConnections
+	state.RecentConnections = public.RecentConnections
 	if public.LastError != "" && state.LastError == "" {
 		state.LastError = public.LastError
 	}
 	if manager != nil {
 		state.TunnelConnected = manager.Running()
 		state.ActiveConnections = max(state.ActiveConnections, manager.ActiveConnections())
+		state.RecentConnections = mergeRelayDiagnostics(state.RecentConnections, manager.RecentConnections())
 		if err := manager.LastError(); err != "" && state.LastError == "" {
 			state.LastError = err
 		}
@@ -295,6 +298,99 @@ func publicHost(cfg coreconfig.Config) string {
 	return ""
 }
 
+func normalizePublicEndpoint(endpoint string, cfg coreconfig.Config) string {
+	if strings.TrimSpace(endpoint) == "" {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		return endpoint
+	}
+	if isWildcardPublicHost(host) {
+		if replacement := publicHost(cfg); replacement != "" {
+			return net.JoinHostPort(replacement, port)
+		}
+	}
+	return endpoint
+}
+
+func isWildcardPublicHost(host string) bool {
+	host = strings.Trim(host, "[] \t\r\n")
+	return host == "" || host == "0.0.0.0" || host == "::"
+}
+
+func mergeRelayDiagnostics(public []coordinatorclient.RelayConnectionDiagnostics, local []coordinatorclient.RelayConnectionDiagnostics) []coordinatorclient.RelayConnectionDiagnostics {
+	if len(local) == 0 {
+		return public
+	}
+	out := append([]coordinatorclient.RelayConnectionDiagnostics(nil), public...)
+	bySession := map[string]int{}
+	byConnection := map[string]int{}
+	for i, item := range out {
+		if item.SessionID != "" {
+			bySession[item.SessionID] = i
+		}
+		if item.ConnectionID != "" {
+			byConnection[item.ConnectionID] = i
+		}
+	}
+	for _, item := range local {
+		idx, ok := bySession[item.SessionID]
+		if !ok && item.ConnectionID != "" {
+			idx, ok = byConnection[item.ConnectionID]
+		}
+		if ok {
+			out[idx] = mergeRelayConnection(out[idx], item)
+			continue
+		}
+		out = append(out, item)
+		if item.SessionID != "" {
+			bySession[item.SessionID] = len(out) - 1
+		}
+		if item.ConnectionID != "" {
+			byConnection[item.ConnectionID] = len(out) - 1
+		}
+	}
+	if len(out) > 20 {
+		return out[len(out)-20:]
+	}
+	return out
+}
+
+func mergeRelayConnection(base coordinatorclient.RelayConnectionDiagnostics, local coordinatorclient.RelayConnectionDiagnostics) coordinatorclient.RelayConnectionDiagnostics {
+	if base.ConnectionID == "" {
+		base.ConnectionID = local.ConnectionID
+	}
+	if base.SessionID == "" {
+		base.SessionID = local.SessionID
+	}
+	base.HostConnected = base.HostConnected || local.HostConnected
+	base.LocalDialAttempted = base.LocalDialAttempted || local.LocalDialAttempted
+	base.LocalDialSucceeded = base.LocalDialSucceeded || local.LocalDialSucceeded
+	if local.LocalEndpoint != "" {
+		base.LocalEndpoint = local.LocalEndpoint
+	}
+	if local.BytesHostToLocal > 0 {
+		base.BytesHostToLocal = local.BytesHostToLocal
+	}
+	if local.BytesLocalToHost > 0 {
+		base.BytesLocalToHost = local.BytesLocalToHost
+	}
+	if local.CloseReason != "" {
+		base.CloseReason = local.CloseReason
+	}
+	if local.LastError != "" {
+		base.LastError = local.LastError
+	}
+	if base.OpenedAt == "" {
+		base.OpenedAt = local.OpenedAt
+	}
+	if local.ClosedAt != "" {
+		base.ClosedAt = local.ClosedAt
+	}
+	return base
+}
+
 func localServerListening(host string, port int) bool {
 	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, strconv.Itoa(port)), 300*time.Millisecond)
 	if err != nil {
@@ -315,16 +411,21 @@ type TunnelOptions struct {
 }
 
 type TunnelManager struct {
-	mu         sync.Mutex
-	cancel     context.CancelFunc
-	running    bool
-	active     map[string]context.CancelFunc
-	lastErr    string
-	generation int
+	mu          sync.Mutex
+	cancel      context.CancelFunc
+	running     bool
+	active      map[string]context.CancelFunc
+	recent      map[string]coordinatorclient.RelayConnectionDiagnostics
+	recentOrder []string
+	lastErr     string
+	generation  int
 }
 
 func NewTunnelManager() *TunnelManager {
-	return &TunnelManager{active: map[string]context.CancelFunc{}}
+	return &TunnelManager{
+		active: map[string]context.CancelFunc{},
+		recent: map[string]coordinatorclient.RelayConnectionDiagnostics{},
+	}
 }
 
 func (m *TunnelManager) Start(opts TunnelOptions) {
@@ -378,6 +479,18 @@ func (m *TunnelManager) LastError() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastErr
+}
+
+func (m *TunnelManager) RecentConnections() []coordinatorclient.RelayConnectionDiagnostics {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]coordinatorclient.RelayConnectionDiagnostics, 0, len(m.recentOrder))
+	for i := len(m.recentOrder) - 1; i >= 0; i-- {
+		if item, ok := m.recent[m.recentOrder[i]]; ok {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func (m *TunnelManager) loop(ctx context.Context, opts TunnelOptions, generation int) {
@@ -448,6 +561,7 @@ func (m *TunnelManager) startSession(parent context.Context, opts TunnelOptions,
 			HostToken:      opts.HostToken,
 			HostGeneration: session.CurrentHostGeneration,
 			TargetAddress:  opts.TargetAddress,
+			Diagnostics:    m.updateConnectionDiagnostics,
 		})
 		if err := client.Run(ctx); err != nil {
 			m.setError(err.Error())
@@ -459,4 +573,46 @@ func (m *TunnelManager) setError(message string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastErr = message
+}
+
+func (m *TunnelManager) updateConnectionDiagnostics(diag tunnelrelay.HostRelayDiagnostics) {
+	item := coordinatorclient.RelayConnectionDiagnostics{
+		ConnectionID:       diag.ConnectionID,
+		SessionID:          diag.SessionID,
+		HostConnected:      diag.HostConnected,
+		LocalDialAttempted: diag.LocalDialAttempted,
+		LocalDialSucceeded: diag.LocalDialSucceeded,
+		LocalEndpoint:      diag.LocalEndpoint,
+		BytesHostToLocal:   diag.BytesHostToLocal,
+		BytesLocalToHost:   diag.BytesLocalToHost,
+		CloseReason:        diag.CloseReason,
+		LastError:          diag.LastError,
+		OpenedAt:           formatDiagTime(diag.OpenedAt),
+		ClosedAt:           formatDiagTime(diag.ClosedAt),
+	}
+	key := item.SessionID
+	if key == "" {
+		key = item.ConnectionID
+	}
+	if key == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.recent[key]; !ok {
+		m.recentOrder = append(m.recentOrder, key)
+	}
+	m.recent[key] = item
+	for len(m.recentOrder) > 20 {
+		oldest := m.recentOrder[0]
+		m.recentOrder = m.recentOrder[1:]
+		delete(m.recent, oldest)
+	}
+}
+
+func formatDiagTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
 }

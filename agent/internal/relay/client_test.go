@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -306,6 +307,8 @@ func TestContextCancellationStopsRelay(t *testing.T) {
 
 func TestTargetDialFailureClosesWebSocketAndReturnsError(t *testing.T) {
 	server, connCh := newRelayAcceptServer(t)
+	var mu sync.Mutex
+	var latest HostRelayDiagnostics
 	client := NewHostRelayClient(HostRelayOptions{
 		CoordinatorURL: server.URL,
 		GroupID:        "group_1",
@@ -314,6 +317,11 @@ func TestTargetDialFailureClosesWebSocketAndReturnsError(t *testing.T) {
 		HostToken:      "token_1",
 		HostGeneration: 3,
 		TargetAddress:  "127.0.0.1:19999",
+		Diagnostics: func(diag HostRelayDiagnostics) {
+			mu.Lock()
+			defer mu.Unlock()
+			latest = diag
+		},
 	})
 
 	err := client.Run(context.Background())
@@ -322,6 +330,15 @@ func TestTargetDialFailureClosesWebSocketAndReturnsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "target dial") {
 		t.Errorf("expected target dial error, got: %v", err)
+	}
+	mu.Lock()
+	diag := latest
+	mu.Unlock()
+	if !diag.HostConnected || !diag.LocalDialAttempted || diag.LocalDialSucceeded {
+		t.Fatalf("unexpected diagnostics after target dial failure: %#v", diag)
+	}
+	if !strings.Contains(diag.LastError, "target dial") || !strings.Contains(diag.CloseReason, "target dial") {
+		t.Fatalf("diagnostics missing target dial error: %#v", diag)
 	}
 
 	select {
@@ -334,6 +351,58 @@ func TestTargetDialFailureClosesWebSocketAndReturnsError(t *testing.T) {
 		relayConn.Close(websocket.StatusNormalClosure, "")
 	case <-time.After(2 * time.Second):
 	}
+}
+
+func TestDiagnosticsCountBytesAcrossLocalTCP(t *testing.T) {
+	server, connCh := newRelayAcceptServer(t)
+	tcpAddr := startTCPEcho(t)
+	var mu sync.Mutex
+	var latest HostRelayDiagnostics
+	client := NewHostRelayClient(HostRelayOptions{
+		CoordinatorURL: server.URL,
+		GroupID:        "group_1",
+		SessionID:      "tun_session",
+		HostID:         "host_1",
+		HostToken:      "token_1",
+		HostGeneration: 3,
+		TargetAddress:  tcpAddr,
+		Diagnostics: func(diag HostRelayDiagnostics) {
+			mu.Lock()
+			defer mu.Unlock()
+			latest = diag
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go client.Run(ctx)
+
+	relayConn := <-connCh
+	defer relayConn.Close(websocket.StatusNormalClosure, "")
+
+	payload := []byte{0x10, 0x11, 0x12, 0x13}
+	if err := relayConn.Write(context.Background(), websocket.MessageBinary, payload); err != nil {
+		t.Fatalf("write to relay: %v", err)
+	}
+	_, echoed, err := relayConn.Read(context.Background())
+	if err != nil {
+		t.Fatalf("read echo from relay: %v", err)
+	}
+	if string(echoed) != string(payload) {
+		t.Fatalf("echo = %v, want %v", echoed, payload)
+	}
+	waitForRelayClientDiag(t, func(diag HostRelayDiagnostics) bool {
+		return diag.HostConnected &&
+			diag.LocalDialAttempted &&
+			diag.LocalDialSucceeded &&
+			diag.BytesHostToLocal >= int64(len(payload)) &&
+			diag.BytesLocalToHost >= int64(len(payload))
+	}, func() HostRelayDiagnostics {
+		mu.Lock()
+		defer mu.Unlock()
+		return latest
+	})
+	cancel()
 }
 
 func TestTokenNotInErrorStrings(t *testing.T) {
@@ -539,4 +608,17 @@ func startTCPCapture(t *testing.T) string {
 	}()
 
 	return ln.Addr().String()
+}
+
+func waitForRelayClientDiag(t *testing.T, ok func(HostRelayDiagnostics) bool, snapshot func() HostRelayDiagnostics) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		diag := snapshot()
+		if ok(diag) {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for relay diagnostics, latest=%#v", snapshot())
 }
