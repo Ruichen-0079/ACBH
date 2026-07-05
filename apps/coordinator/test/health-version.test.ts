@@ -11,7 +11,8 @@ test("health endpoint reports package.json version", async () => {
   try {
     const response = await app.inject({ method: "GET", url: "/health" });
     assert.equal(response.statusCode, 200);
-    assert.equal(response.json<{ version: string }>().version, packageJson.version);
+    const expected = packageJson.version.startsWith("v") ? packageJson.version : `v${packageJson.version}`;
+    assert.equal(response.json<{ version: string }>().version, expected);
   } finally {
     await app.close();
   }
