@@ -83,35 +83,32 @@ function Write-ReleaseNotesTemplate {
     $text = @"
 # ACBH $Version
 
-Minimal-core alpha release for Windows.
+Public relay alpha release for Windows.
 
-## Alpha 2 GUI Hotfix
+## Alpha 2 Public Relay Hotfix
 
-- alpha1 GUI had startup/layout issues on Windows scaling.
-- alpha2 fixes GUI startup null error and DPI/layout clipping.
-- backup/upload/restore protocol unchanged.
+- alpha2 fixes public relay client-first byte forwarding.
+- Fixed the Minecraft handshake first packet being dropped while the host tunnel had not paired yet.
+- Coordinator now buffers player-first handshake bytes and flushes them as binary WebSocket frames when the host connects.
+- Added recentConnections, byte counters, and closeReason diagnostics for relay debugging.
+- The minimal GUI is localized in Chinese and includes built-in usage instructions.
+- Upgrade both the Windows agent/desktop package and the VPS Coordinator bundle.
 
 ## Included
 
 - Local body runtime API on 127.0.0.1:6120
-- Minimal GUI
+- Chinese minimal GUI
 - Single-owner/private instance identity model
-- Listener status and VPS relay configuration
+- Listener status, public relay tunnel start/stop/status, and VPS relay diagnostics
 - Backup upload, snapshot list, and restore download through a protocolVersion=2 compatible VPS Coordinator
-
-## Validation Summary
-
-- Tested against a v0.4.0-alpha6-hotfix2 compatible Coordinator
-- Verified with a ~995MB Minecraft server backup
-- 806 files
-- 24 roots
 
 ## Not Included
 
 - GitHub Release publishing
-- Coordinator upgrade bundle
 - User config, logs, backup data, restore data, or tokens
 - Protocol v3
+- Backup/upload/download/restore protocol changes
+- GUI-managed Minecraft server start/stop
 "@
     Set-Content -LiteralPath $Path -Value $text -Encoding UTF8
 }
