@@ -109,7 +109,7 @@ func newBodyWriteExampleCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&appDataDir, "app-data-dir", "", "ACBH app data directory")
-	cmd.Flags().StringVar(&coordinatorURL, "coordinator-url", "http://121.40.101.224:6121", "Coordinator URL")
+	cmd.Flags().StringVar(&coordinatorURL, "coordinator-url", "http://YOUR_VPS_IP:6121", "Coordinator URL")
 	cmd.Flags().StringVar(&serverDir, "server-dir", "", "Minecraft server directory")
 	addIgnoredJSONFlag(cmd)
 	return cmd

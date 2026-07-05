@@ -17,7 +17,7 @@ Minimal remote-public config:
 {
   "schemaVersion": 2,
   "mode": "remote-public",
-  "coordinatorUrl": "http://121.40.101.224:6121",
+  "coordinatorUrl": "http://YOUR_VPS_IP:6121",
   "instance": {
     "instanceId": "inst_xxx",
     "displayName": "私人 ACBH 实例",
@@ -30,8 +30,8 @@ Minimal remote-public config:
   },
   "server": {
     "serverId": "srv_xxx",
-    "displayName": "弥散往生1.2.4",
-    "dir": "C:\\Users\\21982\\Desktop\\server"
+    "displayName": "example-server",
+    "dir": "C:\\MinecraftServers\\example-server"
   },
   "compat": {
     "coordinatorProtocol": 2,
@@ -47,7 +47,7 @@ Minimal remote-public config:
   },
   "relay": {
     "enabled": true,
-    "publicHost": "121.40.101.224",
+    "publicHost": "YOUR_VPS_IP",
     "coordinatorPort": 6121,
     "minecraftPort": 25565
   },

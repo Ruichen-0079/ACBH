@@ -321,12 +321,67 @@ func (s *Server) handleBackupUpload(w http.ResponseWriter, r *http.Request) {
 	op.Progress = 30
 	op.Message = "uploading backup through coordinator"
 	s.Operations.Update(op)
-	result, err := s.backupService().Upload(r.Context(), cfg, req)
-	if err != nil {
-		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
-		return
+	service := s.backupService()
+	service.Progress = func(progress minibackup.UploadProgress) {
+		current, ok := s.Operations.Get(op.OperationID)
+		if !ok || current.State != operations.Running {
+			return
+		}
+		applyUploadProgress(&current, progress)
+		s.Operations.Update(current)
 	}
-	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "backup uploaded"))
+	go func(op operations.Operation) {
+		result, err := service.Upload(context.Background(), cfg, req)
+		if err != nil {
+			current, ok := s.Operations.Get(op.OperationID)
+			if !ok {
+				current = op
+			}
+			s.Operations.Fail(current, err)
+			return
+		}
+		final, ok := s.Operations.Get(op.OperationID)
+		if !ok {
+			final = op
+		}
+		final.UploadedSize = result.UploadedSize
+		final.DeduplicatedSize = result.DeduplicatedSize
+		final.LogicalSize = result.LogicalSize
+		final.FileCount = result.FileCount
+		final.RootCount = result.RootCount
+		final.SnapshotID = result.SnapshotID
+		s.Operations.Complete(final, result, "backup uploaded")
+	}(op)
+	writeJSON(w, http.StatusOK, op)
+}
+
+func applyUploadProgress(op *operations.Operation, progress minibackup.UploadProgress) {
+	if progress.Stage != "" {
+		op.Stage = progress.Stage
+	}
+	if progress.Progress > 0 {
+		op.Progress = progress.Progress
+	}
+	op.Current = progress.Current
+	op.Total = progress.Total
+	if progress.UploadedSize > 0 {
+		op.UploadedSize = progress.UploadedSize
+	}
+	if progress.DeduplicatedSize > 0 {
+		op.DeduplicatedSize = progress.DeduplicatedSize
+	}
+	if progress.LogicalSize > 0 {
+		op.LogicalSize = progress.LogicalSize
+	}
+	if progress.FileCount > 0 {
+		op.FileCount = progress.FileCount
+	}
+	if progress.RootCount > 0 {
+		op.RootCount = progress.RootCount
+	}
+	if progress.SnapshotID != "" {
+		op.SnapshotID = progress.SnapshotID
+	}
 }
 
 func (s *Server) handleSnapshots(w http.ResponseWriter, r *http.Request) {

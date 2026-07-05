@@ -3,6 +3,7 @@ package coordinatorclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -68,7 +69,7 @@ func TestResponseClassifiesAuthInvalidAndRouteMissing(t *testing.T) {
 		{"401 auth missing", http.StatusUnauthorized, `{"code":"host_auth_required"}`, coreerrors.AuthMissing},
 		{"400 invalid request", http.StatusBadRequest, `{"code":"invalid_body"}`, coreerrors.InvalidRequest},
 		{"403 lease expired", http.StatusForbidden, `{"code":"host_lease_expired"}`, coreerrors.LeaseExpired},
-		{"403 not current host", http.StatusForbidden, `{"code":"not_current_host"}`, coreerrors.NotCurrentHost},
+		{"403 not current host", http.StatusForbidden, `{"code":"not_current_host"}`, coreerrors.ActiveDeviceRequired},
 		{"404 route missing", http.StatusNotFound, `{"code":"route_not_found"}`, coreerrors.CoordinatorRouteMissing},
 		{"502 proxy", http.StatusBadGateway, `Proxy-Connection: keep-alive`, coreerrors.ProxyInterferenceSuspected},
 	}
@@ -79,6 +80,29 @@ func TestResponseClassifiesAuthInvalidAndRouteMissing(t *testing.T) {
 				t.Fatalf("errorCode = %s, want %s", err.ErrorCode, tc.want)
 			}
 			if err.Details.HTTPStatus != tc.status || err.Details.ResponseBody != tc.body {
+				t.Fatalf("details not preserved: %#v", err.Details)
+			}
+		})
+	}
+}
+
+func TestTransportErrorClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want coreerrors.ErrorCode
+	}{
+		{"timeout", errors.New("context deadline exceeded"), coreerrors.NetworkTimeout},
+		{"connection refused", errors.New("dial tcp 127.0.0.1:6121: connect: connection refused"), coreerrors.CoordinatorUnreachable},
+		{"connection reset", errors.New("read tcp 127.0.0.1:1->127.0.0.1:2: wsarecv: An existing connection was forcibly closed by the remote host"), coreerrors.NetworkError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := transportError(tc.err, http.MethodGet, "http://example.test/health")
+			if err.ErrorCode != tc.want {
+				t.Fatalf("errorCode = %s, want %s", err.ErrorCode, tc.want)
+			}
+			if err.Details.Method != http.MethodGet || err.Details.URL != "http://example.test/health" {
 				t.Fatalf("details not preserved: %#v", err.Details)
 			}
 		})

@@ -17,7 +17,8 @@ const (
 	LeaseExpired                 ErrorCode = "lease_expired"
 	InvalidRequest               ErrorCode = "invalid_request"
 	ProxyInterferenceSuspected   ErrorCode = "proxy_interference_suspected"
-	NotCurrentHost               ErrorCode = "not_current_host"
+	ActiveDeviceRequired         ErrorCode = "active_device_required"
+	NotCurrentHost               ErrorCode = ActiveDeviceRequired
 	LocalPortNotListening        ErrorCode = "local_port_not_listening"
 	ProcessInspectionLimited     ErrorCode = "process_inspection_limited"
 	RelayConfigFailed            ErrorCode = "relay_config_failed"
@@ -25,6 +26,7 @@ const (
 	BackupObjectTooLarge         ErrorCode = "backup_object_too_large"
 	CoordinatorServerError       ErrorCode = "coordinator_server_error"
 	NetworkError                 ErrorCode = "network_error"
+	NetworkTimeout               ErrorCode = "network_timeout"
 	TargetDirRequired            ErrorCode = "target_dir_required"
 	TargetDirNotEmpty            ErrorCode = "target_dir_not_empty"
 	RestorePathEscapeBlocked     ErrorCode = "restore_path_escape_blocked"

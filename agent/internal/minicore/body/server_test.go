@@ -170,6 +170,21 @@ func mustRFC3339(t *testing.T, raw string) time.Time {
 	return out
 }
 
+func waitOperation(t *testing.T, srv *Server, operationID string) operations.Operation {
+	t.Helper()
+	var op operations.Operation
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		var ok bool
+		op, ok = srv.Operations.Get(operationID)
+		if ok && op.State != operations.Running {
+			return op
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	op, _ = srv.Operations.Get(operationID)
+	return op
+}
+
 func TestBodyHealthAndConfig(t *testing.T) {
 	coord := mockCoordinator(t)
 	defer coord.Close()
@@ -490,11 +505,19 @@ func TestBodyBackupSnapshotAPIs(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
 		t.Fatal(err)
 	}
+	if op.State != operations.Running {
+		t.Fatalf("backup upload initial op = %#v", op)
+	}
+	op = waitOperation(t, srv, op.OperationID)
 	if op.State != operations.Success {
 		t.Fatalf("backup upload op = %#v", op)
 	}
-	if !strings.Contains(rec.Body.String(), `"networkRequests"`) || !strings.Contains(rec.Body.String(), "/world-backups/plan") || !strings.Contains(rec.Body.String(), "/world-backups/commit") {
-		t.Fatalf("backup upload missing coordinator network diagnostics: %s", rec.Body.String())
+	uploadJSON, _ := json.Marshal(op)
+	if op.Progress != 100 || op.FileCount == 0 || op.RootCount == 0 || op.LogicalSize == 0 || op.SnapshotID == "" {
+		t.Fatalf("backup upload progress fields missing: %#v", op)
+	}
+	if !strings.Contains(string(uploadJSON), `"networkRequests"`) || !strings.Contains(string(uploadJSON), "/world-backups/plan") || !strings.Contains(string(uploadJSON), "/world-backups/commit") {
+		t.Fatalf("backup upload missing coordinator network diagnostics: %s", string(uploadJSON))
 	}
 
 	rec = httptest.NewRecorder()
@@ -520,14 +543,7 @@ func TestBodyBackupSnapshotAPIs(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &downloadOp); err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
-		var ok bool
-		downloadOp, ok = srv.Operations.Get(downloadOp.OperationID)
-		if ok && downloadOp.State != operations.Running {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	downloadOp = waitOperation(t, srv, downloadOp.OperationID)
 	if downloadOp.State != operations.Success {
 		t.Fatalf("snapshot download op = %#v", downloadOp)
 	}
@@ -537,6 +553,34 @@ func TestBodyBackupSnapshotAPIs(t *testing.T) {
 	downloadJSON, _ := json.Marshal(downloadOp)
 	if !strings.Contains(string(downloadJSON), `"actualRequestUrl"`) || !strings.Contains(string(downloadJSON), "/world-backups/latest") {
 		t.Fatalf("download operation missing actualRequestUrl diagnostics: %s", string(downloadJSON))
+	}
+}
+
+func TestBodyBackupUploadAsyncFailureRecordsError(t *testing.T) {
+	coord := mockCoordinator(t)
+	defer coord.Close()
+	srv := New("127.0.0.1:6120", t.TempDir())
+	cfg := testConfig(coord.URL)
+	cfg.Server.Dir = filepath.Join(t.TempDir(), "missing-server")
+	if err := srv.ConfigStore.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/backup/upload", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("backup/upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var op operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.State != operations.Running {
+		t.Fatalf("backup upload initial op = %#v", op)
+	}
+	op = waitOperation(t, srv, op.OperationID)
+	if op.State != operations.Failed || op.ErrorCode == "" || op.Error == nil {
+		t.Fatalf("backup upload failed op diagnostics = %#v", op)
 	}
 }
 
@@ -613,6 +657,42 @@ func TestBodyRelayDoesNotUseLocalhostFallback(t *testing.T) {
 		}
 		if !strings.HasPrefix(requestURL, "http://public.test:6121/") {
 			t.Fatalf("relay request URL = %q, want public.test coordinator URL", requestURL)
+		}
+	}
+
+	serverDir := t.TempDir()
+	for name, content := range map[string]string{"world/level.dat": "world", "banned-ips.json": "[]"} {
+		path := filepath.Join(serverDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg.Server.Dir = serverDir
+	if err := srv.ConfigStore.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	requests = nil
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/backup/upload", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("backup/upload status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	op = waitOperation(t, srv, op.OperationID)
+	if op.State != operations.Success {
+		t.Fatalf("backup upload op = %#v", op)
+	}
+	for _, requestURL := range requests {
+		if strings.Contains(requestURL, "127.0.0.1:6121") || strings.Contains(requestURL, "localhost:6121") {
+			t.Fatalf("backup upload used localhost fallback: %s", requestURL)
+		}
+		if !strings.HasPrefix(requestURL, "http://public.test:6121/") {
+			t.Fatalf("backup upload request URL = %q, want public.test coordinator URL", requestURL)
 		}
 	}
 }

@@ -19,6 +19,7 @@ if ($SelfTest) {
         "txtRelayError",
         "Analyze-Backup",
         "Upload-Backup",
+        "Wait-BodyOperation",
         "Refresh-Snapshots",
         "Download-LatestSnapshot",
         "txtBackupSummary",
@@ -459,7 +460,7 @@ function Analyze-Backup {
 function Upload-Backup {
     try {
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/backup/upload"
-        Set-BackupOperation $op
+        $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
             $txtBackupSummary.Text = "snapshot=$($op.result.snapshotId) uploaded=$($op.result.uploadedSize) deduped=$($op.result.deduplicatedSize) actualRequestUrl=$($op.result.actualRequestUrl)"
             Add-Log "Backup uploaded through body API."
@@ -597,7 +598,7 @@ $form.Controls.Add($cmbMode)
 
 Add-Label "VPS 地址" 24 172 | Out-Null
 $txtCoordinator = Add-TextBox 170 170 650
-$txtCoordinator.Text = "http://121.40.101.224:6121"
+$txtCoordinator.Text = "http://YOUR_VPS_IP:6121"
 Add-Label "私人实例" 24 206 | Out-Null
 $txtInstanceName = Add-TextBox 170 204 250
 $txtInstanceName.Text = "私人 ACBH 实例"

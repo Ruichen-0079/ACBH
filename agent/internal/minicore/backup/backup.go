@@ -118,6 +118,20 @@ type DownloadResult struct {
 type Service struct {
 	Client     Client
 	HTTPClient *http.Client
+	Progress   func(UploadProgress)
+}
+
+type UploadProgress struct {
+	Stage            string
+	Progress         int
+	Current          int
+	Total            int
+	UploadedSize     int64
+	DeduplicatedSize int64
+	LogicalSize      int64
+	FileCount        int
+	RootCount        int
+	SnapshotID       string
 }
 
 type scannedFile struct {
@@ -150,21 +164,25 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 	if err != nil {
 		return UploadResult{}, err
 	}
+	s.reportUpload(UploadProgress{Stage: "coordinator_probe", Progress: 10})
 	probe, probeErr := client.Probe(ctx)
 	if probeErr != nil {
 		return UploadResult{}, probeErr
 	}
 	requests := []coordinatorclient.NetworkRequest{{Stage: "coordinator_probe", Method: http.MethodGet, ActualRequestURL: probe.ActualRequestURL, HTTPStatus: http.StatusOK}}
+	s.reportUpload(UploadProgress{Stage: "ensure_active", Progress: 20})
 	lease, leaseErr := client.EnsureActiveLeaseWithGeneration(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken, nil)
 	if leaseErr != nil {
 		return UploadResult{}, leaseErr
 	}
 	requests = append(requests, networkRequest("ensure_active", http.MethodPost, cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/lease/ensure-active", http.StatusOK))
 	generation := lease.Lease.Generation
+	s.reportUpload(UploadProgress{Stage: "scan", Progress: 30})
 	scanned, scanErr := scan(cfg, req, true)
 	if scanErr != nil {
 		return UploadResult{}, scanErr
 	}
+	s.reportUpload(UploadProgress{Stage: "latest_manifest", Progress: 40, LogicalSize: scanned.analyze.LogicalSize, FileCount: scanned.analyze.FileCount, RootCount: scanned.analyze.RootCount})
 	var parent *worldbackup.Manifest
 	if latest, latestErr := client.GetLatestWorldBackup(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken, false); latestErr == nil {
 		parent = &latest.Manifest
@@ -172,6 +190,7 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 	}
 	snapshotID := "ws_" + time.Now().UTC().Format("20060102_150405")
 	manifest, changed, objects := buildManifest(scanned.files, parent, snapshotID, coordIdentity.GroupID, coordIdentity.HostID, generation)
+	s.reportUpload(UploadProgress{Stage: "backup_plan", Progress: 55, LogicalSize: manifest.LogicalSize, FileCount: manifest.FileCount, RootCount: scanned.analyze.RootCount, SnapshotID: snapshotID})
 	plan, planErr := client.PlanWorldBackup(ctx, coordIdentity.GroupID, coordinatorclient.WorldBackupPlanRequest{
 		HostID:           coordIdentity.HostID,
 		HostToken:        coordIdentity.HostToken,
@@ -190,11 +209,17 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 		}
 	}
 	var uploadedSize int64
-	for _, object := range plan.MissingObjects {
+	totalObjects := len(plan.MissingObjects)
+	for index, object := range plan.MissingObjects {
 		file, ok := bySHA[object.SHA256]
 		if !ok {
 			return UploadResult{}, coreerrors.New(coreerrors.InvalidRequest, "coordinator requested unknown backup object", coreerrors.Details{CoordinatorURL: cfg.CoordinatorURL}, "Retry backup upload.")
 		}
+		progress := 60
+		if totalObjects > 0 {
+			progress += int(float64(index) / float64(totalObjects) * 25)
+		}
+		s.reportUpload(UploadProgress{Stage: "object_upload", Progress: progress, Current: index, Total: totalObjects, UploadedSize: uploadedSize, DeduplicatedSize: maxInt64(manifest.LogicalSize-uploadedSize, 0), LogicalSize: manifest.LogicalSize, FileCount: manifest.FileCount, RootCount: scanned.analyze.RootCount, SnapshotID: snapshotID})
 		in, openErr := os.Open(file.LocalPath)
 		if openErr != nil {
 			return UploadResult{}, coreerrors.New(coreerrors.InvalidRequest, "open backup object failed", coreerrors.Details{Path: file.Path}, openErr.Error())
@@ -209,11 +234,13 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 		}
 		uploadedSize += object.Size
 		requests = append(requests, networkRequest("object_upload", http.MethodPut, cfg, "/v1/groups/"+url.PathEscape(coordIdentity.GroupID)+"/world-objects/"+url.PathEscape(object.SHA256), http.StatusOK))
+		s.reportUpload(UploadProgress{Stage: "object_upload", Progress: progress, Current: index + 1, Total: totalObjects, UploadedSize: uploadedSize, DeduplicatedSize: maxInt64(manifest.LogicalSize-uploadedSize, 0), LogicalSize: manifest.LogicalSize, FileCount: manifest.FileCount, RootCount: scanned.analyze.RootCount, SnapshotID: snapshotID})
 	}
 	manifest.UploadedSize = uploadedSize
 	if err := worldbackup.ValidateManifest(manifest); err != nil {
 		return UploadResult{}, coreerrors.New(coreerrors.InvalidRequest, "backup manifest is invalid", coreerrors.Details{}, err.Error())
 	}
+	s.reportUpload(UploadProgress{Stage: "snapshot_commit", Progress: 90, Current: totalObjects, Total: totalObjects, UploadedSize: uploadedSize, DeduplicatedSize: maxInt64(manifest.LogicalSize-uploadedSize, 0), LogicalSize: manifest.LogicalSize, FileCount: manifest.FileCount, RootCount: scanned.analyze.RootCount, SnapshotID: snapshotID})
 	commit, commitErr := client.CommitWorldBackup(ctx, coordIdentity.GroupID, coordinatorclient.WorldBackupCommitRequest{
 		HostID:         coordIdentity.HostID,
 		HostToken:      coordIdentity.HostToken,
@@ -237,6 +264,12 @@ func (s Service) Upload(ctx context.Context, cfg coreconfig.Config, req AnalyzeR
 		CoordinatorURL:   cfg.CoordinatorURL,
 		NetworkRequests:  requests,
 	}, nil
+}
+
+func (s Service) reportUpload(progress UploadProgress) {
+	if s.Progress != nil {
+		s.Progress(progress)
+	}
 }
 
 func (s Service) List(ctx context.Context, cfg coreconfig.Config) (ListResult, *coreerrors.Error) {

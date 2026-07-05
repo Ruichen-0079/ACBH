@@ -502,8 +502,15 @@ func classifyStatus(status int, body string) coreerrors.ErrorCode {
 func transportError(err error, method string, rawURL string) *coreerrors.Error {
 	var netErr net.Error
 	code := coreerrors.CoordinatorUnreachable
+	lower := strings.ToLower(err.Error())
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		code = coreerrors.OperationTimeout
+		code = coreerrors.NetworkTimeout
+	} else if strings.Contains(lower, "context deadline exceeded") || strings.Contains(lower, "client.timeout") {
+		code = coreerrors.NetworkTimeout
+	} else if strings.Contains(lower, "connection refused") || strings.Contains(lower, "actively refused") {
+		code = coreerrors.CoordinatorUnreachable
+	} else if strings.Contains(lower, "connection reset") || strings.Contains(lower, "wsarecv") || strings.Contains(lower, "econnreset") {
+		code = coreerrors.NetworkError
 	} else {
 		code = coreerrors.NetworkError
 	}

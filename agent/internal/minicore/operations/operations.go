@@ -18,18 +18,27 @@ const (
 )
 
 type Operation struct {
-	OperationID string               `json:"operationId"`
-	TraceID     string               `json:"traceId"`
-	Name        string               `json:"name"`
-	State       State                `json:"state"`
-	Stage       string               `json:"stage"`
-	Progress    int                  `json:"progress"`
-	StartedAt   string               `json:"startedAt"`
-	CompletedAt string               `json:"completedAt,omitempty"`
-	ErrorCode   coreerrors.ErrorCode `json:"errorCode,omitempty"`
-	Message     string               `json:"message"`
-	Error       *coreerrors.Error    `json:"error,omitempty"`
-	Result      any                  `json:"result,omitempty"`
+	OperationID      string               `json:"operationId"`
+	OK               bool                 `json:"ok,omitempty"`
+	TraceID          string               `json:"traceId"`
+	Name             string               `json:"name"`
+	State            State                `json:"state"`
+	Stage            string               `json:"stage"`
+	Progress         int                  `json:"progress"`
+	Current          int                  `json:"current,omitempty"`
+	Total            int                  `json:"total,omitempty"`
+	UploadedSize     int64                `json:"uploadedSize,omitempty"`
+	DeduplicatedSize int64                `json:"deduplicatedSize,omitempty"`
+	LogicalSize      int64                `json:"logicalSize,omitempty"`
+	FileCount        int                  `json:"fileCount,omitempty"`
+	RootCount        int                  `json:"rootCount,omitempty"`
+	SnapshotID       string               `json:"snapshotId,omitempty"`
+	StartedAt        string               `json:"startedAt"`
+	CompletedAt      string               `json:"completedAt,omitempty"`
+	ErrorCode        coreerrors.ErrorCode `json:"errorCode,omitempty"`
+	Message          string               `json:"message"`
+	Error            *coreerrors.Error    `json:"error,omitempty"`
+	Result           any                  `json:"result,omitempty"`
 }
 
 type Store struct {
@@ -45,6 +54,7 @@ func NewStore() *Store {
 func (s *Store) Start(name string, stage string, message string) Operation {
 	op := Operation{
 		OperationID: "op_" + randomHex(8),
+		OK:          true,
 		TraceID:     "tr_" + randomHex(8),
 		Name:        name,
 		State:       Running,
