@@ -113,10 +113,11 @@ Minimal-core alpha release for Windows.
 function Write-Sha256Sums {
     param([string]$Directory)
     $sumPath = Join-Path $Directory "SHA256SUMS"
+    $root = (Resolve-Path -LiteralPath $Directory).Path.TrimEnd("\", "/")
     $files = Get-ChildItem -LiteralPath $Directory -File -Recurse | Where-Object { $_.FullName -ne $sumPath } | Sort-Object FullName
     $lines = foreach ($file in $files) {
         $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        $relative = [System.IO.Path]::GetRelativePath($Directory, $file.FullName).Replace("\", "/")
+        $relative = $file.FullName.Substring($root.Length).TrimStart("\", "/").Replace("\", "/")
         "$hash  $relative"
     }
     Set-Content -LiteralPath $sumPath -Value $lines -Encoding ASCII
