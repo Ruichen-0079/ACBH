@@ -31,6 +31,11 @@ if ($SelfTest) {
         "当前设备",
         "VPS 中转",
         "访问令牌状态",
+        "txtLocalBodyStatus",
+        "txtCoordinatorCheckStatus",
+        "txtTokenValidationStatus",
+        "txtRelayCheckStatus",
+        "charset=utf-8",
         '$script:BodyUrl'
     )
     foreach ($check in $checks) {
@@ -91,7 +96,7 @@ function Redact-Secrets {
     param([string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $safe = $Text
-    $tokenPattern = "(?i)(hostToken|ownerToken|legacyHostToken|accessKey)\s*[:=]\s*\S+"
+    $tokenPattern = "(?i)(hostToken|ownerToken|legacyHostToken|accessKey|accessToken|authToken|relayToken|coordinatorToken|token|secret|privateKey)\s*[:=]\s*\S+"
     $safe = [regex]::Replace($safe, $tokenPattern, "[hidden]")
     $safe = [regex]::Replace($safe, "ht_[A-Za-z0-9_\-]+", "ht_[hidden]")
     return $safe
@@ -144,15 +149,23 @@ function Format-BodyError {
             return $text
         }
         "config_invalid" {
-            $text = "配置还不完整或格式不正确"
-            if ($message) { $text += "：" + $message }
-            if ($configPath) { $text += [Environment]::NewLine + $configPath }
-            if ($suggestion) { $text += [Environment]::NewLine + $suggestion }
+            if ($message -match "coordinatorUrl") {
+                $text = "缺少 VPS 协调器地址 coordinatorUrl。" +
+                    [Environment]::NewLine + "请在「VPS 地址」中填写，例如：" +
+                    [Environment]::NewLine + "http://<VPS公网IP>:6121" +
+                    [Environment]::NewLine + "然后点击「保存配置」或「初始化」。"
+            } else {
+                $text = "配置还不完整或格式不正确"
+                if ($message) { $text += "：" + $message }
+                if ($suggestion) { $text += [Environment]::NewLine + $suggestion }
+            }
+            if ($configPath) { $text += [Environment]::NewLine + "配置文件：" + $configPath }
             return $text
         }
         "identity_incomplete" {
-            $text = "访问令牌或私有实例身份尚未配置完整。请先保存或迁移包含令牌的配置。"
-            if ($configPath) { $text += [Environment]::NewLine + $configPath }
+            $text = "访问令牌或私有实例身份尚未配置完整。" +
+                [Environment]::NewLine + "请点击「生成/注册身份」，或导入包含访问令牌的旧配置。"
+            if ($configPath) { $text += [Environment]::NewLine + "配置文件：" + $configPath }
             return $text
         }
         default {
@@ -233,7 +246,8 @@ function Invoke-BodyJson {
     try {
         if ($null -ne $Body) {
             $json = $Body | ConvertTo-Json -Depth 12
-            return Invoke-RestMethod -Method $Method -Uri $uri -Body $json -ContentType "application/json"
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+            return Invoke-RestMethod -Method $Method -Uri $uri -Body $bytes -ContentType "application/json; charset=utf-8"
         }
         return Invoke-RestMethod -Method $Method -Uri $uri
     } catch {
@@ -246,16 +260,18 @@ function Refresh-Health {
         $health = Invoke-BodyJson -Method "GET" -Path "/v1/body/health"
         $txtConfigPath.Text = $health.configPath
         $txtBodyApi.Text = $health.bodyApi
+        if ($txtLocalBodyStatus -ne $null) { $txtLocalBodyStatus.Text = "就绪" }
         if ($health.coordinatorUrl) { $txtCoordinator.Text = $health.coordinatorUrl }
         if ($health.mode) { $cmbMode.SelectedItem = $health.mode }
         if ($health.configError) {
-            $lblState.Text = "State: config needs attention"
+            $lblState.Text = "状态：本地 Body API 就绪，配置需处理"
             Add-Log ("Config error: " + $health.configError.errorCode + " " + $health.configError.message)
         } else {
-            $lblState.Text = "State: body ready"
-            Add-Log "Body health ok."
+            $lblState.Text = "状态：本地 Body API 就绪"
+            Add-Log "本地 Body API 就绪。"
         }
     } catch {
+        if ($txtLocalBodyStatus -ne $null) { $txtLocalBodyStatus.Text = "异常" }
         Show-Error ("Health failed: " + $_.Exception.Message)
     }
 }
@@ -271,9 +287,9 @@ function Load-Config {
         $txtDeviceId.Text = $cfg.device.deviceId
         $txtServerName.Text = $cfg.server.displayName
         $txtServerDir.Text = $cfg.server.dir
-        $txtTokenStatus.Text = "not configured"
+        $txtTokenStatus.Text = "未配置"
         if ($cfg.instance.ownerToken -eq "[redacted]" -or $cfg.compat.legacyHostToken -eq "[redacted]") {
-            $txtTokenStatus.Text = "configured (redacted)"
+            $txtTokenStatus.Text = "已配置"
         }
         if ($cfg.listener) {
             $txtListenerHost.Text = $cfg.listener.localHost
@@ -289,60 +305,86 @@ function Load-Config {
     }
 }
 
-function Save-Config {
-    try {
-        $cfg = @{
-            schemaVersion = 2
-            mode = [string]$cmbMode.SelectedItem
-            coordinatorUrl = $txtCoordinator.Text.Trim()
-            instance = @{
-                instanceId = $txtInstanceId.Text.Trim()
-                displayName = $txtInstanceName.Text.Trim()
-                ownerToken = "[redacted]"
-            }
-            device = @{
-                deviceId = $txtDeviceId.Text.Trim()
-                displayName = $txtDeviceName.Text.Trim()
-                platform = "windows"
-            }
-            server = @{
-                serverId = $txtServerId.Text.Trim()
-                displayName = $txtServerName.Text.Trim()
-                dir = $txtServerDir.Text.Trim()
-            }
-            compat = @{
-                coordinatorProtocol = 2
-                legacyHostToken = "[redacted]"
-            }
-            listener = @{ enabled = $true; localHost = "127.0.0.1"; localPort = 25565 }
-            relay = @{ enabled = $true; publicHost = $txtPublicHost.Text.Trim(); coordinatorPort = 6121; minecraftPort = [int]$txtPublicPort.Text.Trim() }
-            backup = @{
-                profileId = "minecraft-migratable"
-                include = @("dir:world","dir:mods","dir:config","dir:defaultconfigs","dir:datapacks","dir:resourcepacks","dir:global_packs","dir:patchouli_books","file:server.properties","file:eula.txt","file:ops.json","file:whitelist.json","file:banned-ips.json","file:banned-players.json","file:server-icon.png","file:manifest.json","file:variables.txt","file:user_jvm_args.txt","file:start.bat","file:start.ps1","file:start.sh","file:run.sh","file:双击直接开服！！！.bat","file:HOW-TO-RUN.md")
-                exclude = @("dir:libraries","dir:jre","dir:logs","dir:crash-reports","dir:versions","dir:.cache","dir:cache")
-            }
+function Build-ConfigFromForm {
+    return @{
+        schemaVersion = 2
+        mode = [string]$cmbMode.SelectedItem
+        coordinatorUrl = $txtCoordinator.Text.Trim()
+        instance = @{
+            instanceId = $txtInstanceId.Text.Trim()
+            displayName = $txtInstanceName.Text.Trim()
+            ownerToken = "[redacted]"
         }
-        Invoke-BodyJson -Method "PUT" -Path "/v1/config" -Body $cfg | Out-Null
-        Add-Log "config.json saved."
-        Refresh-Health
-    } catch {
-        Show-Error ("Save config failed: " + $_.Exception.Message)
+        device = @{
+            deviceId = $txtDeviceId.Text.Trim()
+            displayName = $txtDeviceName.Text.Trim()
+            platform = "windows"
+        }
+        server = @{
+            serverId = $txtServerId.Text.Trim()
+            displayName = $txtServerName.Text.Trim()
+            dir = $txtServerDir.Text.Trim()
+        }
+        compat = @{
+            coordinatorProtocol = 2
+            legacyGroupId = $txtInstanceId.Text.Trim()
+            legacyHostId = $txtDeviceId.Text.Trim()
+            legacyHostToken = "[redacted]"
+        }
+        listener = @{ enabled = $true; localHost = "127.0.0.1"; localPort = 25565 }
+        relay = @{ enabled = $true; publicHost = $txtPublicHost.Text.Trim(); coordinatorPort = 6121; minecraftPort = [int]$txtPublicPort.Text.Trim() }
+        backup = @{
+            profileId = "minecraft-migratable"
+            include = @("dir:world","dir:mods","dir:config","dir:defaultconfigs","dir:datapacks","dir:resourcepacks","dir:global_packs","dir:patchouli_books","file:server.properties","file:eula.txt","file:ops.json","file:whitelist.json","file:banned-ips.json","file:banned-players.json","file:server-icon.png","file:manifest.json","file:variables.txt","file:user_jvm_args.txt","file:start.bat","file:start.ps1","file:start.sh","file:run.sh","file:双击直接开服！！！.bat","file:HOW-TO-RUN.md")
+            exclude = @("dir:libraries","dir:jre","dir:logs","dir:crash-reports","dir:versions","dir:.cache","dir:cache")
+        }
     }
+}
+
+function Sync-FormConfig {
+    param([switch]$Quiet)
+    try {
+        $cfg = Build-ConfigFromForm
+        Invoke-BodyJson -Method "PUT" -Path "/v1/config" -Body $cfg | Out-Null
+        if (-not $Quiet) { Add-Log "config.json saved." }
+        Refresh-Health
+        Refresh-Identity
+        return $true
+    } catch {
+        if (-not $Quiet) { Show-Error ("Save config failed: " + $_.Exception.Message) }
+        return $false
+    }
+}
+
+function Save-Config {
+    [void](Sync-FormConfig)
 }
 
 function Test-Coordinator {
     try {
+        $txtLocalBodyStatus.Text = "检测中"
+        $txtCoordinatorCheckStatus.Text = "检测中"
+        $txtTokenValidationStatus.Text = "检测中"
+        $txtRelayCheckStatus.Text = "检测中"
+        if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法测试连接。" }
+        $txtLocalBodyStatus.Text = "就绪"
         $op = Invoke-BodyJson -Method "GET" -Path "/v1/coordinator/probe"
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         $txtErrorDetails.Text = ""
         if ($op.state -eq "success") {
-            $lblState.Text = "State: coordinator probe ok"
+            $lblState.Text = "状态：VPS Coordinator 可连接"
+            $txtCoordinatorCheckStatus.Text = "可连接"
             $txtActualRequestUrl.Text = $op.result.actualRequestUrl
             $txtProtocol.Text = [string]$op.result.capabilities.protocolVersion
             $txtCapabilities.Text = (($op.result.capabilities.capabilities) -join ", ")
             Refresh-Identity
+            Test-TokenValidation
+            Test-RelayStatus
         } else {
-            $lblState.Text = "State: coordinator probe failed"
+            $lblState.Text = "状态：VPS Coordinator 连接失败"
+            $txtCoordinatorCheckStatus.Text = "失败"
+            $txtTokenValidationStatus.Text = $txtTokenStatus.Text
+            $txtRelayCheckStatus.Text = "未检测"
             if ($op.error) {
                 $txtActualRequestUrl.Text = $op.error.details.url
                 $txtErrorDetails.Text = "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
@@ -351,6 +393,51 @@ function Test-Coordinator {
         Add-Log ("Probe operation: " + $op.operationId + " state=" + $op.state)
     } catch {
         Show-Error ("Coordinator probe failed: " + $_.Exception.Message)
+    }
+}
+
+function Test-TokenValidation {
+    if ($txtTokenStatus.Text -ne "已配置") {
+        $txtTokenStatus.Text = "未配置"
+        $txtTokenValidationStatus.Text = "未配置"
+        return
+    }
+    try {
+        $op = Invoke-BodyJson -Method "POST" -Path "/v1/init"
+        if ($op.state -eq "success") {
+            $txtTokenStatus.Text = "已验证"
+            $txtTokenValidationStatus.Text = "已验证"
+        } elseif ($op.error -and ($op.error.errorCode -eq "auth_invalid" -or $op.error.errorCode -eq "auth_missing")) {
+            $txtTokenStatus.Text = "无效"
+            $txtTokenValidationStatus.Text = "无效"
+        } else {
+            $txtTokenValidationStatus.Text = $txtTokenStatus.Text
+        }
+    } catch {
+        if ($_.Exception.Message -match "401|auth|token|令牌") {
+            $txtTokenStatus.Text = "无效"
+            $txtTokenValidationStatus.Text = "无效"
+        } else {
+            $txtTokenValidationStatus.Text = $txtTokenStatus.Text
+            Add-Log ("Token validation skipped: " + $_.Exception.Message)
+        }
+    }
+}
+
+function Test-RelayStatus {
+    try {
+        $status = Invoke-BodyJson -Method "GET" -Path "/v1/relay/status"
+        Set-RelayFields $status.relay
+        if ($status.relay.active) {
+            $txtRelayCheckStatus.Text = "已连接"
+        } elseif ($status.relay.configured) {
+            $txtRelayCheckStatus.Text = "已配置"
+        } else {
+            $txtRelayCheckStatus.Text = "未配置"
+        }
+    } catch {
+        $txtRelayCheckStatus.Text = "待初始化"
+        Add-Log ("Relay status not ready: " + $_.Exception.Message)
     }
 }
 
@@ -363,11 +450,17 @@ function Refresh-Identity {
         $txtDeviceName.Text = $id.device.displayName
         $txtServerId.Text = $id.server.serverId
         $txtServerName.Text = $id.server.displayName
-        $txtTokenStatus.Text = "not configured"
+        $txtTokenStatus.Text = "未配置"
         if ($id.compat.ownerTokenPresent -or $id.compat.legacyHostTokenPresent) {
-            $txtTokenStatus.Text = "configured (redacted)"
+            $txtTokenStatus.Text = "已配置"
         }
-        $txtAdvancedDiagnostics.Text = "usesLegacyGroupApi=$($id.compat.usesLegacyGroupApi); legacyGroupIdPresent=$($id.compat.legacyGroupIdPresent); legacyHostIdPresent=$($id.compat.legacyHostIdPresent)"
+        $debug = "usesLegacyGroupApi=$($id.compat.usesLegacyGroupApi); legacyGroupIdPresent=$($id.compat.legacyGroupIdPresent); legacyHostIdPresent=$($id.compat.legacyHostIdPresent)"
+        Add-Log $debug
+        if ($id.compat.usesLegacyGroupApi -and (-not $id.compat.legacyGroupIdPresent -or -not $id.compat.legacyHostIdPresent)) {
+            $txtAdvancedDiagnostics.Text = "检测到旧版组/主机协议，但当前配置缺少 groupId/hostId。程序将自动从实例 ID / 设备 ID 生成兼容字段。"
+        } else {
+            $txtAdvancedDiagnostics.Text = "兼容字段已就绪。"
+        }
         Add-Log "Private instance identity refreshed."
     } catch {
         Add-Log ("Identity not loaded yet: " + $_.Exception.Message)
@@ -376,17 +469,32 @@ function Refresh-Identity {
 
 function Run-Init {
     try {
+        if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法初始化。" }
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/init"
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
             $lblState.Text = "State: private instance ready"
+            $txtTokenStatus.Text = "已验证"
+            $txtTokenValidationStatus.Text = "已验证"
         } else {
             $lblState.Text = "State: init failed"
+            if ($op.error -and $op.error.errorCode -eq "auth_invalid") {
+                $txtTokenStatus.Text = "无效"
+                $txtTokenValidationStatus.Text = "无效"
+            } elseif ($op.error -and $op.error.errorCode -eq "identity_incomplete") {
+                $txtTokenStatus.Text = "未配置"
+                $txtTokenValidationStatus.Text = "未配置"
+            }
         }
         Add-Log ("Init operation: " + $op.operationId + " state=" + $op.state)
     } catch {
         Show-Error ("Init failed: " + $_.Exception.Message)
     }
+}
+
+function Register-Identity {
+    Add-Log "正在保存配置并尝试生成/注册身份。"
+    Run-Init
 }
 
 function Save-ListenerConfig {
@@ -473,8 +581,10 @@ function Configure-Relay {
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
             Set-RelayFields $op.result.relay
+            $txtRelayCheckStatus.Text = "已配置"
             Add-Log "Relay configured through body API."
         } elseif ($op.error) {
+            $txtRelayCheckStatus.Text = "失败"
             $txtRelayError.Text = "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
         }
     } catch {
@@ -486,6 +596,13 @@ function Refresh-RelayStatus {
     try {
         $status = Invoke-BodyJson -Method "GET" -Path "/v1/relay/status"
         Set-RelayFields $status.relay
+        if ($status.relay.active) {
+            $txtRelayCheckStatus.Text = "已连接"
+        } elseif ($status.relay.configured) {
+            $txtRelayCheckStatus.Text = "已配置"
+        } else {
+            $txtRelayCheckStatus.Text = "未配置"
+        }
         Add-Log "Relay status refreshed."
     } catch {
         Show-Error ("Relay status failed: " + $_.Exception.Message)
@@ -634,7 +751,7 @@ function Add-Button {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH v0.5 Minimal Core"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(920, 1240)
+$form.Size = New-Object System.Drawing.Size(920, 1360)
 $form.MinimumSize = New-Object System.Drawing.Size(880, 900)
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
 
@@ -683,30 +800,41 @@ $txtServerName = Add-TextBox 170 272 250
 $txtServerName.Text = "Minecraft 服务端"
 Add-Label "访问令牌状态" 450 274 | Out-Null
 $txtTokenStatus = Add-TextBox 560 272 260 $true
+$txtTokenStatus.Text = "未配置"
 Add-Label "服务端目录" 24 308 | Out-Null
 $txtServerDir = Add-TextBox 170 306 500
 Add-Button "Choose dir" 680 303 { Choose-ServerDir } | Out-Null
 
-Add-Label "实际请求 URL" 24 342 | Out-Null
-$txtActualRequestUrl = Add-TextBox 170 340 650 $true
-Add-Label "协议版本" 24 376 | Out-Null
-$txtProtocol = Add-TextBox 170 374 120 $true
-Add-Label "能力" 310 376 | Out-Null
-$txtCapabilities = Add-TextBox 420 374 400 $true
-Add-Label "错误详情" 24 410 | Out-Null
-$txtErrorDetails = Add-TextBox 170 408 650 $true
-$txtServerId = Add-TextBox 24 442 120 $true
+Add-Label "本地 Body API" 24 342 | Out-Null
+$txtLocalBodyStatus = Add-TextBox 170 340 170 $true
+Add-Label "VPS Coordinator" 370 342 | Out-Null
+$txtCoordinatorCheckStatus = Add-TextBox 520 340 140 $true
+Add-Label "访问令牌验证" 24 376 | Out-Null
+$txtTokenValidationStatus = Add-TextBox 170 374 170 $true
+$txtTokenValidationStatus.Text = "未配置"
+Add-Label "Relay 状态" 370 376 | Out-Null
+$txtRelayCheckStatus = Add-TextBox 520 374 140 $true
+Add-Label "实际请求 URL" 24 410 | Out-Null
+$txtActualRequestUrl = Add-TextBox 170 408 650 $true
+Add-Label "协议版本" 24 444 | Out-Null
+$txtProtocol = Add-TextBox 170 442 120 $true
+Add-Label "能力" 310 444 | Out-Null
+$txtCapabilities = Add-TextBox 420 442 400 $true
+Add-Label "诊断提示" 24 478 | Out-Null
+$txtErrorDetails = Add-TextBox 170 476 650 $true
+$txtServerId = Add-TextBox 24 510 120 $true
 $txtServerId.Visible = $false
-$txtAdvancedDiagnostics = Add-TextBox 170 442 650 $true
+$txtAdvancedDiagnostics = Add-TextBox 170 510 650 $true
 
-Add-Button "Refresh health" 170 450 { Refresh-Health; Refresh-Identity } | Out-Null
-Add-Button "Load config" 330 450 { Load-Config; Refresh-Identity } | Out-Null
-Add-Button "Save config" 490 450 { Save-Config } | Out-Null
-Add-Button "Test connection" 170 488 { Test-Coordinator } | Out-Null
-Add-Button "Initialize" 330 488 { Run-Init } | Out-Null
+Add-Button "Refresh health" 170 548 { Refresh-Health; Refresh-Identity } | Out-Null
+Add-Button "Load config" 330 548 { Load-Config; Refresh-Identity } | Out-Null
+Add-Button "Save config" 490 548 { Save-Config } | Out-Null
+Add-Button "Test connection" 170 586 { Test-Coordinator } | Out-Null
+Add-Button "Initialize" 330 586 { Run-Init } | Out-Null
+Add-Button "生成/注册身份" 490 586 { Register-Identity } | Out-Null
 
 $txtOperation = New-Object System.Windows.Forms.TextBox
-$txtOperation.Location = New-Object System.Drawing.Point(24, 528)
+$txtOperation.Location = New-Object System.Drawing.Point(24, 626)
 $txtOperation.Size = New-Object System.Drawing.Size(840, 70)
 $txtOperation.Multiline = $true
 $txtOperation.ScrollBars = "Vertical"
@@ -715,7 +843,7 @@ $txtOperation.Font = New-Object System.Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtOperation)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(24, 612)
+$txtLog.Location = New-Object System.Drawing.Point(24, 710)
 $txtLog.Size = New-Object System.Drawing.Size(840, 48)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
@@ -725,7 +853,7 @@ $form.Controls.Add($txtLog)
 
 $grpListenerRelay = New-Object System.Windows.Forms.GroupBox
 $grpListenerRelay.Text = "监听 / VPS 中转"
-$grpListenerRelay.Location = New-Object System.Drawing.Point(24, 674)
+$grpListenerRelay.Location = New-Object System.Drawing.Point(24, 772)
 $grpListenerRelay.Size = New-Object System.Drawing.Size(840, 236)
 $form.Controls.Add($grpListenerRelay)
 
@@ -799,7 +927,7 @@ $txtRelayError = Add-GroupTextBox 420 190 390 $true
 
 $grpBackup = New-Object System.Windows.Forms.GroupBox
 $grpBackup.Text = "备份 / 快照"
-$grpBackup.Location = New-Object System.Drawing.Point(24, 924)
+$grpBackup.Location = New-Object System.Drawing.Point(24, 1022)
 $grpBackup.Size = New-Object System.Drawing.Size(840, 230)
 $form.Controls.Add($grpBackup)
 

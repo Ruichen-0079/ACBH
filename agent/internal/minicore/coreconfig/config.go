@@ -1,6 +1,8 @@
 package coreconfig
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -240,12 +243,16 @@ func (s Store) loadConfigJSON() (Config, bool, error) {
 	if err != nil {
 		return Config{}, false, err
 	}
-	cfg, err := decodeConfig(data, s.Path)
+	cfg, aliasMigrated, err := decodeConfig(data, s.Path)
 	if err != nil {
 		return Config{}, false, err
 	}
-	migrated := needsV2Migration(cfg)
-	cfg = applyDefaults(cfg)
+	migrated := aliasMigrated || needsV2Migration(cfg)
+	normalized := applyDefaults(cfg)
+	if !reflect.DeepEqual(normalized, cfg) {
+		migrated = true
+	}
+	cfg = normalized
 	if err := validate(cfg, s.Path); err != nil {
 		return Config{}, false, err
 	}
@@ -269,22 +276,89 @@ func (s Store) loadConfigJSON() (Config, bool, error) {
 	return cfg, migrated, nil
 }
 
-func decodeConfig(data []byte, path string) (Config, error) {
+func decodeConfig(data []byte, path string) (Config, bool, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		line, col := jsonLineColumn(data, err)
-		return Config{}, coreerrors.New(coreerrors.ConfigParseError, "config.json is not valid JSON", coreerrors.Details{ConfigPath: path, Path: path, Line: line, Column: col}, "Fix JSON syntax. Use \"coordinatorUrl\": \"http://host:6121\", not YAML-style text.")
+		return Config{}, false, coreerrors.New(coreerrors.ConfigParseError, "config.json is not valid JSON", coreerrors.Details{ConfigPath: path, Path: path, Line: line, Column: col}, "Fix JSON syntax. Use \"coordinatorUrl\": \"http://host:6121\", not YAML-style text.")
 	}
 	for key := range raw {
 		if strings.Contains(key, ":") {
-			return Config{}, coreerrors.New(coreerrors.ConfigInvalid, "config contains YAML-style key "+key, coreerrors.Details{ConfigPath: path}, "Use JSON keys such as \"coordinatorUrl\": \"http://host:6121\".")
+			return Config{}, false, coreerrors.New(coreerrors.ConfigInvalid, "config contains YAML-style key "+key, coreerrors.Details{ConfigPath: path}, "Use JSON keys such as \"coordinatorUrl\": \"http://host:6121\".")
 		}
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, err
+		return Config{}, false, err
 	}
-	return cfg, nil
+	migrated := migrateConfigAliases(raw, &cfg)
+	return cfg, migrated, nil
+}
+
+func migrateConfigAliases(raw map[string]json.RawMessage, cfg *Config) bool {
+	migrated := false
+	coordinatorURL := firstJSONStrings(raw, "coordinatorUrl", "vpsUrl", "vpsAddress", "publicCoordinatorUrl", "coordinator", "coordinatorURL", "relayCoordinatorUrl")
+	if cfg.CoordinatorURL == "" && coordinatorURL != "" {
+		cfg.CoordinatorURL = coordinatorURL
+		migrated = true
+	}
+	token := firstJSONStrings(raw, "accessToken", "token", "authToken", "relayToken", "coordinatorToken", "hostToken")
+	if token != "" {
+		if cfg.Instance.OwnerToken == "" {
+			cfg.Instance.OwnerToken = token
+			migrated = true
+		}
+		if cfg.Compat.LegacyHostToken == "" {
+			cfg.Compat.LegacyHostToken = token
+			migrated = true
+		}
+	}
+	if value := firstJSONStrings(raw, "privateInstanceId", "instanceId"); cfg.Instance.InstanceID == "" && value != "" {
+		cfg.Instance.InstanceID = value
+		migrated = true
+	}
+	if value := firstJSONStrings(raw, "privateInstanceName", "instanceName"); cfg.Instance.DisplayName == "" && value != "" {
+		cfg.Instance.DisplayName = value
+		migrated = true
+	}
+	if value := firstJSONStrings(raw, "deviceId"); cfg.Device.DeviceID == "" && value != "" {
+		cfg.Device.DeviceID = value
+		migrated = true
+	}
+	if value := firstJSONStrings(raw, "deviceName"); cfg.Device.DisplayName == "" && value != "" {
+		cfg.Device.DisplayName = value
+		migrated = true
+	}
+	if value := firstJSONStrings(raw, "groupId"); cfg.Compat.LegacyGroupID == "" && value != "" {
+		cfg.Compat.LegacyGroupID = value
+		migrated = true
+	}
+	if value := firstJSONStrings(raw, "memberId"); cfg.Compat.LegacyMemberID == "" && value != "" {
+		cfg.Compat.LegacyMemberID = value
+		migrated = true
+	}
+	if value := firstJSONStrings(raw, "hostId"); cfg.Compat.LegacyHostID == "" && value != "" {
+		cfg.Compat.LegacyHostID = value
+		migrated = true
+	}
+	if cfg.Identity.GroupID != "" || cfg.Identity.HostID != "" || cfg.Identity.HostToken != "" {
+		migrated = true
+	}
+	return migrated
+}
+
+func firstJSONStrings(raw map[string]json.RawMessage, keys ...string) string {
+	for _, key := range keys {
+		data, ok := raw[key]
+		if !ok {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(data, &value); err == nil && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func applyDefaults(cfg Config) Config {
@@ -311,14 +385,20 @@ func applyDefaults(cfg Config) Config {
 	if cfg.Compat.CoordinatorProtocol == 0 {
 		cfg.Compat.CoordinatorProtocol = defaults.Compat.CoordinatorProtocol
 	}
-	if cfg.Instance.InstanceID == "" {
-		cfg.Instance.InstanceID = derivedID("inst", cfg.Compat.LegacyGroupID)
+	if shouldGenerateInstanceID(cfg.Instance.InstanceID, cfg.Device.DeviceID) {
+		cfg.Instance.InstanceID = randomID("acbh_instance")
 	}
-	if cfg.Device.DeviceID == "" {
-		cfg.Device.DeviceID = derivedID("dev", cfg.Compat.LegacyHostID)
+	if shouldGenerateDeviceID(cfg.Device.DeviceID, cfg.Instance.InstanceID) {
+		cfg.Device.DeviceID = randomID("acbh_device")
 	}
 	if cfg.Server.ServerID == "" {
-		cfg.Server.ServerID = derivedID("srv", firstNonEmpty(cfg.Server.Dir, cfg.Compat.LegacyGroupID))
+		cfg.Server.ServerID = derivedID("srv", firstNonEmpty(cfg.Server.Dir, cfg.Server.DisplayName, cfg.Compat.LegacyGroupID))
+	}
+	if cfg.Compat.LegacyGroupID == "" {
+		cfg.Compat.LegacyGroupID = cfg.Instance.InstanceID
+	}
+	if cfg.Compat.LegacyHostID == "" {
+		cfg.Compat.LegacyHostID = cfg.Device.DeviceID
 	}
 	if cfg.Listener.LocalHost == "" {
 		cfg.Listener.LocalHost = defaults.Listener.LocalHost
@@ -596,6 +676,46 @@ func derivedID(prefix string, seed string) string {
 		return value
 	}
 	return prefix + "_" + value
+}
+
+func shouldGenerateInstanceID(instanceID string, deviceID string) bool {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return true
+	}
+	return isBadGeneratedID(instanceID) || (deviceID != "" && instanceID == strings.TrimSpace(deviceID))
+}
+
+func shouldGenerateDeviceID(deviceID string, instanceID string) bool {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return true
+	}
+	return isBadGeneratedID(deviceID) || (instanceID != "" && deviceID == strings.TrimSpace(instanceID))
+}
+
+func isBadGeneratedID(value string) bool {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "acbh_instance_") || strings.HasPrefix(value, "acbh_device_") {
+		return false
+	}
+	if strings.HasPrefix(value, "inst_") || strings.HasPrefix(value, "dev_") {
+		value = strings.TrimPrefix(strings.TrimPrefix(value, "inst_"), "dev_")
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && r != 'T' && r != 'Z' {
+			return false
+		}
+	}
+	return strings.Contains(value, "T") && strings.HasSuffix(value, "Z")
+}
+
+func randomID(prefix string) string {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err == nil {
+		return prefix + "_" + hex.EncodeToString(raw[:])
+	}
+	return prefix + "_" + time.Now().UTC().Format("20060102T150405.000000000Z")
 }
 
 func redactToken(token string) string {

@@ -1,6 +1,6 @@
 param(
-    [string]$Version = "v0.5.0-minimal-core-alpha1",
-    [string]$OutputDir = "dist/v0.5.0-minimal-core-alpha1",
+    [string]$Version = "v0.5.1-public-relay-hotfix",
+    [string]$OutputDir = "dist/v0.5.1-public-relay-hotfix",
     [switch]$AllowDirty,
     [switch]$DryRun
 )
@@ -130,6 +130,7 @@ Assert-CleanWorktree
 $releaseFiles = @(
     "acbh-agent-windows-amd64.exe",
     "acbh-desktop-windows-amd64.exe",
+    "scripts/acbh-minimal-core-gui.ps1",
     "release-notes.md",
     "SHA256SUMS"
 )
@@ -159,7 +160,13 @@ try {
     $env:GOOS = "windows"
     $env:GOARCH = "amd64"
     go build -trimpath -ldflags="-s -w -X main.version=$Version" -o (Join-Path $resolvedOutput "acbh-agent-windows-amd64.exe") .
+    if ($LASTEXITCODE -ne 0) {
+        throw "go build acbh-agent-windows-amd64.exe failed with exit code $LASTEXITCODE"
+    }
     go build -trimpath -ldflags="-s -w -X main.version=$Version" -o (Join-Path $resolvedOutput "acbh-desktop-windows-amd64.exe") .\cmd\acbh-desktop
+    if ($LASTEXITCODE -ne 0) {
+        throw "go build acbh-desktop-windows-amd64.exe failed with exit code $LASTEXITCODE"
+    }
 } finally {
     Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
     Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue
@@ -167,6 +174,8 @@ try {
 }
 
 Copy-ReleaseDocs -RepoRoot $repoRoot -DocsDir (Join-Path $resolvedOutput "docs")
+New-Item -ItemType Directory -Force -Path (Join-Path $resolvedOutput "scripts") | Out-Null
+Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/acbh-minimal-core-gui.ps1") -Destination (Join-Path $resolvedOutput "scripts/acbh-minimal-core-gui.ps1") -Force
 Write-ReleaseNotesTemplate -Path (Join-Path $resolvedOutput "release-notes.md") -Version $Version
 Write-Sha256Sums -Directory $resolvedOutput
 

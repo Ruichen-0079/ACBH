@@ -256,6 +256,96 @@ func TestBodyConfigPutDoesNotSaveRedactedPlaceholderWithoutExistingConfig(t *tes
 	}
 }
 
+func TestBodyConfigPutSavesGUIVPSFieldAsCoordinatorURL(t *testing.T) {
+	srv := New("127.0.0.1:6120", t.TempDir())
+	cfg := coreconfig.DefaultConfig()
+	cfg.CoordinatorURL = "http://121.40.101.224:6121"
+	cfg.Instance.DisplayName = "私人实例"
+	cfg.Device.DisplayName = "MSI"
+	cfg.Server.Dir = `C:\server`
+	data, _ := json.Marshal(cfg)
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(data)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /v1/config status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	raw, err := os.ReadFile(srv.ConfigStore.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"coordinatorUrl": "http://121.40.101.224:6121"`) {
+		t.Fatalf("config.json missing coordinatorUrl: %s", string(raw))
+	}
+}
+
+func TestBodyInitAfterGUISaveDoesNotFailMissingCoordinatorURL(t *testing.T) {
+	coord := mockCoordinator(t)
+	defer coord.Close()
+	targetURL, err := url.Parse(coord.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:6120", t.TempDir())
+	srv.HTTPClient = &http.Client{Transport: rewriteTransport{
+		fromHost: "public.test:6121",
+		toURL:    targetURL,
+		base:     http.DefaultTransport,
+	}}
+	cfg := coreconfig.DefaultConfig()
+	cfg.Mode = "remote-public"
+	cfg.CoordinatorURL = "http://public.test:6121"
+	cfg.Instance.DisplayName = "私人实例"
+	cfg.Device.DisplayName = "MSI"
+	cfg.Server.Dir = `C:\server`
+	data, _ := json.Marshal(cfg)
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(data)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /v1/config status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/init", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("init status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var op operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.ErrorCode == coreerrors.ConfigInvalid || strings.Contains(rec.Body.String(), "coordinatorUrl is required") {
+		t.Fatalf("init used stale/missing coordinator config: %#v body=%s", op, rec.Body.String())
+	}
+	if op.ErrorCode != coreerrors.IdentityIncomplete {
+		t.Fatalf("init errorCode = %q, want recoverable identity_incomplete", op.ErrorCode)
+	}
+	if !strings.Contains(rec.Body.String(), "生成/注册身份") {
+		t.Fatalf("identity guidance missing from init response: %s", rec.Body.String())
+	}
+}
+
+func TestBodyInitMissingCoordinatorMessageIsFormattedAndRedacted(t *testing.T) {
+	srv := New("127.0.0.1:6120", t.TempDir())
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/init", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("init status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var op operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.ErrorCode != coreerrors.ConfigInvalid {
+		t.Fatalf("init errorCode = %q, want config_invalid", op.ErrorCode)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `\nhttp://`) || strings.Contains(body, "requiredC:") || strings.Contains(strings.ToLower(body), "secret") {
+		t.Fatalf("bad missing coordinator formatting/redaction: %s", body)
+	}
+}
+
 func TestBodyProbeAndInit(t *testing.T) {
 	coord := mockCoordinator(t)
 	defer coord.Close()

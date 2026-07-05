@@ -30,7 +30,12 @@ func Adapter(cfg coreconfig.Config) (CoordinatorIdentity, *coreerrors.Error) {
 		HostToken:  strings.TrimSpace(cfg.Compat.LegacyHostToken),
 	}
 	if out.GroupID == "" || out.HostID == "" || out.HostToken == "" {
-		return out, coreerrors.New(coreerrors.IdentityIncomplete, "private instance identity is incomplete", coreerrors.Details{CoordinatorURL: cfg.CoordinatorURL}, "Restore identity from migrated config.json or reinitialize this private instance.")
+		return out, coreerrors.New(
+			coreerrors.IdentityIncomplete,
+			"访问令牌或私有实例身份尚未配置完整。",
+			coreerrors.Details{CoordinatorURL: cfg.CoordinatorURL},
+			"请点击「生成/注册身份」，或导入包含访问令牌的旧配置。",
+		)
 	}
 	return out, nil
 }

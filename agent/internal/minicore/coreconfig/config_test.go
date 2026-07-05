@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
@@ -60,6 +61,135 @@ func TestLoadOrCreateWritesDefaultConfigWhenMissing(t *testing.T) {
 	}
 	if again.Listener.LocalPort != 25566 {
 		t.Fatalf("LoadOrCreate() overwrote existing listener: %#v", again.Listener)
+	}
+}
+
+func TestConfigAliasesMigrateToCanonicalSchema(t *testing.T) {
+	store := NewStore(t.TempDir())
+	raw := []byte(`{
+  "vpsUrl": "http://121.40.101.224:6121",
+  "privateInstanceId": "abc",
+  "privateInstanceName": "私人实例",
+  "deviceName": "MSI",
+  "authToken": "secret"
+}`)
+	if err := os.WriteFile(store.Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.CoordinatorURL != "http://121.40.101.224:6121" {
+		t.Fatalf("coordinatorUrl = %q", got.CoordinatorURL)
+	}
+	if got.Instance.InstanceID != "abc" || got.Instance.DisplayName != "私人实例" {
+		t.Fatalf("instance = %#v", got.Instance)
+	}
+	if got.Device.DisplayName != "MSI" || got.Device.DeviceID == "" {
+		t.Fatalf("device = %#v", got.Device)
+	}
+	if got.Instance.OwnerToken != "secret" || got.Compat.LegacyHostToken != "secret" {
+		t.Fatalf("tokens were not migrated: instance=%#v compat=%#v", got.Instance, got.Compat)
+	}
+	normalized, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(normalized) || !containsStringInBytes(normalized, `"coordinatorUrl": "http://121.40.101.224:6121"`) {
+		t.Fatalf("normalized config not written: %s", string(normalized))
+	}
+	if containsStringInBytes(normalized, `"vpsUrl"`) || containsStringInBytes(normalized, `"authToken"`) {
+		t.Fatalf("legacy aliases remained in normalized config: %s", string(normalized))
+	}
+}
+
+func TestGeneratedDeviceIDIsSavedAndStable(t *testing.T) {
+	store := NewStore(t.TempDir())
+	raw := []byte(`{
+  "schemaVersion": 2,
+  "mode": "remote-public",
+  "coordinatorUrl": "http://121.40.101.224:6121",
+  "instance": {"displayName": "私人实例"},
+  "device": {"displayName": "MSI", "platform": "windows"},
+  "server": {"displayName": "Minecraft 服务端"},
+  "compat": {"coordinatorProtocol": 2},
+  "listener": {"enabled": true, "localHost": "127.0.0.1", "localPort": 25565},
+  "relay": {"enabled": true, "coordinatorPort": 6121, "minecraftPort": 25565},
+  "backup": {"profileId": "minecraft-migratable"}
+}`)
+	if err := os.WriteFile(store.Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("first Load() error = %v", loadErr)
+	}
+	if first.Device.DeviceID == "" {
+		t.Fatal("DeviceID was not generated")
+	}
+	if first.Instance.InstanceID == first.Device.DeviceID {
+		t.Fatalf("instanceId and deviceId should be distinct, got %q", first.Instance.InstanceID)
+	}
+	if !strings.HasPrefix(first.Instance.InstanceID, "acbh_instance_") || !strings.HasPrefix(first.Device.DeviceID, "acbh_device_") {
+		t.Fatalf("generated IDs should use acbh prefixes: instance=%q device=%q", first.Instance.InstanceID, first.Device.DeviceID)
+	}
+	if first.Compat.LegacyGroupID != first.Instance.InstanceID || first.Compat.LegacyHostID != first.Device.DeviceID {
+		t.Fatalf("legacy compatibility IDs not bridged: instance=%q group=%q device=%q host=%q", first.Instance.InstanceID, first.Compat.LegacyGroupID, first.Device.DeviceID, first.Compat.LegacyHostID)
+	}
+	second, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("second Load() error = %v", loadErr)
+	}
+	if second.Device.DeviceID != first.Device.DeviceID || second.Instance.InstanceID != first.Instance.InstanceID {
+		t.Fatalf("IDs changed across loads: instance %q -> %q device %q -> %q", first.Instance.InstanceID, second.Instance.InstanceID, first.Device.DeviceID, second.Device.DeviceID)
+	}
+}
+
+func TestTimestampLikeDuplicateIDsAreRegeneratedDistinctly(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := DefaultConfig()
+	cfg.CoordinatorURL = "http://121.40.101.224:6121"
+	cfg.Instance.InstanceID = "60705T134739Z"
+	cfg.Device.DeviceID = "60705T134739Z"
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.Instance.InstanceID == got.Device.DeviceID {
+		t.Fatalf("duplicate IDs survived normalization: %#v %#v", got.Instance, got.Device)
+	}
+	if !strings.HasPrefix(got.Instance.InstanceID, "acbh_instance_") || !strings.HasPrefix(got.Device.DeviceID, "acbh_device_") {
+		t.Fatalf("bad regenerated IDs: instance=%q device=%q", got.Instance.InstanceID, got.Device.DeviceID)
+	}
+}
+
+func TestConfigSaveLoadPreservesChineseUTF8(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := DefaultConfig()
+	cfg.CoordinatorURL = "http://121.40.101.224:6121"
+	cfg.Instance.DisplayName = "私人 ACBH 实例"
+	cfg.Device.DisplayName = "星星"
+	cfg.Server.DisplayName = "Minecraft 服务端"
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.Instance.DisplayName != "私人 ACBH 实例" || got.Device.DisplayName != "星星" || got.Server.DisplayName != "Minecraft 服务端" {
+		t.Fatalf("Chinese text changed after save/load: instance=%q device=%q server=%q", got.Instance.DisplayName, got.Device.DisplayName, got.Server.DisplayName)
+	}
+	raw, err := os.ReadFile(store.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "??") {
+		t.Fatalf("config contains replacement question marks: %s", string(raw))
 	}
 }
 
@@ -368,4 +498,8 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func containsStringInBytes(data []byte, want string) bool {
+	return strings.Contains(string(data), want)
 }

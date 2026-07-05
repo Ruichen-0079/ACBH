@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	Version     = "0.5.0-minimal"
+	Version     = "v0.5.1-public-relay-hotfix"
 	DefaultAddr = "127.0.0.1:6120"
 	ServiceName = "acbh-body"
 )
@@ -631,6 +631,8 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	s.Operations.Update(op)
 	coordIdentity, identityErr := identity.Adapter(cfg)
 	if identityErr != nil {
+		identityErr.Details.ConfigPath = s.ConfigStore.Path
+		identityErr.Details.CoordinatorURL = cfg.CoordinatorURL
 		writeJSON(w, statusForCoreError(identityErr), s.Operations.Fail(op, identityErr))
 		return
 	}
@@ -710,7 +712,12 @@ func (s *Server) probe(ctx context.Context, op *operations.Operation, createConf
 		return coordinatorclient.ProbeResult{}, cfgErr
 	}
 	if strings.TrimSpace(cfg.CoordinatorURL) == "" {
-		return coordinatorclient.ProbeResult{}, coreerrors.New(coreerrors.ConfigInvalid, "coordinatorUrl is required", coreerrors.Details{ConfigPath: s.ConfigStore.Path}, "Set coordinatorUrl to your VPS URL.")
+		return coordinatorclient.ProbeResult{}, coreerrors.New(
+			coreerrors.ConfigInvalid,
+			"缺少 VPS 协调器地址 coordinatorUrl。",
+			coreerrors.Details{ConfigPath: s.ConfigStore.Path},
+			"请在「VPS 地址」中填写，例如：\nhttp://<VPS公网IP>:6121\n然后点击「保存配置」或「初始化」。",
+		)
 	}
 	client, clientErr := coordinatorclient.NewWithHTTPClient(cfg.CoordinatorURL, s.HTTPClient)
 	if clientErr != nil {
