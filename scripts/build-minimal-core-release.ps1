@@ -70,6 +70,14 @@ function Copy-ReleaseDocs {
     }
 }
 
+function Copy-MinimalGuiScript {
+    param([string]$RepoRoot, [string]$ScriptsDir)
+    $script = "scripts/acbh-minimal-core-gui.ps1"
+    Assert-SensitivePathsExcluded -RelativePaths @($script)
+    New-Item -ItemType Directory -Force -Path $ScriptsDir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $RepoRoot $script) -Destination (Join-Path $ScriptsDir (Split-Path $script -Leaf)) -Force
+}
+
 function Write-ReleaseNotesTemplate {
     param([string]$Path, [string]$Version)
     $text = @"
@@ -105,10 +113,11 @@ Minimal-core alpha release for Windows.
 function Write-Sha256Sums {
     param([string]$Directory)
     $sumPath = Join-Path $Directory "SHA256SUMS"
-    $files = Get-ChildItem -LiteralPath $Directory -File | Where-Object { $_.Name -ne "SHA256SUMS" } | Sort-Object Name
+    $files = Get-ChildItem -LiteralPath $Directory -File -Recurse | Where-Object { $_.FullName -ne $sumPath } | Sort-Object FullName
     $lines = foreach ($file in $files) {
         $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-        "$hash  $($file.Name)"
+        $relative = [System.IO.Path]::GetRelativePath($Directory, $file.FullName).Replace("\", "/")
+        "$hash  $relative"
     }
     Set-Content -LiteralPath $sumPath -Value $lines -Encoding ASCII
 }
@@ -130,6 +139,7 @@ Assert-CleanWorktree
 $releaseFiles = @(
     "acbh-agent-windows-amd64.exe",
     "acbh-desktop-windows-amd64.exe",
+    "scripts/acbh-minimal-core-gui.ps1",
     "release-notes.md",
     "SHA256SUMS"
 )
@@ -167,6 +177,7 @@ try {
 }
 
 Copy-ReleaseDocs -RepoRoot $repoRoot -DocsDir (Join-Path $resolvedOutput "docs")
+Copy-MinimalGuiScript -RepoRoot $repoRoot -ScriptsDir (Join-Path $resolvedOutput "scripts")
 Write-ReleaseNotesTemplate -Path (Join-Path $resolvedOutput "release-notes.md") -Version $Version
 Write-Sha256Sums -Directory $resolvedOutput
 
