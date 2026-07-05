@@ -20,9 +20,9 @@ if ($SelfTest) {
         "txtTunnelConnected",
         "txtPublicListenerActive",
         "txtActiveConnections",
-        "Start relay tunnel",
-        "Stop relay tunnel",
-        "Refresh relay status",
+        "启动公网中转",
+        "停止公网中转",
+        "刷新中转状态",
         "Analyze-Backup",
         "Upload-Backup",
         "Wait-BodyOperation",
@@ -46,16 +46,17 @@ if ($SelfTest) {
         "监听 / VPS 中转",
         "VPS 中转",
         "访问令牌状态",
-        "Refresh health",
-        "Load config",
-        "Save config",
-        "Test connection",
-        "Initialize",
-        "Analyze backup",
-        "Upload backup",
-        "List snapshots",
-        "Download latest",
-        "Download selected",
+        "使用方式",
+        "刷新状态",
+        "加载配置",
+        "保存配置",
+        "测试连接",
+        "初始化",
+        "分析备份",
+        "上传备份",
+        "列出快照",
+        "下载最新",
+        "下载所选",
         '$script:BodyUrl',
         '"/v1/operations/"'
     )
@@ -125,17 +126,17 @@ $script:StartupErrors = New-Object System.Collections.Generic.List[string]
 function Format-ExceptionDetails {
     param(
         [System.Management.Automation.ErrorRecord]$ErrorRecord,
-        [string]$Context = "Operation failed"
+        [string]$Context = "操作失败"
     )
-    $line = "unknown"
-    $function = "unknown"
+    $line = "未知"
+    $function = "未知"
     if ($ErrorRecord -and $ErrorRecord.InvocationInfo) {
         if ($ErrorRecord.InvocationInfo.ScriptLineNumber) { $line = [string]$ErrorRecord.InvocationInfo.ScriptLineNumber }
         if ($ErrorRecord.InvocationInfo.MyCommand -and $ErrorRecord.InvocationInfo.MyCommand.Name) {
             $function = $ErrorRecord.InvocationInfo.MyCommand.Name
         }
     }
-    $message = "unknown error"
+    $message = "未知错误"
     if ($ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
         $message = $ErrorRecord.Exception.Message
     }
@@ -148,10 +149,10 @@ function Format-ExceptionDetails {
     }
     return @"
 $Context
-line: $line
-function: $function
-message: $message
-stack:
+脚本行号: $line
+函数: $function
+异常信息: $message
+调用栈:
 $stack
 "@
 }
@@ -196,7 +197,7 @@ function Show-Error {
         $txtErrorDetails.Text = $safe
     }
     if ($null -ne $lblState) {
-        $lblState.Text = "State: needs attention"
+        $lblState.Text = "状态：需要处理"
     }
     [System.Windows.Forms.MessageBox]::Show($safe, "ACBH", "OK", "Error") | Out-Null
 }
@@ -220,7 +221,7 @@ function Test-BodyPort {
 function Start-Body {
     if (Test-BodyPort) { return }
     if (-not (Test-Path $AgentPath)) {
-        throw "Body API 未连接；可启动 body runtime，但找不到 ACBH Agent: $AgentPath"
+        throw "Body API 未连接；可启动本地 Body 运行时，但找不到 ACBH Agent 程序：$AgentPath"
     }
     New-Item -ItemType Directory -Force -Path $AppDataDir | Out-Null
     $args = @("body", "serve", "--listen", $BodyListen, "--app-data-dir", $AppDataDir)
@@ -233,9 +234,9 @@ function Start-Body {
     $script:BodyProcess = [System.Diagnostics.Process]::Start($psi)
     Start-Sleep -Milliseconds 600
     if (-not (Test-BodyPort)) {
-        throw "Body API 未连接；可启动 body runtime，但未能在 $BodyListen 监听。请检查日志或手动运行 acbh-agent-windows-amd64.exe body serve。"
+        throw "Body API 未连接；可启动本地 Body 运行时，但未能在 $BodyListen 监听。请检查日志或手动运行 acbh-agent-windows-amd64.exe body serve。"
     }
-    Add-Log "Body API started at $script:BodyUrl"
+    Add-Log "Body API 已启动：$script:BodyUrl"
 }
 
 function Invoke-BodyJson {
@@ -269,14 +270,14 @@ function Refresh-Health {
         if ($health.coordinatorUrl) { Set-ControlText $txtCoordinator $health.coordinatorUrl }
         if ($health.mode) { $cmbMode.SelectedItem = $health.mode }
         if ($health.configError) {
-            $lblState.Text = "State: config needs attention"
-            Add-Log ("Config error: " + $health.configError.errorCode + " " + $health.configError.message)
+            $lblState.Text = "状态：配置需要处理"
+            Add-Log ("配置错误：" + $health.configError.errorCode + " " + $health.configError.message)
         } else {
-            $lblState.Text = "State: body ready"
-            Add-Log "Body health ok."
+            $lblState.Text = "状态：Body API 就绪"
+            Add-Log "Body API 健康检查通过。"
         }
     } catch {
-        Show-Error ("Health failed: " + $_.Exception.Message)
+        Show-Error ("健康检查失败：" + $_.Exception.Message)
     }
 }
 
@@ -298,9 +299,9 @@ function Load-Config {
             Set-ControlText $txtServerDir $cfg.server.dir
             Set-ControlText $txtServerId $cfg.server.serverId
         }
-        Set-ControlText $txtTokenStatus "not configured"
+        Set-ControlText $txtTokenStatus "未配置"
         if (($cfg.instance -and $cfg.instance.ownerToken -eq "[redacted]") -or ($cfg.compat -and $cfg.compat.legacyHostToken -eq "[redacted]")) {
-            Set-ControlText $txtTokenStatus "configured (redacted)"
+            Set-ControlText $txtTokenStatus "已配置（已隐藏）"
         }
         if ($cfg.listener) {
             Set-ControlText $txtListenerHost $cfg.listener.localHost
@@ -310,9 +311,9 @@ function Load-Config {
             Set-ControlText $txtPublicHost $cfg.relay.publicHost
             Set-ControlText $txtPublicPort $cfg.relay.minecraftPort
         }
-        Add-Log "config.json loaded."
+        Add-Log "config.json 已加载。"
     } catch {
-        Add-Log ("Config not loaded yet: " + $_.Exception.Message)
+        Add-Log ("配置暂未加载：" + $_.Exception.Message)
     }
 }
 
@@ -350,10 +351,10 @@ function Save-Config {
             }
         }
         Invoke-BodyJson -Method "PUT" -Path "/v1/config" -Body $cfg | Out-Null
-        Add-Log "config.json saved."
+        Add-Log "config.json 已保存。"
         Refresh-Health
     } catch {
-        Show-Error ("Save config failed: " + $_.Exception.Message)
+        Show-Error ("保存配置失败：" + $_.Exception.Message)
     }
 }
 
@@ -363,21 +364,21 @@ function Test-Coordinator {
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         $txtErrorDetails.Text = ""
         if ($op.state -eq "success") {
-            $lblState.Text = "State: coordinator probe ok"
+            $lblState.Text = "状态：VPS 连接正常"
             $txtActualRequestUrl.Text = $op.result.actualRequestUrl
             $txtProtocol.Text = [string]$op.result.capabilities.protocolVersion
             $txtCapabilities.Text = (($op.result.capabilities.capabilities) -join ", ")
             Refresh-Identity
         } else {
-            $lblState.Text = "State: coordinator probe failed"
+            $lblState.Text = "状态：VPS 连接失败"
             if ($op.error) {
                 $txtActualRequestUrl.Text = $op.error.details.url
                 $txtErrorDetails.Text = "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
             }
         }
-        Add-Log ("Probe operation: " + $op.operationId + " state=" + $op.state)
+        Add-Log ("连接测试操作：" + $op.operationId + " 状态=" + $op.state)
     } catch {
-        Show-Error ("Coordinator probe failed: " + $_.Exception.Message)
+        Show-Error ("VPS 连接测试失败：" + $_.Exception.Message)
     }
 }
 
@@ -396,16 +397,16 @@ function Refresh-Identity {
             Set-ControlText $txtServerId $id.server.serverId
             Set-ControlText $txtServerName $id.server.displayName
         }
-        Set-ControlText $txtTokenStatus "not configured"
+        Set-ControlText $txtTokenStatus "未配置"
         if ($id.compat -and ($id.compat.ownerTokenPresent -or $id.compat.legacyHostTokenPresent)) {
-            Set-ControlText $txtTokenStatus "configured (redacted)"
+            Set-ControlText $txtTokenStatus "已配置（已隐藏）"
         }
         if ($id.compat) {
             Set-ControlText $txtAdvancedDiagnostics "usesLegacyGroupApi=$($id.compat.usesLegacyGroupApi); legacyGroupIdPresent=$($id.compat.legacyGroupIdPresent); legacyHostIdPresent=$($id.compat.legacyHostIdPresent)"
         }
-        Add-Log "Private instance identity refreshed."
+        Add-Log "私人实例身份已刷新。"
     } catch {
-        Add-Log ("Identity not loaded yet: " + $_.Exception.Message)
+        Add-Log ("身份信息暂未加载：" + $_.Exception.Message)
     }
 }
 
@@ -414,13 +415,13 @@ function Run-Init {
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/init"
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
-            $lblState.Text = "State: private instance ready"
+            $lblState.Text = "状态：私人实例已就绪"
         } else {
-            $lblState.Text = "State: init failed"
+            $lblState.Text = "状态：初始化失败"
         }
-        Add-Log ("Init operation: " + $op.operationId + " state=" + $op.state)
+        Add-Log ("初始化操作：" + $op.operationId + " 状态=" + $op.state)
     } catch {
-        Show-Error ("Init failed: " + $_.Exception.Message)
+        Show-Error ("初始化失败：" + $_.Exception.Message)
     }
 }
 
@@ -434,10 +435,10 @@ function Save-ListenerConfig {
             serverDirMatchRequired = $false
         }
         Invoke-BodyJson -Method "PUT" -Path "/v1/listener/config" -Body $cfg | Out-Null
-        Add-Log "Listener config saved."
+        Add-Log "监听配置已保存。"
         Refresh-ListenerStatus
     } catch {
-        Show-Error ("Save listener config failed: " + $_.Exception.Message)
+        Show-Error ("保存监听配置失败：" + $_.Exception.Message)
     }
 }
 
@@ -468,12 +469,12 @@ function Refresh-ListenerStatus {
         $status = Invoke-BodyJson -Method "GET" -Path "/v1/listener/status"
         Set-ListenerFields $status
         if (-not $status.listening) {
-            Add-Log "ACBH does not start Minecraft. Start your server with MCSL or your own script, then refresh listener status."
+            Add-Log "ACBH 不会启动 Minecraft 服务端。请先用 MCSL 或你自己的脚本启动服务端，然后刷新监听状态。"
         } else {
-            Add-Log "Listener status refreshed."
+            Add-Log "监听状态已刷新。"
         }
     } catch {
-        Show-Error ("Listener status failed: " + $_.Exception.Message)
+        Show-Error ("刷新监听状态失败：" + $_.Exception.Message)
     }
 }
 
@@ -481,9 +482,9 @@ function Probe-Listener {
     try {
         $status = Invoke-BodyJson -Method "POST" -Path "/v1/listener/probe"
         Set-ListenerFields $status
-        Add-Log "Listener probe completed."
+        Add-Log "监听探测已完成。"
     } catch {
-        Show-Error ("Listener probe failed: " + $_.Exception.Message)
+        Show-Error ("监听探测失败：" + $_.Exception.Message)
     }
 }
 
@@ -496,7 +497,7 @@ function Set-RelayFields {
     Set-ControlText $txtTunnelConnected $Relay.tunnelConnected
     Set-ControlText $txtPublicListenerActive $Relay.publicListenerActive
     Set-ControlText $txtActiveConnections $Relay.activeConnections
-    Set-ControlText $txtRelayState "configured=$($Relay.configured) localServerListening=$($Relay.localServerListening) tunnelConnected=$($Relay.tunnelConnected) publicListenerActive=$($Relay.publicListenerActive) activeConnections=$($Relay.activeConnections)"
+    Set-ControlText $txtRelayState "已配置=$($Relay.configured) 本地服务端监听=$($Relay.localServerListening) 隧道已连接=$($Relay.tunnelConnected) VPS端口监听=$($Relay.publicListenerActive) 当前连接数=$($Relay.activeConnections)"
     Set-ControlText $txtRelayError ""
     if ($Relay.lastError) {
         Set-ControlText $txtRelayError $Relay.lastError
@@ -517,12 +518,12 @@ function Configure-Relay {
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
             Set-RelayFields $op.result.relay
-            Add-Log "Relay configured through body API."
+            Add-Log "中转配置已通过 Body API 保存。"
         } elseif ($op.error) {
             $txtRelayError.Text = "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
         }
     } catch {
-        Show-Error ("Relay configure failed: " + $_.Exception.Message)
+        Show-Error ("配置中转失败：" + $_.Exception.Message)
     }
 }
 
@@ -537,12 +538,12 @@ function Start-RelayTunnel {
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
             Set-RelayFields $op.result.relay
-            Add-Log "Relay tunnel started through body API."
+            Add-Log "公网中转隧道已通过 Body API 启动。"
         } elseif ($op.error) {
             Set-ControlText $txtRelayError "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
         }
     } catch {
-        Show-Error ("Relay tunnel start failed: " + $_.Exception.Message)
+        Show-Error ("启动公网中转失败：" + $_.Exception.Message)
     }
 }
 
@@ -552,12 +553,12 @@ function Stop-RelayTunnel {
         $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
             Set-RelayFields $op.result.relay
-            Add-Log "Relay tunnel stopped through body API."
+            Add-Log "公网中转隧道已通过 Body API 停止。"
         } elseif ($op.error) {
             Set-ControlText $txtRelayError "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
         }
     } catch {
-        Show-Error ("Relay tunnel stop failed: " + $_.Exception.Message)
+        Show-Error ("停止公网中转失败：" + $_.Exception.Message)
     }
 }
 
@@ -565,9 +566,9 @@ function Refresh-RelayStatus {
     try {
         $status = Invoke-BodyJson -Method "GET" -Path "/v1/relay/status"
         Set-RelayFields $status.relay
-        Add-Log "Relay status refreshed."
+        Add-Log "中转状态已刷新。"
     } catch {
-        Show-Error ("Relay status failed: " + $_.Exception.Message)
+        Show-Error ("刷新中转状态失败：" + $_.Exception.Message)
     }
 }
 
@@ -597,11 +598,11 @@ function Wait-BodyOperation {
 function Analyze-Backup {
     try {
         $result = Invoke-BodyJson -Method "POST" -Path "/v1/backup/analyze"
-        $txtBackupSummary.Text = "files=$($result.fileCount) roots=$($result.rootCount) size=$($result.logicalSize) profile=$($result.profileId)"
+        $txtBackupSummary.Text = "文件数=$($result.fileCount) 根目录=$($result.rootCount) 大小=$($result.logicalSize) 备份配置=$($result.profileId)"
         $txtBackupError.Text = ""
-        Add-Log "Backup analysis completed through body API."
+        Add-Log "备份分析已通过 Body API 完成。"
     } catch {
-        Show-Error ("Backup analyze failed: " + $_.Exception.Message)
+        Show-Error ("分析备份失败：" + $_.Exception.Message)
     }
 }
 
@@ -610,11 +611,11 @@ function Upload-Backup {
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/backup/upload"
         $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
-            $txtBackupSummary.Text = "snapshot=$($op.result.snapshotId) uploaded=$($op.result.uploadedSize) deduped=$($op.result.deduplicatedSize) actualRequestUrl=$($op.result.actualRequestUrl)"
-            Add-Log "Backup uploaded through body API."
+            $txtBackupSummary.Text = "快照=$($op.result.snapshotId) 已上传=$($op.result.uploadedSize) 去重节省=$($op.result.deduplicatedSize) 实际请求URL=$($op.result.actualRequestUrl)"
+            Add-Log "备份已通过 Body API 上传。"
         }
     } catch {
-        Show-Error ("Backup upload failed: " + $_.Exception.Message)
+        Show-Error ("上传备份失败：" + $_.Exception.Message)
     }
 }
 
@@ -625,15 +626,15 @@ function Refresh-Snapshots {
         if ($result.snapshots -and $result.snapshots.Count -gt 0) {
             $txtSnapshotId.Text = $result.snapshots[0].snapshotId
         }
-        Add-Log "Snapshot list refreshed through body API."
+        Add-Log "快照列表已通过 Body API 刷新。"
     } catch {
-        Show-Error ("Snapshot list failed: " + $_.Exception.Message)
+        Show-Error ("刷新快照列表失败：" + $_.Exception.Message)
     }
 }
 
 function Choose-RestoreDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = "Choose a new empty restore directory"
+    $dialog.Description = "选择一个新的空目录作为恢复目标"
     if ($txtRestoreTargetDir.Text) { $dialog.SelectedPath = $txtRestoreTargetDir.Text }
     if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
         $txtRestoreTargetDir.Text = $dialog.SelectedPath
@@ -646,33 +647,33 @@ function Download-LatestSnapshot {
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/snapshots/latest/download" -Body $body
         $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
-            $txtBackupSummary.Text = "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
-            Add-Log "Latest snapshot downloaded through body API."
+            $txtBackupSummary.Text = "已下载文件=$($op.result.downloadedFiles) 快照=$($op.result.snapshotId) 目标目录=$($op.result.targetDir)"
+            Add-Log "最新快照已通过 Body API 下载。"
         }
     } catch {
-        Show-Error ("Latest snapshot download failed: " + $_.Exception.Message)
+        Show-Error ("下载最新快照失败：" + $_.Exception.Message)
     }
 }
 
 function Download-SelectedSnapshot {
     try {
         $snapshotId = $txtSnapshotId.Text.Trim()
-        if (-not $snapshotId) { throw "Snapshot ID is required." }
+        if (-not $snapshotId) { throw "请先填写快照 ID。" }
         $body = @{ targetDir = $txtRestoreTargetDir.Text.Trim(); allowNonEmpty = $chkAllowNonEmpty.Checked }
         $op = Invoke-BodyJson -Method "POST" -Path ("/v1/snapshots/" + [uri]::EscapeDataString($snapshotId) + "/download") -Body $body
         $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
-            $txtBackupSummary.Text = "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
-            Add-Log "Selected snapshot downloaded through body API."
+            $txtBackupSummary.Text = "已下载文件=$($op.result.downloadedFiles) 快照=$($op.result.snapshotId) 目标目录=$($op.result.targetDir)"
+            Add-Log "所选快照已通过 Body API 下载。"
         }
     } catch {
-        Show-Error ("Snapshot download failed: " + $_.Exception.Message)
+        Show-Error ("下载快照失败：" + $_.Exception.Message)
     }
 }
 
 function Choose-ServerDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = "Choose Minecraft server directory"
+    $dialog.Description = "选择 Minecraft 服务端目录"
     if ($txtServerDir.Text) { $dialog.SelectedPath = $txtServerDir.Text }
     if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
         $txtServerDir.Text = $dialog.SelectedPath
@@ -711,7 +712,7 @@ function Add-Button {
 }
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "ACBH v0.5 Minimal Core"
+$form.Text = "ACBH v0.5 最小核心"
 $form.StartPosition = "CenterScreen"
 $form.Size = New-Object System.Drawing.Size(1120, 860)
 $form.MinimumSize = New-Object System.Drawing.Size(1000, 740)
@@ -745,23 +746,23 @@ function Fit-FormToWorkingArea {
 }
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = "ACBH v0.5 Minimal Core"
+$title.Text = "ACBH v0.5 最小核心"
 $title.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 18, [System.Drawing.FontStyle]::Bold)
 $title.Location = New-Object System.Drawing.Point(20, 16)
 $title.Size = New-Object System.Drawing.Size(420, 36)
 $form.Controls.Add($title)
 
 $lblState = New-Object System.Windows.Forms.Label
-$lblState.Text = "State: starting"
+$lblState.Text = "状态：启动中"
 $lblState.Location = New-Object System.Drawing.Point(620, 24)
 $lblState.Size = New-Object System.Drawing.Size(420, 24)
 $form.Controls.Add($lblState)
 
-Add-Label "Body API" 24 70 | Out-Null
+Add-Label "本地 Body API" 24 70 | Out-Null
 $txtBodyApi = Add-TextBox 190 68 820 $true
-Add-Label "Config path" 24 104 | Out-Null
+Add-Label "配置文件路径" 24 104 | Out-Null
 $txtConfigPath = Add-TextBox 190 102 820 $true
-Add-Label "Mode" 24 138 | Out-Null
+Add-Label "运行模式" 24 138 | Out-Null
 $cmbMode = New-Object System.Windows.Forms.ComboBox
 $cmbMode.Location = New-Object System.Drawing.Point(190, 136)
 $cmbMode.Size = New-Object System.Drawing.Size(220, 24)
@@ -791,7 +792,7 @@ Add-Label "访问令牌状态" 540 274 | Out-Null
 $txtTokenStatus = Add-TextBox 650 272 360 $true
 Add-Label "服务端目录" 24 308 | Out-Null
 $txtServerDir = Add-TextBox 190 306 630
-Add-Button "Choose dir" 840 302 { Choose-ServerDir } | Out-Null
+Add-Button "选择目录" 840 302 { Choose-ServerDir } | Out-Null
 
 Add-Label "实际请求 URL" 24 342 | Out-Null
 $txtActualRequestUrl = Add-TextBox 190 340 820 $true
@@ -805,14 +806,30 @@ $txtServerId = Add-TextBox 24 442 120 $true
 $txtServerId.Visible = $false
 $txtAdvancedDiagnostics = Add-TextBox 190 442 820 $true
 
-Add-Button "Refresh health" 190 480 { Refresh-Health; Refresh-Identity } | Out-Null
-Add-Button "Load config" 350 480 { Load-Config; Refresh-Identity } | Out-Null
-Add-Button "Save config" 510 480 { Save-Config } | Out-Null
-Add-Button "Test connection" 670 480 { Test-Coordinator } | Out-Null
-Add-Button "Initialize" 190 518 { Run-Init } | Out-Null
+Add-Button "刷新状态" 190 480 { Refresh-Health; Refresh-Identity } | Out-Null
+Add-Button "加载配置" 350 480 { Load-Config; Refresh-Identity } | Out-Null
+Add-Button "保存配置" 510 480 { Save-Config } | Out-Null
+Add-Button "测试连接" 670 480 { Test-Coordinator } | Out-Null
+Add-Button "初始化" 190 518 { Run-Init } | Out-Null
+
+$grpUsage = New-Object System.Windows.Forms.GroupBox
+$grpUsage.Text = "使用方式"
+$grpUsage.Location = New-Object System.Drawing.Point(24, 552)
+$grpUsage.Size = New-Object System.Drawing.Size(986, 112)
+$form.Controls.Add($grpUsage)
+
+$txtUsage = New-Object System.Windows.Forms.TextBox
+$txtUsage.Location = New-Object System.Drawing.Point(16, 24)
+$txtUsage.Size = New-Object System.Drawing.Size(952, 76)
+$txtUsage.Multiline = $true
+$txtUsage.ReadOnly = $true
+$txtUsage.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+$txtUsage.BackColor = $form.BackColor
+$txtUsage.Text = "1. 先启动本机 Minecraft 服务端，并确认它监听 127.0.0.1:25565。`r`n2. 点击【加载配置 / 保存配置】，填写 VPS 地址与服务端目录，再点击【测试连接】和【初始化】。`r`n3. 点击【刷新监听】，确认本地 MC 已监听；再点击【启动公网中转】，玩家连接 VPS 公网地址:25565。`r`n4. GUI 只调用本机 Body API，不直接访问 VPS，也不负责启动或停止 Minecraft 服务端。"
+$grpUsage.Controls.Add($txtUsage)
 
 $txtOperation = New-Object System.Windows.Forms.TextBox
-$txtOperation.Location = New-Object System.Drawing.Point(24, 566)
+$txtOperation.Location = New-Object System.Drawing.Point(24, 682)
 $txtOperation.Size = New-Object System.Drawing.Size(986, 78)
 $txtOperation.Multiline = $true
 $txtOperation.ScrollBars = "Vertical"
@@ -822,7 +839,7 @@ $form.Controls.Add($txtOperation)
 
 $grpListenerRelay = New-Object System.Windows.Forms.GroupBox
 $grpListenerRelay.Text = "监听 / VPS 中转"
-$grpListenerRelay.Location = New-Object System.Drawing.Point(24, 662)
+$grpListenerRelay.Location = New-Object System.Drawing.Point(24, 778)
 $grpListenerRelay.Size = New-Object System.Drawing.Size(986, 304)
 $form.Controls.Add($grpListenerRelay)
 
@@ -857,56 +874,56 @@ function Add-GroupButton {
     return $button
 }
 
-Add-GroupLabel "Local host" 16 28 | Out-Null
+Add-GroupLabel "本地地址" 16 28 | Out-Null
 $txtListenerHost = Add-GroupTextBox 130 26 220
 $txtListenerHost.Text = "127.0.0.1"
-Add-GroupLabel "Local port" 380 28 | Out-Null
+Add-GroupLabel "本地端口" 380 28 | Out-Null
 $txtListenerPort = Add-GroupTextBox 490 26 90
 $txtListenerPort.Text = "25565"
-Add-GroupLabel "Public host" 610 28 | Out-Null
+Add-GroupLabel "公网地址" 610 28 | Out-Null
 $txtPublicHost = Add-GroupTextBox 720 26 180
-Add-GroupLabel "Public port" 16 64 | Out-Null
+Add-GroupLabel "公网端口" 16 64 | Out-Null
 $txtPublicPort = Add-GroupTextBox 130 62 90
 $txtPublicPort.Text = "25565"
 
-Add-GroupButton "Save listener" 240 62 { Save-ListenerConfig } | Out-Null
-Add-GroupButton "Refresh listener" 396 62 { Refresh-ListenerStatus } | Out-Null
-Add-GroupButton "Probe listener" 552 62 { Probe-Listener } | Out-Null
-Add-GroupButton "Configure relay" 708 62 { Configure-Relay } | Out-Null
-Add-GroupButton "Start relay tunnel" 16 96 { Start-RelayTunnel } | Out-Null
-Add-GroupButton "Stop relay tunnel" 178 96 { Stop-RelayTunnel } | Out-Null
-Add-GroupButton "Refresh relay status" 340 96 { Refresh-RelayStatus } | Out-Null
+Add-GroupButton "保存监听" 240 62 { Save-ListenerConfig } | Out-Null
+Add-GroupButton "刷新监听" 396 62 { Refresh-ListenerStatus } | Out-Null
+Add-GroupButton "探测监听" 552 62 { Probe-Listener } | Out-Null
+Add-GroupButton "配置中转" 708 62 { Configure-Relay } | Out-Null
+Add-GroupButton "启动公网中转" 16 96 { Start-RelayTunnel } | Out-Null
+Add-GroupButton "停止公网中转" 178 96 { Stop-RelayTunnel } | Out-Null
+Add-GroupButton "刷新中转状态" 340 96 { Refresh-RelayStatus } | Out-Null
 
-Add-GroupLabel "Listening" 16 138 | Out-Null
+Add-GroupLabel "已监听" 16 138 | Out-Null
 $txtListening = Add-GroupTextBox 130 136 90 $true
-Add-GroupLabel "Local MC" 248 138 | Out-Null
+Add-GroupLabel "本地 MC" 248 138 | Out-Null
 $txtLocalServerListening = Add-GroupTextBox 340 136 90 $true
-Add-GroupLabel "Tunnel" 458 138 | Out-Null
+Add-GroupLabel "隧道" 458 138 | Out-Null
 $txtTunnelConnected = Add-GroupTextBox 540 136 90 $true
-Add-GroupLabel "VPS port" 658 138 | Out-Null
+Add-GroupLabel "VPS 端口" 658 138 | Out-Null
 $txtPublicListenerActive = Add-GroupTextBox 750 136 90 $true
-Add-GroupLabel "Connections" 16 172 | Out-Null
+Add-GroupLabel "连接数" 16 172 | Out-Null
 $txtActiveConnections = Add-GroupTextBox 130 170 90 $true
-Add-GroupLabel "PID" 248 172 | Out-Null
+Add-GroupLabel "进程 ID" 248 172 | Out-Null
 $txtListenerPid = Add-GroupTextBox 300 170 100 $true
-Add-GroupLabel "Process" 430 172 | Out-Null
+Add-GroupLabel "进程名" 430 172 | Out-Null
 $txtListenerProcess = Add-GroupTextBox 520 170 250 $true
-Add-GroupLabel "Dir matched" 760 172 | Out-Null
+Add-GroupLabel "目录匹配" 760 172 | Out-Null
 $txtServerDirMatched = Add-GroupTextBox 880 170 90 $true
-Add-GroupLabel "Local endpoint" 16 206 | Out-Null
+Add-GroupLabel "本地端点" 16 206 | Out-Null
 $txtLocalEndpoint = Add-GroupTextBox 130 204 270 $true
-Add-GroupLabel "Public endpoint" 430 206 | Out-Null
+Add-GroupLabel "公网端点" 430 206 | Out-Null
 $txtPublicEndpoint = Add-GroupTextBox 560 204 410 $true
-Add-GroupLabel "Command" 16 240 | Out-Null
+Add-GroupLabel "命令行" 16 240 | Out-Null
 $txtListenerCommand = Add-GroupTextBox 130 238 370 $true
-Add-GroupLabel "Warnings" 520 240 | Out-Null
+Add-GroupLabel "警告" 520 240 | Out-Null
 $txtListenerWarnings = Add-GroupTextBox 620 238 350 $true
 $txtRelayState = Add-GroupTextBox 16 270 460 $true
 $txtRelayError = Add-GroupTextBox 510 270 460 $true
 
 $grpBackup = New-Object System.Windows.Forms.GroupBox
 $grpBackup.Text = "备份 / 快照"
-$grpBackup.Location = New-Object System.Drawing.Point(24, 984)
+$grpBackup.Location = New-Object System.Drawing.Point(24, 1100)
 $grpBackup.Size = New-Object System.Drawing.Size(986, 250)
 $form.Controls.Add($grpBackup)
 
@@ -941,32 +958,32 @@ function Add-BackupButton {
     return $button
 }
 
-Add-BackupButton "Analyze backup" 16 26 { Analyze-Backup } | Out-Null
-Add-BackupButton "Upload backup" 198 26 { Upload-Backup } | Out-Null
-Add-BackupButton "List snapshots" 380 26 { Refresh-Snapshots } | Out-Null
-Add-BackupButton "Download latest" 562 26 { Download-LatestSnapshot } | Out-Null
-Add-BackupButton "Download selected" 744 26 { Download-SelectedSnapshot } | Out-Null
+Add-BackupButton "分析备份" 16 26 { Analyze-Backup } | Out-Null
+Add-BackupButton "上传备份" 198 26 { Upload-Backup } | Out-Null
+Add-BackupButton "列出快照" 380 26 { Refresh-Snapshots } | Out-Null
+Add-BackupButton "下载最新" 562 26 { Download-LatestSnapshot } | Out-Null
+Add-BackupButton "下载所选" 744 26 { Download-SelectedSnapshot } | Out-Null
 
-Add-BackupLabel "Snapshot ID" 16 66 | Out-Null
+Add-BackupLabel "快照 ID" 16 66 | Out-Null
 $txtSnapshotId = Add-BackupTextBox 130 64 260
-Add-BackupLabel "Restore target" 420 66 | Out-Null
+Add-BackupLabel "恢复目标" 420 66 | Out-Null
 $txtRestoreTargetDir = Add-BackupTextBox 540 64 260
-Add-BackupButton "Choose target" 810 61 { Choose-RestoreDir } | Out-Null
+Add-BackupButton "选择目标" 810 61 { Choose-RestoreDir } | Out-Null
 $chkAllowNonEmpty = New-Object System.Windows.Forms.CheckBox
-$chkAllowNonEmpty.Text = "allow non-empty target"
+$chkAllowNonEmpty.Text = "允许恢复到非空目录"
 $chkAllowNonEmpty.Location = New-Object System.Drawing.Point(130, 96)
 $chkAllowNonEmpty.Size = New-Object System.Drawing.Size(220, 24)
 $grpBackup.Controls.Add($chkAllowNonEmpty)
 
-Add-BackupLabel "Summary" 16 128 | Out-Null
+Add-BackupLabel "摘要" 16 128 | Out-Null
 $txtBackupSummary = Add-BackupTextBox 130 126 840 $true
-Add-BackupLabel "Snapshots" 16 160 | Out-Null
+Add-BackupLabel "快照列表" 16 160 | Out-Null
 $txtSnapshotList = Add-BackupTextBox 130 158 360 $true
-Add-BackupLabel "Error" 510 160 | Out-Null
+Add-BackupLabel "错误" 510 160 | Out-Null
 $txtBackupError = Add-BackupTextBox 610 158 360 $true
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(24, 1252)
+$txtLog.Location = New-Object System.Drawing.Point(24, 1368)
 $txtLog.Size = New-Object System.Drawing.Size(986, 120)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
@@ -984,11 +1001,11 @@ $form.Add_Shown({
         Refresh-Health
         Load-Config
         Refresh-Identity
-        if ($lblState.Text -eq "State: starting") {
-            $lblState.Text = "State: ready"
+        if ($lblState.Text -eq "状态：启动中") {
+            $lblState.Text = "状态：就绪"
         }
     } catch {
-        Show-Error (Format-ExceptionDetails -ErrorRecord $_ -Context "Startup failed")
+        Show-Error (Format-ExceptionDetails -ErrorRecord $_ -Context "启动失败")
     }
 })
 
