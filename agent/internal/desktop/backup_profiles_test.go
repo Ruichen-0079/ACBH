@@ -251,6 +251,55 @@ func TestSafeProfileTargetRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestSafeProfileTargetAllowsTopLevelFileInCleanDir(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows-specific regression for non-existent restore roots")
+	}
+	base := t.TempDir()
+	root := filepath.Join(base, "banned-ips")
+	target, err := safeProfileTarget(root, "banned-ips.json")
+	if err != nil {
+		t.Fatalf("safeProfileTarget() error = %v", err)
+	}
+	want := filepath.Join(root, "banned-ips.json")
+	if target != want {
+		t.Fatalf("target = %q, want %q", target, want)
+	}
+}
+
+func TestRestoreProfileAllowsTopLevelFileInCleanDownloadDir(t *testing.T) {
+	base := t.TempDir()
+	downloadDir := filepath.Join(base, "download")
+	if err := os.MkdirAll(downloadDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	profile := BackupProfile{
+		SchemaVersion: 2,
+		ProfileID:     "core",
+		Name:          "Core",
+		Roots: []BackupProfileRoot{{
+			RootID: "banned-ips", DisplayName: "banned-ips.json", Kind: "file",
+			SourcePath: filepath.Join(base, "banned-ips.json"), RestorePath: filepath.Join(base, "banned-ips.json"),
+			Enabled: true,
+		}},
+	}
+	profile = profileForDownloadTarget(profile, downloadDir)
+	manifest := testManifest("bp_download", []worldbackup.FileEntry{
+		testFileEntry("banned-ips/banned-ips.json", "[]"),
+	})
+	summary, err := restoreProfileManifest(context.Background(), profile, manifest, fakeDownloader(map[string]string{"[]": "[]"}))
+	if err != nil {
+		t.Fatalf("restoreProfileManifest() error = %v", err)
+	}
+	if summary.DownloadedFiles != 1 {
+		t.Fatalf("downloaded files = %d, want 1", summary.DownloadedFiles)
+	}
+	want := filepath.Join(downloadDir, "banned-ips", "banned-ips.json")
+	if got := readFile(t, want); got != "[]" {
+		t.Fatalf("restored content = %q, want []", got)
+	}
+}
+
 func TestScanProfileRejectsSymlinkEscapeWhenSupported(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows symlink creation commonly requires elevated privileges")

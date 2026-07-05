@@ -260,6 +260,29 @@ func registerAlpha4Endpoints(register routeRegistrar, manager *OperationManager,
 			return ServerPreflight(opts)
 		})
 	})
+	register("/api/server/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w)
+			return
+		}
+		out, err := DesktopServerStatus(opts)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			writeJSON(w, map[string]any{"ok": false, "message": err.Error()})
+			return
+		}
+		writeJSON(w, out)
+	})
+	register("/api/server/repair-state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		startAndWrite(w, r, manager, OperationOptions{Name: "ServerRepairState", MutexClass: "server", Timeout: 30 * time.Second}, func(ctx OperationContext) (any, error) {
+			ctx.Progress("repair", "修复服务器状态", 1, 1)
+			return ManagedServerRepairState(opts)
+		})
+	})
 	register("/api/picker/folder", pickerHandler("folder"))
 	register("/api/picker/files", pickerHandler("files"))
 	register("/api/picker/file", pickerHandler("file"))

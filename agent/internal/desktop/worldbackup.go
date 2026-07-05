@@ -212,6 +212,8 @@ func publishWorldSnapshot(ctx context.Context, opts Options, wb WorldBackupOptio
 		return WorldBackupCreateResult{}, errors.New("lease_expired: active host lease is required before publishing world snapshots")
 	}
 	generation = ensured.Lease.Generation
+	stopLeaseRenew := StartLeaseRenewLoop(ctx, client, auth, &generation, &gate, 0)
+	defer stopLeaseRenew()
 	snapshotID := wb.SnapshotID
 	if snapshotID == "" {
 		snapshotID = "ws_" + time.Now().UTC().Format("20060102_150405")
