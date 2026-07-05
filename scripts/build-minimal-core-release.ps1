@@ -85,6 +85,12 @@ function Write-ReleaseNotesTemplate {
 
 Minimal-core alpha release for Windows.
 
+## Alpha 2 GUI Hotfix
+
+- alpha1 GUI had startup/layout issues on Windows scaling.
+- alpha2 fixes GUI startup null error and DPI/layout clipping.
+- backup/upload/restore protocol unchanged.
+
 ## Included
 
 - Local body runtime API on 127.0.0.1:6120

@@ -25,12 +25,33 @@ if ($SelfTest) {
         "txtBackupSummary",
         "txtSnapshotList",
         "txtRestoreTargetDir",
+        "Body API 未连接",
+        "Format-ExceptionDetails",
+        "Set-ControlText",
+        "Fit-FormToWorkingArea",
+        "AutoScaleMode",
+        "AutoScroll",
+        "New-Object System.Drawing.Size(1120, 860)",
+        "New-Object System.Drawing.Size(1000, 740)",
         "备份 / 快照",
         "私人实例",
         "当前设备",
+        "VPS 地址",
+        "监听 / VPS 中转",
         "VPS 中转",
         "访问令牌状态",
-        '$script:BodyUrl'
+        "Refresh health",
+        "Load config",
+        "Save config",
+        "Test connection",
+        "Initialize",
+        "Analyze backup",
+        "Upload backup",
+        "List snapshots",
+        "Download latest",
+        "Download selected",
+        '$script:BodyUrl',
+        '"/v1/operations/"'
     )
     foreach ($check in $checks) {
         if (-not $source.Contains($check)) {
@@ -42,8 +63,7 @@ if ($SelfTest) {
         ("Stop" + "Server"),
         ("Repair" + "Lock"),
         ("server" + ".lock"),
-        ("super" + "visor"),
-        ("take over " + "elec" + "tion")
+        ("super" + "visor")
     )
     foreach ($token in $forbidden) {
         if ($source.Contains($token)) {
@@ -63,6 +83,15 @@ if ($SelfTest) {
         if ($source.Contains($token)) {
             throw "GUI self-test failed: legacy identity label found"
         }
+    }
+    $legacyVisiblePattern = '"[^"]*(?:elec' + 'tion|take' + 'over)[^"]*"'
+    foreach ($line in ($source -split "`r?`n")) {
+        if ($line -match $legacyVisiblePattern) {
+            throw ("GUI self-test failed: forbidden " + "legacy visible text found")
+        }
+    }
+    if ($source -match "Invoke-RestMethod\s+[^\r\n]*coordinatorUrl") {
+        throw "GUI self-test failed: direct VPS/coordinator call found"
     }
     Write-Output "ACBH minimal-core GUI self-test ok"
     exit 0
@@ -85,6 +114,50 @@ if (-not $AppDataDir) {
 
 $script:BodyProcess = $null
 $script:BodyUrl = "http://$BodyListen"
+$script:StartupErrors = New-Object System.Collections.Generic.List[string]
+
+function Format-ExceptionDetails {
+    param(
+        [System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string]$Context = "Operation failed"
+    )
+    $line = "unknown"
+    $function = "unknown"
+    if ($ErrorRecord -and $ErrorRecord.InvocationInfo) {
+        if ($ErrorRecord.InvocationInfo.ScriptLineNumber) { $line = [string]$ErrorRecord.InvocationInfo.ScriptLineNumber }
+        if ($ErrorRecord.InvocationInfo.MyCommand -and $ErrorRecord.InvocationInfo.MyCommand.Name) {
+            $function = $ErrorRecord.InvocationInfo.MyCommand.Name
+        }
+    }
+    $message = "unknown error"
+    if ($ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.Message) {
+        $message = $ErrorRecord.Exception.Message
+    }
+    $stack = ""
+    if ($ErrorRecord -and $ErrorRecord.ScriptStackTrace) {
+        $stack = (($ErrorRecord.ScriptStackTrace -split "`r?`n") | Select-Object -First 4) -join [Environment]::NewLine
+    }
+    if (-not $stack -and $ErrorRecord -and $ErrorRecord.Exception -and $ErrorRecord.Exception.StackTrace) {
+        $stack = (($ErrorRecord.Exception.StackTrace -split "`r?`n") | Select-Object -First 4) -join [Environment]::NewLine
+    }
+    return @"
+$Context
+line: $line
+function: $function
+message: $message
+stack:
+$stack
+"@
+}
+
+function Set-ControlText {
+    param(
+        [object]$Control,
+        [AllowNull()][object]$Value
+    )
+    if ($null -eq $Control) { return }
+    $Control.Text = [string]$Value
+}
 
 function Redact-Secrets {
     param([string]$Text)
@@ -99,7 +172,12 @@ function Redact-Secrets {
 function Add-Log {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
-    $txtLog.AppendText(("[" + (Get-Date -Format "HH:mm:ss") + "] " + (Redact-Secrets $Text) + [Environment]::NewLine))
+    $line = "[" + (Get-Date -Format "HH:mm:ss") + "] " + (Redact-Secrets $Text)
+    if ($null -eq $txtLog) {
+        [void]$script:StartupErrors.Add($line)
+        return
+    }
+    $txtLog.AppendText(($line + [Environment]::NewLine))
     $txtLog.SelectionStart = $txtLog.TextLength
     $txtLog.ScrollToCaret()
 }
@@ -107,7 +185,14 @@ function Add-Log {
 function Show-Error {
     param([string]$Message)
     Add-Log $Message
-    [System.Windows.Forms.MessageBox]::Show((Redact-Secrets $Message), "ACBH", "OK", "Error") | Out-Null
+    $safe = Redact-Secrets $Message
+    if ($null -ne $txtErrorDetails) {
+        $txtErrorDetails.Text = $safe
+    }
+    if ($null -ne $lblState) {
+        $lblState.Text = "State: needs attention"
+    }
+    [System.Windows.Forms.MessageBox]::Show($safe, "ACBH", "OK", "Error") | Out-Null
 }
 
 function Test-BodyPort {
@@ -129,22 +214,20 @@ function Test-BodyPort {
 function Start-Body {
     if (Test-BodyPort) { return }
     if (-not (Test-Path $AgentPath)) {
-        throw "Cannot find ACBH Agent: $AgentPath"
+        throw "Body API 未连接；可启动 body runtime，但找不到 ACBH Agent: $AgentPath"
     }
     New-Item -ItemType Directory -Force -Path $AppDataDir | Out-Null
     $args = @("body", "serve", "--listen", $BodyListen, "--app-data-dir", $AppDataDir)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $AgentPath
-    foreach ($arg in $args) {
-        [void]$psi.ArgumentList.Add($arg)
-    }
+    $psi.Arguments = (($args | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' }) -join " ")
     $psi.WorkingDirectory = Split-Path -Parent $AgentPath
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $script:BodyProcess = [System.Diagnostics.Process]::Start($psi)
     Start-Sleep -Milliseconds 600
     if (-not (Test-BodyPort)) {
-        throw "Body API did not start on $BodyListen"
+        throw "Body API 未连接；可启动 body runtime，但未能在 $BodyListen 监听。请检查日志或手动运行 acbh-agent-windows-amd64.exe body serve。"
     }
     Add-Log "Body API started at $script:BodyUrl"
 }
@@ -175,9 +258,9 @@ function Invoke-BodyJson {
 function Refresh-Health {
     try {
         $health = Invoke-BodyJson -Method "GET" -Path "/v1/body/health"
-        $txtConfigPath.Text = $health.configPath
-        $txtBodyApi.Text = $health.bodyApi
-        if ($health.coordinatorUrl) { $txtCoordinator.Text = $health.coordinatorUrl }
+        Set-ControlText $txtConfigPath $health.configPath
+        Set-ControlText $txtBodyApi $health.bodyApi
+        if ($health.coordinatorUrl) { Set-ControlText $txtCoordinator $health.coordinatorUrl }
         if ($health.mode) { $cmbMode.SelectedItem = $health.mode }
         if ($health.configError) {
             $lblState.Text = "State: config needs attention"
@@ -194,25 +277,32 @@ function Refresh-Health {
 function Load-Config {
     try {
         $cfg = Invoke-BodyJson -Method "GET" -Path "/v1/config"
-        $cmbMode.SelectedItem = $cfg.mode
-        $txtCoordinator.Text = $cfg.coordinatorUrl
-        $txtInstanceName.Text = $cfg.instance.displayName
-        $txtInstanceId.Text = $cfg.instance.instanceId
-        $txtDeviceName.Text = $cfg.device.displayName
-        $txtDeviceId.Text = $cfg.device.deviceId
-        $txtServerName.Text = $cfg.server.displayName
-        $txtServerDir.Text = $cfg.server.dir
-        $txtTokenStatus.Text = "not configured"
-        if ($cfg.instance.ownerToken -eq "[redacted]" -or $cfg.compat.legacyHostToken -eq "[redacted]") {
-            $txtTokenStatus.Text = "configured (redacted)"
+        if ($cfg.mode) { $cmbMode.SelectedItem = $cfg.mode }
+        Set-ControlText $txtCoordinator $cfg.coordinatorUrl
+        if ($cfg.instance) {
+            Set-ControlText $txtInstanceName $cfg.instance.displayName
+            Set-ControlText $txtInstanceId $cfg.instance.instanceId
+        }
+        if ($cfg.device) {
+            Set-ControlText $txtDeviceName $cfg.device.displayName
+            Set-ControlText $txtDeviceId $cfg.device.deviceId
+        }
+        if ($cfg.server) {
+            Set-ControlText $txtServerName $cfg.server.displayName
+            Set-ControlText $txtServerDir $cfg.server.dir
+            Set-ControlText $txtServerId $cfg.server.serverId
+        }
+        Set-ControlText $txtTokenStatus "not configured"
+        if (($cfg.instance -and $cfg.instance.ownerToken -eq "[redacted]") -or ($cfg.compat -and $cfg.compat.legacyHostToken -eq "[redacted]")) {
+            Set-ControlText $txtTokenStatus "configured (redacted)"
         }
         if ($cfg.listener) {
-            $txtListenerHost.Text = $cfg.listener.localHost
-            $txtListenerPort.Text = [string]$cfg.listener.localPort
+            Set-ControlText $txtListenerHost $cfg.listener.localHost
+            Set-ControlText $txtListenerPort $cfg.listener.localPort
         }
         if ($cfg.relay) {
-            $txtPublicHost.Text = $cfg.relay.publicHost
-            $txtPublicPort.Text = [string]$cfg.relay.minecraftPort
+            Set-ControlText $txtPublicHost $cfg.relay.publicHost
+            Set-ControlText $txtPublicPort $cfg.relay.minecraftPort
         }
         Add-Log "config.json loaded."
     } catch {
@@ -288,17 +378,25 @@ function Test-Coordinator {
 function Refresh-Identity {
     try {
         $id = Invoke-BodyJson -Method "GET" -Path "/v1/identity"
-        $txtInstanceId.Text = $id.instance.instanceId
-        $txtInstanceName.Text = $id.instance.displayName
-        $txtDeviceId.Text = $id.device.deviceId
-        $txtDeviceName.Text = $id.device.displayName
-        $txtServerId.Text = $id.server.serverId
-        $txtServerName.Text = $id.server.displayName
-        $txtTokenStatus.Text = "not configured"
-        if ($id.compat.ownerTokenPresent -or $id.compat.legacyHostTokenPresent) {
-            $txtTokenStatus.Text = "configured (redacted)"
+        if ($id.instance) {
+            Set-ControlText $txtInstanceId $id.instance.instanceId
+            Set-ControlText $txtInstanceName $id.instance.displayName
         }
-        $txtAdvancedDiagnostics.Text = "usesLegacyGroupApi=$($id.compat.usesLegacyGroupApi); legacyGroupIdPresent=$($id.compat.legacyGroupIdPresent); legacyHostIdPresent=$($id.compat.legacyHostIdPresent)"
+        if ($id.device) {
+            Set-ControlText $txtDeviceId $id.device.deviceId
+            Set-ControlText $txtDeviceName $id.device.displayName
+        }
+        if ($id.server) {
+            Set-ControlText $txtServerId $id.server.serverId
+            Set-ControlText $txtServerName $id.server.displayName
+        }
+        Set-ControlText $txtTokenStatus "not configured"
+        if ($id.compat -and ($id.compat.ownerTokenPresent -or $id.compat.legacyHostTokenPresent)) {
+            Set-ControlText $txtTokenStatus "configured (redacted)"
+        }
+        if ($id.compat) {
+            Set-ControlText $txtAdvancedDiagnostics "usesLegacyGroupApi=$($id.compat.usesLegacyGroupApi); legacyGroupIdPresent=$($id.compat.legacyGroupIdPresent); legacyHostIdPresent=$($id.compat.legacyHostIdPresent)"
+        }
         Add-Log "Private instance identity refreshed."
     } catch {
         Add-Log ("Identity not loaded yet: " + $_.Exception.Message)
@@ -339,22 +437,23 @@ function Save-ListenerConfig {
 
 function Set-ListenerFields {
     param([object]$Status)
-    $txtListening.Text = [string]$Status.listening
-    $txtListenerWarnings.Text = ""
+    if ($null -eq $Status) { return }
+    Set-ControlText $txtListening $Status.listening
+    Set-ControlText $txtListenerWarnings ""
     if ($Status.warnings) {
-        $txtListenerWarnings.Text = (($Status.warnings | ForEach-Object { $_.code + ": " + $_.message }) -join "; ")
+        Set-ControlText $txtListenerWarnings (($Status.warnings | ForEach-Object { $_.code + ": " + $_.message }) -join "; ")
     }
     if ($Status.listeners -and $Status.listeners.Count -gt 0) {
         $item = $Status.listeners[0]
-        $txtListenerPid.Text = [string]$item.pid
-        $txtListenerProcess.Text = [string]$item.processName
-        $txtListenerCommand.Text = [string]$item.commandLine
-        $txtServerDirMatched.Text = [string]$item.serverDirMatched
+        Set-ControlText $txtListenerPid $item.pid
+        Set-ControlText $txtListenerProcess $item.processName
+        Set-ControlText $txtListenerCommand $item.commandLine
+        Set-ControlText $txtServerDirMatched $item.serverDirMatched
     } else {
-        $txtListenerPid.Text = ""
-        $txtListenerProcess.Text = ""
-        $txtListenerCommand.Text = ""
-        $txtServerDirMatched.Text = ""
+        Set-ControlText $txtListenerPid ""
+        Set-ControlText $txtListenerProcess ""
+        Set-ControlText $txtListenerCommand ""
+        Set-ControlText $txtServerDirMatched ""
     }
 }
 
@@ -384,12 +483,13 @@ function Probe-Listener {
 
 function Set-RelayFields {
     param([object]$Relay)
-    $txtPublicEndpoint.Text = [string]$Relay.publicEndpoint
-    $txtLocalEndpoint.Text = [string]$Relay.localEndpoint
-    $txtRelayState.Text = "configured=$($Relay.configured) active=$($Relay.active) currentDevice=$($Relay.currentDevice) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
-    $txtRelayError.Text = ""
+    if ($null -eq $Relay) { return }
+    Set-ControlText $txtPublicEndpoint $Relay.publicEndpoint
+    Set-ControlText $txtLocalEndpoint $Relay.localEndpoint
+    Set-ControlText $txtRelayState "configured=$($Relay.configured) active=$($Relay.active) currentDevice=$($Relay.currentDevice) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
+    Set-ControlText $txtRelayError ""
     if ($Relay.errors) {
-        $txtRelayError.Text = (($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + $_.details.responseBody }) -join "; ")
+        Set-ControlText $txtRelayError (($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + $_.details.responseBody }) -join "; ")
     }
 }
 
@@ -536,7 +636,7 @@ function Add-Label {
     $label = New-Object System.Windows.Forms.Label
     $label.Text = $Text
     $label.Location = New-Object System.Drawing.Point($X, $Y)
-    $label.Size = New-Object System.Drawing.Size(140, 22)
+    $label.Size = New-Object System.Drawing.Size(160, 24)
     $form.Controls.Add($label)
     return $label
 }
@@ -556,7 +656,7 @@ function Add-Button {
     $button = New-Object System.Windows.Forms.Button
     $button.Text = $Text
     $button.Location = New-Object System.Drawing.Point($X, $Y)
-    $button.Size = New-Object System.Drawing.Size(150, 30)
+    $button.Size = New-Object System.Drawing.Size(150, 32)
     $button.Add_Click({ try { & $Click } catch { Show-Error $_.Exception.Message } }.GetNewClosure())
     $form.Controls.Add($button)
     return $button
@@ -565,9 +665,36 @@ function Add-Button {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH v0.5 Minimal Core"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(920, 1240)
-$form.MinimumSize = New-Object System.Drawing.Size(880, 900)
+$form.Size = New-Object System.Drawing.Size(1120, 860)
+$form.MinimumSize = New-Object System.Drawing.Size(1000, 740)
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Font
+$form.AutoScroll = $true
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
+
+function Fit-FormToWorkingArea {
+    param([System.Windows.Forms.Form]$Form)
+    if ($null -eq $Form) { return }
+    $area = [System.Windows.Forms.Screen]::FromControl($Form).WorkingArea
+    $margin = 40
+    if ($Form.Width -gt ($area.Width - $margin)) {
+        $Form.Width = $area.Width - $margin
+    }
+    if ($Form.Height -gt ($area.Height - $margin)) {
+        $Form.Height = $area.Height - $margin
+    }
+    if ($Form.Right -gt ($area.Right - 12)) {
+        $Form.Left = [Math]::Max($area.Left + 12, ($area.Right - $Form.Width - 12))
+    }
+    if ($Form.Bottom -gt ($area.Bottom - 12)) {
+        $Form.Top = [Math]::Max($area.Top + 12, ($area.Bottom - $Form.Height - 12))
+    }
+    if ($Form.Left -lt ($area.Left + 12)) {
+        $Form.Left = $area.Left + 12
+    }
+    if ($Form.Top -lt ($area.Top + 12)) {
+        $Form.Top = $area.Top + 12
+    }
+}
 
 $title = New-Object System.Windows.Forms.Label
 $title.Text = "ACBH v0.5 Minimal Core"
@@ -578,18 +705,18 @@ $form.Controls.Add($title)
 
 $lblState = New-Object System.Windows.Forms.Label
 $lblState.Text = "State: starting"
-$lblState.Location = New-Object System.Drawing.Point(460, 24)
-$lblState.Size = New-Object System.Drawing.Size(380, 24)
+$lblState.Location = New-Object System.Drawing.Point(620, 24)
+$lblState.Size = New-Object System.Drawing.Size(420, 24)
 $form.Controls.Add($lblState)
 
 Add-Label "Body API" 24 70 | Out-Null
-$txtBodyApi = Add-TextBox 170 68 650 $true
+$txtBodyApi = Add-TextBox 190 68 820 $true
 Add-Label "Config path" 24 104 | Out-Null
-$txtConfigPath = Add-TextBox 170 102 650 $true
+$txtConfigPath = Add-TextBox 190 102 820 $true
 Add-Label "Mode" 24 138 | Out-Null
 $cmbMode = New-Object System.Windows.Forms.ComboBox
-$cmbMode.Location = New-Object System.Drawing.Point(170, 136)
-$cmbMode.Size = New-Object System.Drawing.Size(180, 24)
+$cmbMode.Location = New-Object System.Drawing.Point(190, 136)
+$cmbMode.Size = New-Object System.Drawing.Size(220, 24)
 $cmbMode.DropDownStyle = "DropDownList"
 [void]$cmbMode.Items.Add("remote-public")
 [void]$cmbMode.Items.Add("local-private")
@@ -597,67 +724,58 @@ $cmbMode.SelectedItem = "remote-public"
 $form.Controls.Add($cmbMode)
 
 Add-Label "VPS 地址" 24 172 | Out-Null
-$txtCoordinator = Add-TextBox 170 170 650
+$txtCoordinator = Add-TextBox 190 170 820
 $txtCoordinator.Text = "http://YOUR_VPS_IP:6121"
 Add-Label "私人实例" 24 206 | Out-Null
-$txtInstanceName = Add-TextBox 170 204 250
+$txtInstanceName = Add-TextBox 190 204 320
 $txtInstanceName.Text = "私人 ACBH 实例"
-Add-Label "实例 ID" 450 206 | Out-Null
-$txtInstanceId = Add-TextBox 560 204 260 $true
+Add-Label "实例 ID" 540 206 | Out-Null
+$txtInstanceId = Add-TextBox 650 204 360 $true
 Add-Label "当前设备" 24 240 | Out-Null
-$txtDeviceName = Add-TextBox 170 238 250
+$txtDeviceName = Add-TextBox 190 238 320
 $txtDeviceName.Text = $env:COMPUTERNAME
-Add-Label "设备 ID" 450 240 | Out-Null
-$txtDeviceId = Add-TextBox 560 238 260 $true
+Add-Label "设备 ID" 540 240 | Out-Null
+$txtDeviceId = Add-TextBox 650 238 360 $true
 Add-Label "服务端名称" 24 274 | Out-Null
-$txtServerName = Add-TextBox 170 272 250
+$txtServerName = Add-TextBox 190 272 320
 $txtServerName.Text = "Minecraft 服务端"
-Add-Label "访问令牌状态" 450 274 | Out-Null
-$txtTokenStatus = Add-TextBox 560 272 260 $true
+Add-Label "访问令牌状态" 540 274 | Out-Null
+$txtTokenStatus = Add-TextBox 650 272 360 $true
 Add-Label "服务端目录" 24 308 | Out-Null
-$txtServerDir = Add-TextBox 170 306 500
-Add-Button "Choose dir" 680 303 { Choose-ServerDir } | Out-Null
+$txtServerDir = Add-TextBox 190 306 630
+Add-Button "Choose dir" 840 302 { Choose-ServerDir } | Out-Null
 
 Add-Label "实际请求 URL" 24 342 | Out-Null
-$txtActualRequestUrl = Add-TextBox 170 340 650 $true
+$txtActualRequestUrl = Add-TextBox 190 340 820 $true
 Add-Label "协议版本" 24 376 | Out-Null
-$txtProtocol = Add-TextBox 170 374 120 $true
-Add-Label "能力" 310 376 | Out-Null
-$txtCapabilities = Add-TextBox 420 374 400 $true
+$txtProtocol = Add-TextBox 190 374 160 $true
+Add-Label "能力" 380 376 | Out-Null
+$txtCapabilities = Add-TextBox 500 374 510 $true
 Add-Label "错误详情" 24 410 | Out-Null
-$txtErrorDetails = Add-TextBox 170 408 650 $true
+$txtErrorDetails = Add-TextBox 190 408 820 $true
 $txtServerId = Add-TextBox 24 442 120 $true
 $txtServerId.Visible = $false
-$txtAdvancedDiagnostics = Add-TextBox 170 442 650 $true
+$txtAdvancedDiagnostics = Add-TextBox 190 442 820 $true
 
-Add-Button "Refresh health" 170 450 { Refresh-Health; Refresh-Identity } | Out-Null
-Add-Button "Load config" 330 450 { Load-Config; Refresh-Identity } | Out-Null
-Add-Button "Save config" 490 450 { Save-Config } | Out-Null
-Add-Button "Test connection" 170 488 { Test-Coordinator } | Out-Null
-Add-Button "Initialize" 330 488 { Run-Init } | Out-Null
+Add-Button "Refresh health" 190 480 { Refresh-Health; Refresh-Identity } | Out-Null
+Add-Button "Load config" 350 480 { Load-Config; Refresh-Identity } | Out-Null
+Add-Button "Save config" 510 480 { Save-Config } | Out-Null
+Add-Button "Test connection" 670 480 { Test-Coordinator } | Out-Null
+Add-Button "Initialize" 190 518 { Run-Init } | Out-Null
 
 $txtOperation = New-Object System.Windows.Forms.TextBox
-$txtOperation.Location = New-Object System.Drawing.Point(24, 528)
-$txtOperation.Size = New-Object System.Drawing.Size(840, 70)
+$txtOperation.Location = New-Object System.Drawing.Point(24, 566)
+$txtOperation.Size = New-Object System.Drawing.Size(986, 78)
 $txtOperation.Multiline = $true
 $txtOperation.ScrollBars = "Vertical"
 $txtOperation.ReadOnly = $true
 $txtOperation.Font = New-Object System.Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtOperation)
 
-$txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(24, 612)
-$txtLog.Size = New-Object System.Drawing.Size(840, 48)
-$txtLog.Multiline = $true
-$txtLog.ScrollBars = "Vertical"
-$txtLog.ReadOnly = $true
-$txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
-$form.Controls.Add($txtLog)
-
 $grpListenerRelay = New-Object System.Windows.Forms.GroupBox
 $grpListenerRelay.Text = "监听 / VPS 中转"
-$grpListenerRelay.Location = New-Object System.Drawing.Point(24, 674)
-$grpListenerRelay.Size = New-Object System.Drawing.Size(840, 236)
+$grpListenerRelay.Location = New-Object System.Drawing.Point(24, 662)
+$grpListenerRelay.Size = New-Object System.Drawing.Size(986, 250)
 $form.Controls.Add($grpListenerRelay)
 
 function Add-GroupLabel {
@@ -665,7 +783,7 @@ function Add-GroupLabel {
     $label = New-Object System.Windows.Forms.Label
     $label.Text = $Text
     $label.Location = New-Object System.Drawing.Point($X, $Y)
-    $label.Size = New-Object System.Drawing.Size(120, 22)
+    $label.Size = New-Object System.Drawing.Size(120, 24)
     $grpListenerRelay.Controls.Add($label)
     return $label
 }
@@ -685,53 +803,53 @@ function Add-GroupButton {
     $button = New-Object System.Windows.Forms.Button
     $button.Text = $Text
     $button.Location = New-Object System.Drawing.Point($X, $Y)
-    $button.Size = New-Object System.Drawing.Size(130, 28)
+    $button.Size = New-Object System.Drawing.Size(150, 30)
     $button.Add_Click({ try { & $Click } catch { Show-Error $_.Exception.Message } }.GetNewClosure())
     $grpListenerRelay.Controls.Add($button)
     return $button
 }
 
 Add-GroupLabel "Local host" 16 28 | Out-Null
-$txtListenerHost = Add-GroupTextBox 118 26 140
+$txtListenerHost = Add-GroupTextBox 130 26 220
 $txtListenerHost.Text = "127.0.0.1"
-Add-GroupLabel "Local port" 270 28 | Out-Null
-$txtListenerPort = Add-GroupTextBox 368 26 80
+Add-GroupLabel "Local port" 380 28 | Out-Null
+$txtListenerPort = Add-GroupTextBox 490 26 90
 $txtListenerPort.Text = "25565"
-Add-GroupLabel "Public host" 470 28 | Out-Null
-$txtPublicHost = Add-GroupTextBox 568 26 140
-Add-GroupLabel "Public port" 16 62 | Out-Null
-$txtPublicPort = Add-GroupTextBox 118 60 80
+Add-GroupLabel "Public host" 610 28 | Out-Null
+$txtPublicHost = Add-GroupTextBox 720 26 180
+Add-GroupLabel "Public port" 16 64 | Out-Null
+$txtPublicPort = Add-GroupTextBox 130 62 90
 $txtPublicPort.Text = "25565"
 
-Add-GroupButton "Save listener" 220 58 { Save-ListenerConfig } | Out-Null
-Add-GroupButton "Refresh listener" 360 58 { Refresh-ListenerStatus } | Out-Null
-Add-GroupButton "Probe listener" 500 58 { Probe-Listener } | Out-Null
-Add-GroupButton "Configure relay" 640 58 { Configure-Relay } | Out-Null
-Add-GroupButton "Relay status" 640 92 { Refresh-RelayStatus } | Out-Null
+Add-GroupButton "Save listener" 240 62 { Save-ListenerConfig } | Out-Null
+Add-GroupButton "Refresh listener" 396 62 { Refresh-ListenerStatus } | Out-Null
+Add-GroupButton "Probe listener" 552 62 { Probe-Listener } | Out-Null
+Add-GroupButton "Configure relay" 708 62 { Configure-Relay } | Out-Null
+Add-GroupButton "Relay status" 824 96 { Refresh-RelayStatus } | Out-Null
 
-Add-GroupLabel "Listening" 16 96 | Out-Null
-$txtListening = Add-GroupTextBox 118 94 80 $true
-Add-GroupLabel "PID" 214 96 | Out-Null
-$txtListenerPid = Add-GroupTextBox 258 94 80 $true
-Add-GroupLabel "Process" 350 96 | Out-Null
-$txtListenerProcess = Add-GroupTextBox 430 94 190 $true
-Add-GroupLabel "Dir matched" 16 130 | Out-Null
-$txtServerDirMatched = Add-GroupTextBox 118 128 80 $true
-Add-GroupLabel "Local endpoint" 214 130 | Out-Null
-$txtLocalEndpoint = Add-GroupTextBox 318 128 160 $true
-Add-GroupLabel "Public endpoint" 490 130 | Out-Null
-$txtPublicEndpoint = Add-GroupTextBox 600 128 210 $true
-Add-GroupLabel "Command" 16 160 | Out-Null
-$txtListenerCommand = Add-GroupTextBox 118 158 350 $true
-Add-GroupLabel "Warnings" 482 160 | Out-Null
-$txtListenerWarnings = Add-GroupTextBox 560 158 250 $true
-$txtRelayState = Add-GroupTextBox 16 190 390 $true
-$txtRelayError = Add-GroupTextBox 420 190 390 $true
+Add-GroupLabel "Listening" 16 108 | Out-Null
+$txtListening = Add-GroupTextBox 130 106 90 $true
+Add-GroupLabel "PID" 248 108 | Out-Null
+$txtListenerPid = Add-GroupTextBox 300 106 100 $true
+Add-GroupLabel "Process" 430 108 | Out-Null
+$txtListenerProcess = Add-GroupTextBox 520 106 250 $true
+Add-GroupLabel "Dir matched" 760 108 | Out-Null
+$txtServerDirMatched = Add-GroupTextBox 880 106 90 $true
+Add-GroupLabel "Local endpoint" 16 142 | Out-Null
+$txtLocalEndpoint = Add-GroupTextBox 130 140 270 $true
+Add-GroupLabel "Public endpoint" 430 142 | Out-Null
+$txtPublicEndpoint = Add-GroupTextBox 560 140 410 $true
+Add-GroupLabel "Command" 16 176 | Out-Null
+$txtListenerCommand = Add-GroupTextBox 130 174 370 $true
+Add-GroupLabel "Warnings" 520 176 | Out-Null
+$txtListenerWarnings = Add-GroupTextBox 620 174 350 $true
+$txtRelayState = Add-GroupTextBox 16 210 460 $true
+$txtRelayError = Add-GroupTextBox 510 210 460 $true
 
 $grpBackup = New-Object System.Windows.Forms.GroupBox
 $grpBackup.Text = "备份 / 快照"
-$grpBackup.Location = New-Object System.Drawing.Point(24, 924)
-$grpBackup.Size = New-Object System.Drawing.Size(840, 230)
+$grpBackup.Location = New-Object System.Drawing.Point(24, 930)
+$grpBackup.Size = New-Object System.Drawing.Size(986, 250)
 $form.Controls.Add($grpBackup)
 
 function Add-BackupLabel {
@@ -739,7 +857,7 @@ function Add-BackupLabel {
     $label = New-Object System.Windows.Forms.Label
     $label.Text = $Text
     $label.Location = New-Object System.Drawing.Point($X, $Y)
-    $label.Size = New-Object System.Drawing.Size(120, 22)
+    $label.Size = New-Object System.Drawing.Size(120, 24)
     $grpBackup.Controls.Add($label)
     return $label
 }
@@ -759,44 +877,60 @@ function Add-BackupButton {
     $button = New-Object System.Windows.Forms.Button
     $button.Text = $Text
     $button.Location = New-Object System.Drawing.Point($X, $Y)
-    $button.Size = New-Object System.Drawing.Size(130, 28)
+    $button.Size = New-Object System.Drawing.Size(170, 30)
     $button.Add_Click({ try { & $Click } catch { Show-Error $_.Exception.Message } }.GetNewClosure())
     $grpBackup.Controls.Add($button)
     return $button
 }
 
 Add-BackupButton "Analyze backup" 16 26 { Analyze-Backup } | Out-Null
-Add-BackupButton "Upload backup" 156 26 { Upload-Backup } | Out-Null
-Add-BackupButton "List snapshots" 296 26 { Refresh-Snapshots } | Out-Null
-Add-BackupButton "Download latest" 436 26 { Download-LatestSnapshot } | Out-Null
-Add-BackupButton "Download selected" 576 26 { Download-SelectedSnapshot } | Out-Null
+Add-BackupButton "Upload backup" 198 26 { Upload-Backup } | Out-Null
+Add-BackupButton "List snapshots" 380 26 { Refresh-Snapshots } | Out-Null
+Add-BackupButton "Download latest" 562 26 { Download-LatestSnapshot } | Out-Null
+Add-BackupButton "Download selected" 744 26 { Download-SelectedSnapshot } | Out-Null
 
 Add-BackupLabel "Snapshot ID" 16 66 | Out-Null
-$txtSnapshotId = Add-BackupTextBox 118 64 210
-Add-BackupLabel "Restore target" 344 66 | Out-Null
-$txtRestoreTargetDir = Add-BackupTextBox 450 64 220
-Add-BackupButton "Choose target" 680 61 { Choose-RestoreDir } | Out-Null
+$txtSnapshotId = Add-BackupTextBox 130 64 260
+Add-BackupLabel "Restore target" 420 66 | Out-Null
+$txtRestoreTargetDir = Add-BackupTextBox 540 64 260
+Add-BackupButton "Choose target" 810 61 { Choose-RestoreDir } | Out-Null
 $chkAllowNonEmpty = New-Object System.Windows.Forms.CheckBox
 $chkAllowNonEmpty.Text = "allow non-empty target"
-$chkAllowNonEmpty.Location = New-Object System.Drawing.Point(118, 96)
-$chkAllowNonEmpty.Size = New-Object System.Drawing.Size(180, 24)
+$chkAllowNonEmpty.Location = New-Object System.Drawing.Point(130, 96)
+$chkAllowNonEmpty.Size = New-Object System.Drawing.Size(220, 24)
 $grpBackup.Controls.Add($chkAllowNonEmpty)
 
 Add-BackupLabel "Summary" 16 128 | Out-Null
-$txtBackupSummary = Add-BackupTextBox 118 126 690 $true
+$txtBackupSummary = Add-BackupTextBox 130 126 840 $true
 Add-BackupLabel "Snapshots" 16 160 | Out-Null
-$txtSnapshotList = Add-BackupTextBox 118 158 340 $true
-Add-BackupLabel "Error" 470 160 | Out-Null
-$txtBackupError = Add-BackupTextBox 530 158 278 $true
+$txtSnapshotList = Add-BackupTextBox 130 158 360 $true
+Add-BackupLabel "Error" 510 160 | Out-Null
+$txtBackupError = Add-BackupTextBox 610 158 360 $true
+
+$txtLog = New-Object System.Windows.Forms.TextBox
+$txtLog.Location = New-Object System.Drawing.Point(24, 1198)
+$txtLog.Size = New-Object System.Drawing.Size(986, 120)
+$txtLog.Multiline = $true
+$txtLog.ScrollBars = "Vertical"
+$txtLog.ReadOnly = $true
+$txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
+$form.Controls.Add($txtLog)
+foreach ($line in $script:StartupErrors) {
+    $txtLog.AppendText(($line + [Environment]::NewLine))
+}
 
 $form.Add_Shown({
     try {
+        Fit-FormToWorkingArea $form
         Start-Body
         Refresh-Health
         Load-Config
         Refresh-Identity
+        if ($lblState.Text -eq "State: starting") {
+            $lblState.Text = "State: ready"
+        }
     } catch {
-        Show-Error ("Startup failed: " + $_.Exception.Message)
+        Show-Error (Format-ExceptionDetails -ErrorRecord $_ -Context "Startup failed")
     }
 })
 
