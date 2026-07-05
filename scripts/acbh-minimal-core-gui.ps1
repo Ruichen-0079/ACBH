@@ -12,6 +12,7 @@ if ($SelfTest) {
     $checks = @(
         "Refresh-ListenerStatus",
         "Save-ListenerConfig",
+        "Format-BodyError",
         "Configure-Relay",
         "Refresh-RelayStatus",
         "txtPublicEndpoint",
@@ -96,6 +97,78 @@ function Redact-Secrets {
     return $safe
 }
 
+function Format-BodyError {
+    param([object]$ErrorRecord)
+    $fallback = $ErrorRecord.Exception.Message
+    $rawBody = $null
+    if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+        $rawBody = $ErrorRecord.ErrorDetails.Message
+    }
+    if ([string]::IsNullOrWhiteSpace($rawBody)) {
+        return $fallback
+    }
+
+    try {
+        $payload = $rawBody | ConvertFrom-Json
+    } catch {
+        return $fallback
+    }
+
+    $err = $payload
+    if ($payload.error) {
+        $err = $payload.error
+    }
+    $code = [string]$err.errorCode
+    $message = [string]$err.message
+    $suggestion = [string]$err.suggestion
+    $configPath = ""
+    if ($err.details -and $err.details.configPath) {
+        $configPath = [string]$err.details.configPath
+    }
+
+    switch ($code) {
+        "config_missing" {
+            $text = "未找到配置文件，程序已尝试自动创建。请检查配置目录权限"
+            if ($configPath) { $text += "：" + [Environment]::NewLine + $configPath }
+            return $text
+        }
+        "config_write_failed" {
+            $text = "无法写入配置文件。请检查配置目录权限"
+            if ($configPath) { $text += "：" + [Environment]::NewLine + $configPath }
+            if ($message) { $text += [Environment]::NewLine + $message }
+            return $text
+        }
+        "config_parse_error" {
+            $text = "配置文件格式错误，程序不会自动覆盖现有文件。请修复 config.json 后重试"
+            if ($configPath) { $text += "：" + [Environment]::NewLine + $configPath }
+            return $text
+        }
+        "config_invalid" {
+            $text = "配置还不完整或格式不正确"
+            if ($message) { $text += "：" + $message }
+            if ($configPath) { $text += [Environment]::NewLine + $configPath }
+            if ($suggestion) { $text += [Environment]::NewLine + $suggestion }
+            return $text
+        }
+        "identity_incomplete" {
+            $text = "访问令牌或私有实例身份尚未配置完整。请先保存或迁移包含令牌的配置。"
+            if ($configPath) { $text += [Environment]::NewLine + $configPath }
+            return $text
+        }
+        default {
+            if ($code -or $message) {
+                $text = "请求失败"
+                if ($code) { $text += "（" + $code + "）" }
+                if ($message) { $text += "：" + $message }
+                if ($suggestion) { $text += [Environment]::NewLine + $suggestion }
+                return $text
+            }
+        }
+    }
+
+    return $fallback
+}
+
 function Add-Log {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
@@ -164,11 +237,7 @@ function Invoke-BodyJson {
         }
         return Invoke-RestMethod -Method $Method -Uri $uri
     } catch {
-        $detail = $_.Exception.Message
-        if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
-            $detail += [Environment]::NewLine + $_.ErrorDetails.Message
-        }
-        throw $detail
+        throw (Format-BodyError $_)
     }
 }
 

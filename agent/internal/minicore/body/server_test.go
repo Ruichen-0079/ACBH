@@ -234,6 +234,28 @@ func TestBodyConfigPutGet(t *testing.T) {
 	}
 }
 
+func TestBodyConfigPutDoesNotSaveRedactedPlaceholderWithoutExistingConfig(t *testing.T) {
+	srv := New("127.0.0.1:6120", t.TempDir())
+	cfg := coreconfig.DefaultConfig()
+	cfg.CoordinatorURL = "http://public.example.test:6121"
+	cfg.Instance.OwnerToken = "[redacted]"
+	cfg.Compat.LegacyHostToken = "[redacted]"
+	data, _ := json.Marshal(cfg)
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/config", bytes.NewReader(data)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT /v1/config status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	got, loadErr := srv.ConfigStore.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.Instance.OwnerToken != "" || got.Compat.LegacyHostToken != "" {
+		t.Fatalf("redacted placeholders were saved as tokens: %#v %#v", got.Instance, got.Compat)
+	}
+}
+
 func TestBodyProbeAndInit(t *testing.T) {
 	coord := mockCoordinator(t)
 	defer coord.Close()
@@ -277,6 +299,54 @@ func TestBodyProbeAndInit(t *testing.T) {
 	}
 	if !strings.Contains(body, "私人实例已连接") {
 		t.Fatalf("init response missing single-owner wording: %s", body)
+	}
+}
+
+func TestBodyInitCreatesDefaultConfigWhenMissing(t *testing.T) {
+	appData := filepath.Join(t.TempDir(), "用户 空格", "ACBH")
+	srv := New("127.0.0.1:6120", appData)
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/init", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("init without coordinator status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var op operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.ErrorCode == coreerrors.ConfigMissing {
+		t.Fatalf("init returned config_missing after auto-create: %#v", op)
+	}
+	if op.ErrorCode != coreerrors.ConfigInvalid {
+		t.Fatalf("init errorCode = %q, want config_invalid for missing coordinatorUrl", op.ErrorCode)
+	}
+	if _, err := os.Stat(srv.ConfigStore.Path); err != nil {
+		t.Fatalf("init did not create config.json: %v", err)
+	}
+}
+
+func TestBodyInitDoesNotOverwriteBrokenConfig(t *testing.T) {
+	appData := t.TempDir()
+	srv := New("127.0.0.1:6120", appData)
+	if err := os.WriteFile(srv.ConfigStore.Path, []byte(`{ bad json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/init", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("init bad json status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var op operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.ErrorCode != coreerrors.ConfigParseError {
+		t.Fatalf("init bad json errorCode = %q, want config_parse_error", op.ErrorCode)
+	}
+	if _, err := os.Stat(srv.ConfigStore.Path); !os.IsNotExist(err) {
+		t.Fatalf("broken config was overwritten or stat failed with non-not-exist err: %v", err)
 	}
 }
 
@@ -426,6 +496,35 @@ func TestBodyListenerAPIs(t *testing.T) {
 	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/listener/config", bytes.NewReader(data)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("listener/config status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/listener/probe", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("listener/probe status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBodyListenerConfigCreatesDefaultConfigWhenMissing(t *testing.T) {
+	srv := New("127.0.0.1:6120", filepath.Join(t.TempDir(), "ACBH 空格"))
+	srv.Listener = listener.Service{Inspector: bodyFakeInspector{listeners: []listener.Listener{{LocalAddress: "127.0.0.1", LocalPort: 25566, PID: 123}}}}
+
+	listenerCfg := coreconfig.ListenerConfig{Enabled: true, LocalHost: "127.0.0.1", LocalPort: 25566, ExpectedProcessNames: []string{"java.exe"}, ServerDirMatchRequired: false}
+	data, _ := json.Marshal(listenerCfg)
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/listener/config", bytes.NewReader(data)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("listener/config missing config status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(srv.ConfigStore.Path); err != nil {
+		t.Fatalf("listener/config did not create config.json: %v", err)
+	}
+	got, loadErr := srv.ConfigStore.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() after listener/config error = %v", loadErr)
+	}
+	if got.Listener.LocalPort != 25566 || got.Listener.LocalHost != "127.0.0.1" {
+		t.Fatalf("listener config not saved: %#v", got.Listener)
 	}
 
 	rec = httptest.NewRecorder()

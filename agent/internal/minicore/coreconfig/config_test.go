@@ -36,6 +36,71 @@ func TestValidConfigLoads(t *testing.T) {
 	}
 }
 
+func TestLoadOrCreateWritesDefaultConfigWhenMissing(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "含 空格", "ACBH"))
+
+	got, loadErr := store.LoadOrCreate()
+	if loadErr != nil {
+		t.Fatalf("LoadOrCreate() error = %v", loadErr)
+	}
+	if got.SchemaVersion != 2 || got.Mode == "" || got.Listener.LocalHost != "127.0.0.1" || got.Listener.LocalPort != 25565 {
+		t.Fatalf("default config = %#v", got)
+	}
+	if _, err := os.Stat(store.Path); err != nil {
+		t.Fatalf("config.json was not created: %v", err)
+	}
+
+	got.Listener.LocalPort = 25566
+	if err := store.Save(got); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	again, loadErr := store.LoadOrCreate()
+	if loadErr != nil {
+		t.Fatalf("second LoadOrCreate() error = %v", loadErr)
+	}
+	if again.Listener.LocalPort != 25566 {
+		t.Fatalf("LoadOrCreate() overwrote existing listener: %#v", again.Listener)
+	}
+}
+
+func TestLoadOrCreateDoesNotOverwriteBrokenJSON(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if err := os.WriteFile(store.Path, []byte(`{ bad json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, loadErr := store.LoadOrCreate()
+	if loadErr == nil || loadErr.ErrorCode != coreerrors.ConfigParseError {
+		t.Fatalf("LoadOrCreate() error = %v, want config_parse_error", loadErr)
+	}
+	if _, err := os.Stat(store.Path); !os.IsNotExist(err) {
+		t.Fatalf("broken config path exists or stat failed with non-not-exist err: %v", err)
+	}
+	matches, err := filepath.Glob(store.Path + ".broken-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("broken backup count = %d, want 1", len(matches))
+	}
+}
+
+func TestDraftConfigWithoutCoordinatorOrIdentityLoads(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := DefaultConfig()
+
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save(default draft) error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load(default draft) error = %v", loadErr)
+	}
+	if got.CoordinatorURL != "" || got.Instance.OwnerToken != "" || got.Compat.LegacyHostToken != "" {
+		t.Fatalf("draft config gained coordinator or token fields: %#v", got)
+	}
+}
+
 func TestInvalidJSONReportsParseErrorAndBacksUp(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore(dir)
