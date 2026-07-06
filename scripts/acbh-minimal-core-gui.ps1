@@ -198,6 +198,14 @@ function Normalize-GuiStatusValue {
                 { $_ -in @("not_configured", "missing") } { return "未配置" }
             }
         }
+        "bootstrap" {
+            switch ($key) {
+                { $_ -in @("ok", "success", "verified", "upserted") } { return "已注册" }
+                { $_ -in @("failed", "error") } { return "失败" }
+                { $_ -in @("not_configured", "missing", "skipped") } { return "未检测" }
+                { $_ -in @("pending", "checking") } { return "检测中" }
+            }
+        }
         "bool" {
             switch ($key) {
                 "true" { return "是" }
@@ -525,6 +533,16 @@ function Test-GuiNullSafeBehavior {
             if ($built) { $AgentPath = $built.FullName }
         }
         if (Test-Path $AgentPath) {
+            if ($script:BodyProcess -and -not $script:BodyProcess.HasExited) {
+                try { $script:BodyProcess.Kill() } catch {}
+            }
+            $script:BodyProcess = $null
+            try {
+                Get-NetTCPConnection -LocalPort 6120 -State Listen -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty OwningProcess -Unique |
+                    ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+            } catch {}
+            Start-Sleep -Milliseconds 400
             Install-MockGuiControls @{
                 txtCoordinator = (New-MockTextControl "")
                 txtAccessToken = (New-MockTextControl "")
@@ -1011,6 +1029,7 @@ function Test-Coordinator {
         Set-ControlText $txtLocalBodyStatus "检测中"
         Set-ControlText $txtCoordinatorCheckStatus "检测中"
         Set-ControlText $txtTokenValidationStatus "检测中"
+        Set-ControlText $txtBootstrapStatus "检测中"
         Set-ControlText $txtRelayCheckStatus "检测中"
         if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法测试连接。" }
         Set-Status $txtLocalBodyStatus "ok" "body"
@@ -1031,17 +1050,22 @@ function Test-Coordinator {
             }
             Refresh-Identity
             Test-TokenValidation
+            Test-BootstrapStatus
             Test-RelayStatus
         } else {
             $lblState.Text = "状态：VPS Coordinator 连接失败"
             Set-Status $txtCoordinatorCheckStatus "failed" "coordinator"
             Set-ControlText $txtTokenValidationStatus (Get-TrimmedTextSafe $txtTokenStatus "未配置")
+            Set-Status $txtBootstrapStatus "not_configured" "bootstrap"
             Set-ControlText $txtRelayCheckStatus "未检测"
             if ($op.error) {
                 Set-ControlText $txtActualRequestUrl $op.error.details.url
                 Set-Diagnostics ("errorCode=$($op.error.errorCode)" + [Environment]::NewLine + (Format-ErrorDetails $op.error.details))
                 if ($op.error.errorCode -eq "coordinator_protocol_mismatch") {
                     Set-Status $txtCoordinatorCheckStatus "version_mismatch" "coordinator"
+                } elseif ($op.error.errorCode -eq "coordinator_capability_missing") {
+                    Set-Status $txtCoordinatorCheckStatus "version_mismatch" "coordinator"
+                    Set-Diagnostics "VPS Coordinator 版本不支持 token-only relay。请升级 Coordinator 后再试。"
                 } elseif ($op.error.errorCode -eq "coordinator_unreachable") {
                     Set-Status $txtCoordinatorCheckStatus "unreachable" "coordinator"
                 } elseif ($op.error.errorCode -eq "coordinator_server_error") {
@@ -1069,6 +1093,7 @@ function Test-TokenValidation {
     if ((Get-TrimmedTextSafe $txtTokenStatus "未配置") -ne "已配置") {
         Set-Status $txtTokenStatus "not_configured" "token"
         Set-Status $txtTokenValidationStatus "not_configured" "token"
+        Set-Status $txtBootstrapStatus "not_configured" "bootstrap"
         return
     }
     try {
@@ -1076,20 +1101,36 @@ function Test-TokenValidation {
         if ($op.state -eq "success") {
             Set-Status $txtTokenStatus "verified" "token"
             Set-Status $txtTokenValidationStatus "verified" "token"
+            Set-Status $txtBootstrapStatus "ok" "bootstrap"
         } elseif ($op.error -and ($op.error.errorCode -eq "auth_invalid" -or $op.error.errorCode -eq "auth_missing")) {
             Set-Status $txtTokenStatus "invalid" "token"
             Set-Status $txtTokenValidationStatus "invalid" "token"
+            Set-Status $txtBootstrapStatus "failed" "bootstrap"
+            if ($op.error.message) { Set-Diagnostics ("访问令牌无效：" + (Redact-Secrets $op.error.message)) }
+        } elseif ($op.error -and $op.error.errorCode -eq "coordinator_capability_missing") {
+            Set-Status $txtBootstrapStatus "failed" "bootstrap"
+            Set-Diagnostics "VPS Coordinator 版本不支持 token-only relay。"
         } else {
             Set-ControlText $txtTokenValidationStatus (Get-TrimmedTextSafe $txtTokenStatus "未配置")
+            Set-Status $txtBootstrapStatus "not_configured" "bootstrap"
         }
     } catch {
-        if ($_.Exception.Message -match "401|auth|token|令牌") {
+        if ($_.Exception.Message -match "401|auth|token|令牌|访问令牌无效") {
             Set-Status $txtTokenStatus "invalid" "token"
             Set-Status $txtTokenValidationStatus "invalid" "token"
+            Set-Status $txtBootstrapStatus "failed" "bootstrap"
         } else {
             Set-ControlText $txtTokenValidationStatus (Get-TrimmedTextSafe $txtTokenStatus "未配置")
+            Set-Status $txtBootstrapStatus "not_configured" "bootstrap"
             Add-Log ("访问令牌验证跳过：" + $_.Exception.Message)
         }
+    }
+}
+
+function Test-BootstrapStatus {
+    if ((Get-TrimmedTextSafe $txtBootstrapStatus "未检测") -eq "已注册") { return }
+    if ((Get-TrimmedTextSafe $txtTokenValidationStatus "未配置") -eq "已验证") {
+        Set-Status $txtBootstrapStatus "ok" "bootstrap"
     }
 }
 
@@ -1099,13 +1140,17 @@ function Test-RelayStatus {
         Set-RelayFields $status.relay
         if ($status.relay.active) {
             Set-Status $txtRelayCheckStatus "running" "relay"
+            Set-Status $txtRelayProbeStatus "running" "relay"
         } elseif ($status.relay.configured) {
             Set-Status $txtRelayCheckStatus "configured" "relay"
+            Set-Status $txtRelayProbeStatus "configured" "relay"
         } else {
             Set-Status $txtRelayCheckStatus "not_configured" "relay"
+            Set-Status $txtRelayProbeStatus "not_configured" "relay"
         }
     } catch {
         Set-Status $txtRelayCheckStatus "not_configured" "relay"
+        Set-Status $txtRelayProbeStatus "not_configured" "relay"
         Add-Log ("中转状态尚未就绪：" + $_.Exception.Message)
     }
 }
@@ -1123,15 +1168,7 @@ function Refresh-Identity {
         if ($id.compat.ownerTokenPresent -or $id.compat.legacyHostTokenPresent) {
             Set-Status $txtTokenStatus "configured" "token"
         }
-        Set-ControlText $txtLegacyGroupId ($(if ($id.compat.legacyGroupIdPresent) { "已生成" } else { "未配置" }))
-        Set-ControlText $txtLegacyHostId ($(if ($id.compat.legacyHostIdPresent) { "已生成" } else { "未配置" }))
-        $debug = "usesLegacyGroupApi=$($id.compat.usesLegacyGroupApi); legacyGroupIdPresent=$($id.compat.legacyGroupIdPresent); legacyHostIdPresent=$($id.compat.legacyHostIdPresent)"
-        Add-Log $debug
-        if ($id.compat.usesLegacyGroupApi -and (-not $id.compat.legacyGroupIdPresent -or -not $id.compat.legacyHostIdPresent)) {
-            Set-ControlText $txtAdvancedDiagnostics "检测到旧版组/主机协议，但当前配置缺少 groupId/hostId。程序将自动从实例 ID / 设备 ID 生成兼容字段。"
-        } else {
-            Set-ControlText $txtAdvancedDiagnostics "兼容字段已就绪。"
-        }
+        Set-ControlText $txtAdvancedDiagnostics "token-only relay 模式：使用访问令牌 + 实例/设备 ID。"
         Add-Log "本机身份已刷新。"
     } catch {
         Add-Log ("本机身份尚未加载：" + $_.Exception.Message)
@@ -1668,19 +1705,25 @@ Add-Button "保存配置" 200 32 { Save-Config; Update-StepStatus } $grpActions 
 Add-Button "测试连接" 352 32 { Test-Coordinator; Update-StepStatus } $grpActions 140 32 | Out-Null
 Add-Button "配置 VPS 中转" 504 32 { Configure-Relay; Update-StepStatus } $grpActions 160 32 | Out-Null
 Add-Button "刷新状态" 676 32 { Refresh-Health; Load-Config; Refresh-Identity; Refresh-RelayStatus; Update-StepStatus } $grpActions 140 32 | Out-Null
-Add-Button "生成/注册身份" 828 32 { Register-Identity; Update-StepStatus } $grpActions 150 32 | Out-Null
+
 
 $grpStatus = Add-GroupBox "状态" 24 816 1210 146
 Add-Label "本地 Body API" 18 34 $grpStatus 120 | Out-Null
 $txtLocalBodyStatus = Add-TextBox 150 32 160 $true $grpStatus
 Set-Status $txtLocalBodyStatus "unreachable" "body"
-Add-Label "访问令牌验证" 340 34 $grpStatus 120 | Out-Null
-$txtTokenValidationStatus = Add-TextBox 470 32 160 $true $grpStatus
+Add-Label "访问令牌" 340 34 $grpStatus 90 | Out-Null
+$txtTokenValidationStatus = Add-TextBox 430 32 120 $true $grpStatus
 Set-Status $txtTokenValidationStatus "not_configured" "token"
-Add-Label "协议版本" 660 34 $grpStatus 90 | Out-Null
-$txtProtocol = Add-TextBox 750 32 120 $true $grpStatus
-Add-Label "版本" 900 34 $grpStatus 60 | Out-Null
-$txtCoordinatorVersion = Add-TextBox 960 32 220 $true $grpStatus
+Add-Label "远端初始化" 570 34 $grpStatus 90 | Out-Null
+$txtBootstrapStatus = Add-TextBox 660 32 120 $true $grpStatus
+Set-Status $txtBootstrapStatus "not_configured" "bootstrap"
+Add-Label "中转接口" 800 34 $grpStatus 90 | Out-Null
+$txtRelayProbeStatus = Add-TextBox 890 32 120 $true $grpStatus
+Set-Status $txtRelayProbeStatus "not_configured" "relay"
+Add-Label "协议版本" 1020 34 $grpStatus 90 | Out-Null
+$txtProtocol = Add-TextBox 1110 32 70 $true $grpStatus
+Add-Label "Coordinator 版本" 18 114 $grpStatus 120 | Out-Null
+$txtCoordinatorVersion = Add-TextBox 150 112 220 $true $grpStatus
 Add-Label "诊断提示" 18 74 $grpStatus 120 | Out-Null
 $txtErrorDetails = Add-TextBox 150 72 1030 $true $grpStatus $false 54 $true
 
@@ -1715,10 +1758,6 @@ Add-Label "实例 ID" 360 74 $grpAdvanced 80 | Out-Null
 $txtInstanceId = Add-TextBox 450 72 300 $true $grpAdvanced
 Add-Label "设备 ID" 780 74 $grpAdvanced 80 | Out-Null
 $txtDeviceId = Add-TextBox 870 72 310 $true $grpAdvanced
-Add-Label "legacyGroupId" 18 114 $grpAdvanced 120 | Out-Null
-$txtLegacyGroupId = Add-TextBox 150 112 300 $true $grpAdvanced
-Add-Label "legacyHostId" 480 114 $grpAdvanced 120 | Out-Null
-$txtLegacyHostId = Add-TextBox 610 112 300 $true $grpAdvanced
 $txtServerId = Add-TextBox 930 112 250 $true $grpAdvanced
 $txtServerId.Visible = $false
 Add-Label "实际请求 URL" 18 154 $grpAdvanced 120 | Out-Null

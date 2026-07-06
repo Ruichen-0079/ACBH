@@ -85,6 +85,31 @@ type EnsureActiveLeaseResponse struct {
 	Message string          `json:"message"`
 }
 
+type BootstrapRequest struct {
+	InstanceID   string `json:"instanceId"`
+	InstanceName string `json:"instanceName"`
+	DeviceID     string `json:"deviceId"`
+	DeviceName   string `json:"deviceName"`
+	ServerID     string `json:"serverId"`
+	ServerName   string `json:"serverName"`
+}
+
+type BootstrapResponse struct {
+	OK         bool   `json:"ok"`
+	InstanceID string `json:"instanceId"`
+	DeviceID   string `json:"deviceId"`
+	ServerID   string `json:"serverId"`
+	GroupID    string `json:"groupId"`
+	HostID     string `json:"hostId"`
+	MemberID   string `json:"memberId"`
+	Upserted   bool   `json:"upserted"`
+}
+
+type AuthVerifyResponse struct {
+	OK                 bool   `json:"ok"`
+	AuthenticationMode string `json:"authenticationMode"`
+}
+
 type WorldBackupPlanRequest struct {
 	HostID           string                      `json:"hostId"`
 	HostToken        string                      `json:"hostToken"`
@@ -202,6 +227,18 @@ func (c *Client) Health(ctx context.Context) (Health, *coreerrors.Error) {
 func (c *Client) Capabilities(ctx context.Context) (Capabilities, *coreerrors.Error) {
 	var out Capabilities
 	err := c.doJSON(ctx, http.MethodGet, "/v1/capabilities", nil, nil, &out)
+	return out, err
+}
+
+func (c *Client) Bootstrap(ctx context.Context, accessToken string, req BootstrapRequest) (BootstrapResponse, *coreerrors.Error) {
+	var out BootstrapResponse
+	err := c.doJSON(ctx, http.MethodPost, "/v1/bootstrap", req, bearerHeaders(accessToken), &out)
+	return out, err
+}
+
+func (c *Client) VerifyAuth(ctx context.Context, accessToken string) (AuthVerifyResponse, *coreerrors.Error) {
+	var out AuthVerifyResponse
+	err := c.doJSON(ctx, http.MethodPost, "/v1/auth/verify", map[string]any{}, bearerHeaders(accessToken), &out)
 	return out, err
 }
 
@@ -331,7 +368,7 @@ func (c *Client) Probe(ctx context.Context) (ProbeResult, *coreerrors.Error) {
 		return result, coreerrors.New(coreerrors.CoordinatorProtocolMismatch, "coordinator protocolVersion is not 2", coreerrors.Details{CoordinatorURL: c.baseURL}, "Upgrade or point to a protocolVersion=2 coordinator.")
 	}
 	if !result.CapabilitiesOK {
-		return result, coreerrors.New(coreerrors.CoordinatorCapabilityMissing, "coordinator capabilities are incomplete", coreerrors.Details{CoordinatorURL: c.baseURL}, "Use a coordinator with alpha6/hotfix2 capabilities.")
+		return result, coreerrors.New(coreerrors.CoordinatorCapabilityMissing, "VPS Coordinator 版本不支持 token-only relay", coreerrors.Details{CoordinatorURL: c.baseURL}, "请升级 VPS Coordinator 到支持 token_only_relay_v1 / bootstrap_upsert_v1 的版本。")
 	}
 	result.RouteProbes = c.routeProbes(ctx)
 	for _, probe := range result.RouteProbes {
@@ -349,10 +386,11 @@ func (c *Client) routeProbes(ctx context.Context) []RouteProbe {
 		path   string
 		body   any
 	}{
+		{http.MethodPost, "/v1/bootstrap", map[string]any{}},
+		{http.MethodPost, "/v1/auth/verify", map[string]any{}},
 		{http.MethodGet, "/v1/groups/grp_test/whoami", nil},
 		{http.MethodGet, "/v1/groups/grp_test/lease/status", nil},
 		{http.MethodPost, "/v1/groups/grp_test/lease/ensure-active", map[string]any{}},
-		{http.MethodGet, "/v1/groups/grp_test/members", nil},
 		{http.MethodPost, "/v1/hosts/heartbeat", map[string]any{}},
 	}
 	probes := make([]RouteProbe, 0, len(requests))
@@ -457,7 +495,9 @@ func responseError(method string, rawURL string, status int, body string) *coree
 	case coreerrors.CoordinatorRouteMissing:
 		message = "VPS Coordinator 接口探测失败。请查看实际请求 URL、HTTP 状态和响应体。"
 	case coreerrors.AuthMissing:
-		message = "host authentication is required"
+		message = "访问令牌缺失"
+	case coreerrors.AuthInvalid:
+		message = "访问令牌无效"
 	case coreerrors.LeaseExpired:
 		message = "当前设备的 VPS 会话已过期，需要重新验证。"
 	case coreerrors.NotCurrentHost:
@@ -492,7 +532,9 @@ func classifyStatus(status int, body string) coreerrors.ErrorCode {
 	switch {
 	case isCoordinatorRouteMissing(status, body):
 		return coreerrors.CoordinatorRouteMissing
-	case status == http.StatusUnauthorized && strings.Contains(lower, "host_auth_required"):
+	case status == http.StatusUnauthorized && strings.Contains(lower, "access_token_invalid"):
+		return coreerrors.AuthInvalid
+	case status == http.StatusUnauthorized && (strings.Contains(lower, "access_token_required") || strings.Contains(lower, "host_auth_required") || strings.Contains(lower, "missing_host_token")):
 		return coreerrors.AuthMissing
 	case status == http.StatusForbidden && strings.Contains(lower, "host_lease_expired"):
 		return coreerrors.LeaseExpired
@@ -506,8 +548,12 @@ func classifyStatus(status int, body string) coreerrors.ErrorCode {
 		return coreerrors.BackupObjectTooLarge
 	case status == http.StatusUnauthorized:
 		return coreerrors.AuthMissing
+	case status == http.StatusForbidden && strings.Contains(lower, "access_token_invalid"):
+		return coreerrors.AuthInvalid
 	case status == http.StatusForbidden:
 		return coreerrors.AuthInvalid
+	case status == http.StatusNotFound:
+		return coreerrors.InvalidRequest
 	case status >= 500:
 		return coreerrors.CoordinatorServerError
 	default:
@@ -540,8 +586,14 @@ func authHeaders(hostID string, hostToken string) map[string]string {
 	}
 }
 
+func bearerHeaders(accessToken string) map[string]string {
+	return map[string]string{
+		"Authorization": "Bearer " + accessToken,
+	}
+}
+
 func hasRequiredCapabilities(capabilities []string) bool {
-	required := []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"}
+	required := []string{"lease_renew_v1", "world_backup_v1", "public_relay_v1", "token_only_relay_v1", "bootstrap_upsert_v1"}
 	set := map[string]bool{}
 	for _, capability := range capabilities {
 		set[capability] = true

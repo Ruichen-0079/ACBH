@@ -24,7 +24,7 @@ func TestAdapterMapsSingleOwnerToLegacyCoordinatorIdentity(t *testing.T) {
 	}
 }
 
-func TestAdapterMissingCompatReturnsIdentityIncomplete(t *testing.T) {
+func TestAdapterMissingAccessTokenReturnsIdentityIncomplete(t *testing.T) {
 	cfg := coreconfig.DefaultConfig()
 	cfg.CoordinatorURL = "http://121.40.101.224:6121"
 	cfg.Instance.InstanceID = "inst_1"
@@ -34,6 +34,22 @@ func TestAdapterMissingCompatReturnsIdentityIncomplete(t *testing.T) {
 	_, err := Adapter(cfg)
 	if err == nil || err.ErrorCode != coreerrors.IdentityIncomplete {
 		t.Fatalf("Adapter() error = %v, want identity_incomplete", err)
+	}
+}
+
+func TestAdapterTokenOnlyMapsInstanceAndDeviceIDs(t *testing.T) {
+	cfg := coreconfig.DefaultConfig()
+	cfg.CoordinatorURL = "http://121.40.101.224:6121"
+	cfg.Instance = coreconfig.InstanceConfig{InstanceID: "inst_1", OwnerToken: "access-token"}
+	cfg.Device = coreconfig.DeviceConfig{DeviceID: "dev_1", DisplayName: "PC", Platform: "windows"}
+	cfg.Server.ServerID = "srv_1"
+
+	got, err := Adapter(cfg)
+	if err != nil {
+		t.Fatalf("Adapter() error = %v", err)
+	}
+	if got.GroupID != "inst_1" || got.HostID != "dev_1" || got.HostToken != "access-token" {
+		t.Fatalf("identity = %#v", got)
 	}
 }
 

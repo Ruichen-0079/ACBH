@@ -10,15 +10,25 @@ import (
 )
 
 type fakeClient struct {
-	ensureErr *coreerrors.Error
-	hbErr     *coreerrors.Error
-	statusErr *coreerrors.Error
-	lease     coordinatorclient.HostLeaseStatus
+	bootstrapErr *coreerrors.Error
+	ensureErr    *coreerrors.Error
+	hbErr        *coreerrors.Error
+	statusErr    *coreerrors.Error
+	lease        coordinatorclient.HostLeaseStatus
 
+	bootstrapReq coordinatorclient.BootstrapRequest
 	ensureGroupID string
 	ensureHostID  string
 	ensureToken   string
 	heartbeat     coordinatorclient.HeartbeatRequest
+}
+
+func (f *fakeClient) Bootstrap(ctx context.Context, accessToken string, req coordinatorclient.BootstrapRequest) (coordinatorclient.BootstrapResponse, *coreerrors.Error) {
+	f.bootstrapReq = req
+	if f.bootstrapErr != nil {
+		return coordinatorclient.BootstrapResponse{}, f.bootstrapErr
+	}
+	return coordinatorclient.BootstrapResponse{OK: true, InstanceID: req.InstanceID, DeviceID: req.DeviceID, GroupID: "grp", HostID: "host"}, nil
 }
 
 func (f *fakeClient) EnsureActiveLease(ctx context.Context, groupID string, hostID string, hostToken string) (coordinatorclient.EnsureActiveLeaseResponse, *coreerrors.Error) {
@@ -63,6 +73,9 @@ func TestConfigureUsesConfigIdentity(t *testing.T) {
 	result, err := Service{Client: client}.Configure(context.Background(), cfg, ConfigureRequest{})
 	if err != nil {
 		t.Fatalf("Configure() error = %v", err)
+	}
+	if client.bootstrapReq.InstanceID != "inst" || client.bootstrapReq.DeviceID != "dev" {
+		t.Fatalf("bootstrap not called: %#v", client.bootstrapReq)
 	}
 	if client.ensureGroupID != "grp" || client.ensureHostID != "host" || client.ensureToken != "ht" {
 		t.Fatalf("identity not used: %#v", client)

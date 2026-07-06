@@ -384,6 +384,8 @@ test("health and capabilities expose alpha6 protocol compatibility", async (t) =
     assert.ok(body.capabilities.includes("world_backup_v1"));
     assert.ok(body.capabilities.includes("group_whoami_v1"));
     assert.ok(body.capabilities.includes("public_relay_v1"));
+    assert.ok(body.capabilities.includes("token_only_relay_v1"));
+    assert.ok(body.capabilities.includes("bootstrap_upsert_v1"));
   } finally {
     await app.close();
   }

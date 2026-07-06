@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -664,7 +663,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 	op.Stage = "identity"
 	op.Progress = 80
-	op.Message = "validating private instance token"
+	op.Message = "validating access token and bootstrapping remote instance"
 	s.Operations.Update(op)
 	coordIdentity, identityErr := identity.Adapter(cfg)
 	if identityErr != nil {
@@ -673,10 +672,25 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, statusForCoreError(identityErr), s.Operations.Fail(op, identityErr))
 		return
 	}
-	if _, whoErr := client.WhoAmI(r.Context(), coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken); whoErr != nil {
-		whoErr.Details.ConfigPath = s.ConfigStore.Path
-		whoErr.Details.CoordinatorURL = cfg.CoordinatorURL
-		writeJSON(w, statusForCoreError(whoErr), s.Operations.Fail(op, whoErr))
+	bootstrapURL := strings.TrimRight(cfg.CoordinatorURL, "/") + "/v1/bootstrap"
+	_, bootstrapErr := client.Bootstrap(r.Context(), coordIdentity.OwnerToken, coordinatorclient.BootstrapRequest{
+		InstanceID:   cfg.Instance.InstanceID,
+		InstanceName: cfg.Instance.DisplayName,
+		DeviceID:     cfg.Device.DeviceID,
+		DeviceName:   cfg.Device.DisplayName,
+		ServerID:     cfg.Server.ServerID,
+		ServerName:   cfg.Server.DisplayName,
+	})
+	if bootstrapErr != nil {
+		bootstrapErr.Details.ConfigPath = s.ConfigStore.Path
+		bootstrapErr.Details.CoordinatorURL = cfg.CoordinatorURL
+		writeJSON(w, statusForCoreError(bootstrapErr), s.Operations.Fail(op, bootstrapErr))
+		return
+	}
+	if _, verifyErr := client.VerifyAuth(r.Context(), coordIdentity.OwnerToken); verifyErr != nil {
+		verifyErr.Details.ConfigPath = s.ConfigStore.Path
+		verifyErr.Details.CoordinatorURL = cfg.CoordinatorURL
+		writeJSON(w, statusForCoreError(verifyErr), s.Operations.Fail(op, verifyErr))
 		return
 	}
 	version := ""
@@ -697,7 +711,8 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 			ActualRequestURL: probe.ActualRequestURL,
 			NetworkRequests: []coordinatorclient.NetworkRequest{
 				{Stage: "coordinator_probe", Method: http.MethodGet, ActualRequestURL: probe.ActualRequestURL, HTTPStatus: http.StatusOK},
-				{Stage: "identity_validate", Method: http.MethodGet, ActualRequestURL: strings.TrimRight(cfg.CoordinatorURL, "/") + "/v1/groups/" + url.PathEscape(coordIdentity.GroupID) + "/whoami", HTTPStatus: http.StatusOK},
+				{Stage: "remote_bootstrap", Method: http.MethodPost, ActualRequestURL: bootstrapURL, HTTPStatus: http.StatusOK},
+				{Stage: "token_verify", Method: http.MethodPost, ActualRequestURL: strings.TrimRight(cfg.CoordinatorURL, "/") + "/v1/auth/verify", HTTPStatus: http.StatusOK},
 			},
 		},
 		Identity: InitIdentity{
@@ -705,7 +720,7 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 			InstanceID:    cfg.Instance.InstanceID,
 			DeviceID:      cfg.Device.DeviceID,
 			Valid:         true,
-			Message:       "私人实例已连接；当前设备已验证；VPS Coordinator 已连接；访问令牌有效；备份/中转能力可用",
+			Message:       "私人实例已连接；远端已初始化；访问令牌有效；备份/中转能力可用",
 		},
 	}
 	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "private instance connected"))
@@ -889,7 +904,7 @@ func identityResponse(cfg coreconfig.Config) IdentityResponse {
 		Server:        IdentityServer{ServerID: cfg.Server.ServerID, DisplayName: cfg.Server.DisplayName, Dir: cfg.Server.Dir},
 		Coordinator:   IdentityCoordinator{URL: cfg.CoordinatorURL, ProtocolVersion: cfg.Compat.CoordinatorProtocol},
 		Compat: IdentityCompat{
-			UsesLegacyGroupAPI:      true,
+			UsesLegacyGroupAPI:      false,
 			LegacyGroupIDPresent:    cfg.Compat.LegacyGroupID != "",
 			LegacyHostIDPresent:     cfg.Compat.LegacyHostID != "",
 			LegacyHostTokenPresent:  cfg.Compat.LegacyHostToken != "",

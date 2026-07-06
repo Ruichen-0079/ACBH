@@ -29,13 +29,25 @@ func Adapter(cfg coreconfig.Config) (CoordinatorIdentity, *coreerrors.Error) {
 		HostID:     strings.TrimSpace(cfg.Compat.LegacyHostID),
 		HostToken:  strings.TrimSpace(cfg.Compat.LegacyHostToken),
 	}
-	if out.GroupID == "" || out.HostID == "" || out.HostToken == "" {
+	if out.OwnerToken == "" || out.OwnerToken == "[redacted]" {
 		return out, coreerrors.New(
 			coreerrors.IdentityIncomplete,
-			"访问令牌或私有实例身份尚未配置完整。",
+			"访问令牌尚未配置。",
 			coreerrors.Details{CoordinatorURL: cfg.CoordinatorURL},
-			"请点击「生成/注册身份」，或导入包含访问令牌的旧配置。",
+			"请填写 VPS 访问令牌并保存配置。",
 		)
+	}
+	if out.GroupID == "" {
+		out.GroupID = out.InstanceID
+	}
+	if out.HostID == "" {
+		out.HostID = out.DeviceID
+	}
+	if out.HostToken == "" {
+		out.HostToken = out.OwnerToken
+	}
+	if out.MemberID == "" {
+		out.MemberID = "owner"
 	}
 	return out, nil
 }

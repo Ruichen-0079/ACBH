@@ -127,8 +127,18 @@ func mockCoordinator(t *testing.T) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"coordinatorVersion": "0.4.0-alpha6-hotfix2",
 				"protocolVersion":    2,
-				"capabilities":       []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"},
+				"capabilities": []string{
+					"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1",
+					"token_only_relay_v1", "bootstrap_upsert_v1",
+				},
 			})
+		case "/v1/bootstrap":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok": true, "instanceId": "acbh_instance_test", "deviceId": "acbh_device_test",
+				"groupId": "acbh_instance_test", "hostId": "acbh_device_test", "upserted": true,
+			})
+		case "/v1/auth/verify":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "authenticationMode": "access_token_bearer"})
 		case "/v1/groups/grp_123/whoami":
 			_ = json.NewEncoder(w).Encode(map[string]any{"groupId": "grp_123", "hostId": "host_123"})
 		case "/v1/groups/grp_123/lease/status":
@@ -329,7 +339,7 @@ func TestBodyInitAfterGUISaveDoesNotFailMissingCoordinatorURL(t *testing.T) {
 	if op.ErrorCode != coreerrors.IdentityIncomplete {
 		t.Fatalf("init errorCode = %q, want recoverable identity_incomplete", op.ErrorCode)
 	}
-	if !strings.Contains(rec.Body.String(), "生成/注册身份") {
+	if !strings.Contains(rec.Body.String(), "访问令牌") {
 		t.Fatalf("identity guidance missing from init response: %s", rec.Body.String())
 	}
 }
@@ -393,11 +403,11 @@ func TestBodyProbeAndInit(t *testing.T) {
 			t.Fatalf("init response contains user-visible legacy wording %q: %s", forbidden, body)
 		}
 	}
-	if !strings.Contains(body, `"actualRequestUrl"`) || !strings.Contains(body, `/whoami`) {
+	if !strings.Contains(body, `"actualRequestUrl"`) || !strings.Contains(body, `/v1/bootstrap`) {
 		t.Fatalf("init response missing coordinator network diagnostics: %s", body)
 	}
-	if !strings.Contains(body, "私人实例已连接") {
-		t.Fatalf("init response missing single-owner wording: %s", body)
+	if !strings.Contains(body, "远端已初始化") {
+		t.Fatalf("init response missing bootstrap wording: %s", body)
 	}
 }
 
@@ -562,7 +572,7 @@ func TestBodyIdentityAPI(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if !got.OK || got.IdentityModel != "single-owner" || got.Instance.InstanceID == "" || !got.Compat.UsesLegacyGroupAPI || !got.Compat.LegacyGroupIDPresent || !got.Compat.LegacyHostTokenPresent {
+	if !got.OK || got.IdentityModel != "single-owner" || got.Instance.InstanceID == "" || got.Compat.UsesLegacyGroupAPI || !got.Compat.LegacyGroupIDPresent || !got.Compat.OwnerTokenPresent {
 		t.Fatalf("identity = %#v", got)
 	}
 	if strings.Contains(rec.Body.String(), "ht_123") {
@@ -886,8 +896,13 @@ func TestRelayConfigureCoordinatorRouteMissingIncludesDetails(t *testing.T) {
 		case "/v1/capabilities":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"protocolVersion": 2,
-				"capabilities":    []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"},
+				"capabilities": []string{
+					"lease_renew_v1", "world_backup_v1", "public_relay_v1",
+					"token_only_relay_v1", "bootstrap_upsert_v1",
+				},
 			})
+		case "/v1/bootstrap":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "upserted": true})
 		case "/v1/groups/grp_123/lease/ensure-active":
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message":"Route POST:/v1/groups/grp_123/lease/ensure-active not found"}`))

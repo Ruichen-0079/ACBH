@@ -13,7 +13,7 @@ test("capabilities expose full alpha6 capability set", async () => {
       authenticationMode: string;
     }>();
     assert.equal(body.protocolVersion, 2);
-    assert.equal(body.authenticationMode, "host_token_or_owner_access_key");
+    assert.equal(body.authenticationMode, "access_token_bearer");
     for (const capability of [
       "capabilities_v1",
       "desktop_protocol_v2",
@@ -24,6 +24,8 @@ test("capabilities expose full alpha6 capability set", async () => {
       "lease_renew_v1",
       "world_backup_v1",
       "group_whoami_v1",
+      "token_only_relay_v1",
+      "bootstrap_upsert_v1",
     ]) {
       assert.equal(body.capabilities.includes(capability), true, `missing capability ${capability}`);
     }
@@ -45,7 +47,7 @@ test("capabilities and health expose alpha3 protocol metadata", async () => {
     assert.equal(body.protocolVersion, 2);
     assert.equal(body.capabilities.includes("invite_management_v1"), true);
     assert.equal(body.capabilities.includes("lease_renew_v1"), true);
-    assert.equal(body.authenticationMode, "host_token_or_owner_access_key");
+    assert.equal(body.authenticationMode, "access_token_bearer");
   } finally {
     await app.close();
   }

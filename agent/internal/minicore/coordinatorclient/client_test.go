@@ -22,7 +22,7 @@ func TestProbeUsesConfiguredCoordinatorURLAndClassifiesRoutes(t *testing.T) {
 		case "/v1/capabilities":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"protocolVersion":    2,
-				"capabilities":       []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"},
+				"capabilities":       []string{"lease_renew_v1", "world_backup_v1", "public_relay_v1", "token_only_relay_v1", "bootstrap_upsert_v1"},
 				"authenticationMode": "host_token_or_owner_access_key",
 			})
 		case "/v1/groups/grp_test/lease/ensure-active":
@@ -71,7 +71,7 @@ func TestResponseClassifiesAuthInvalidAndRouteMissing(t *testing.T) {
 		{"403 lease expired", http.StatusForbidden, `{"code":"host_lease_expired"}`, coreerrors.LeaseExpired},
 		{"403 not current host", http.StatusForbidden, `{"code":"not_current_host"}`, coreerrors.ActiveDeviceRequired},
 		{"404 route missing", http.StatusNotFound, `{"message":"Route GET:/v1/groups/grp_test/lease/status not found"}`, coreerrors.CoordinatorRouteMissing},
-		{"404 group missing", http.StatusNotFound, `{"error":"Not Found","message":"Group does not exist"}`, coreerrors.CoordinatorUnreachable},
+		{"404 group missing", http.StatusNotFound, `{"error":"Not Found","message":"Group does not exist"}`, coreerrors.InvalidRequest},
 		{"502 proxy", http.StatusBadGateway, `Proxy-Connection: keep-alive`, coreerrors.ProxyInterferenceSuspected},
 	}
 	for _, tc := range cases {
@@ -143,7 +143,7 @@ func TestProbeMarksOnly404RouteMissing(t *testing.T) {
 		case "/v1/capabilities":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"protocolVersion": 2,
-				"capabilities":    []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"},
+				"capabilities":    []string{"lease_renew_v1", "world_backup_v1", "public_relay_v1", "token_only_relay_v1", "bootstrap_upsert_v1"},
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)

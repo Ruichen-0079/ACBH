@@ -146,7 +146,7 @@ export type WhoAmIResponse = {
   memberId: string;
   hostId: string;
   role: MemberRole;
-  credentialKind: "host_token";
+  credentialKind: "host_token" | "access_token";
   lease: HostLeaseStatus;
 };
 
@@ -347,6 +347,8 @@ type StoreOptions = {
   tunnelSessionTtlMs?: number;
   onMutation?: () => void;
 };
+
+const TOKEN_ONLY_OWNER_MEMBER_ID = "mem_token_owner";
 
 const defaultHeartbeatTimeoutMs = 30_000;
 const defaultAssignmentTtlMs = 60_000;
@@ -734,6 +736,7 @@ export class InMemoryCoordinatorStore {
     hostScoreHints?: HostScoreHints;
     connection?: HostConnection | null;
   }): { ok: true; hostId: string; status: HostStatus } {
+    this.ensureTokenOnlyInstance(input);
     const group = this.requireGroup(input.groupId);
     const host = this.requireHost(group, input.hostId);
     this.verifyHostToken(host, input.hostToken);
@@ -770,6 +773,50 @@ export class InMemoryCoordinatorStore {
     return { ok: true, hostId: host.hostId, status: host.status };
   }
 
+  bootstrap(input: {
+    accessToken: string;
+    instanceId: string;
+    instanceName: string;
+    deviceId: string;
+    deviceName: string;
+    serverId: string;
+    serverName: string;
+  }): {
+    ok: true;
+    instanceId: string;
+    deviceId: string;
+    serverId: string;
+    groupId: string;
+    hostId: string;
+    memberId: string;
+    upserted: boolean;
+  } {
+    const upserted = this.upsertTokenOnlyGroupHost({
+      groupId: input.instanceId,
+      groupName: input.instanceName,
+      hostId: input.deviceId,
+      deviceName: input.deviceName,
+      accessToken: input.accessToken,
+      serverId: input.serverId,
+      serverName: input.serverName,
+    });
+    return {
+      ok: true,
+      instanceId: input.instanceId,
+      deviceId: input.deviceId,
+      serverId: input.serverId,
+      groupId: input.instanceId,
+      hostId: input.deviceId,
+      memberId: TOKEN_ONLY_OWNER_MEMBER_ID,
+      upserted,
+    };
+  }
+
+  verifyAccessToken(accessToken: string): { ok: true; authenticationMode: "access_token_bearer" } {
+    verifyCoordinatorAccessToken(accessToken);
+    return { ok: true, authenticationMode: "access_token_bearer" };
+  }
+
   whoami(input: { groupId: string; hostId: string; hostToken: string }): WhoAmIResponse {
     const { group, host, member } = this.requireAuthenticatedHost(input);
     return {
@@ -778,7 +825,7 @@ export class InMemoryCoordinatorStore {
       memberId: member.memberId,
       hostId: host.hostId,
       role: member.role,
-      credentialKind: "host_token",
+      credentialKind: isCoordinatorAccessToken(input.hostToken) ? "access_token" : "host_token",
       lease: this.hostLeaseStatusFor(group, host),
     };
   }
@@ -1731,11 +1778,130 @@ export class InMemoryCoordinatorStore {
     }
   }
 
+  private ensureTokenOnlyInstance(input: {
+    groupId: string;
+    hostId: string;
+    hostToken: string;
+    instanceName?: string;
+    deviceName?: string;
+  }): void {
+    if (!isTokenOnlyRelayEnabled() || !isCoordinatorAccessToken(input.hostToken)) {
+      return;
+    }
+    this.upsertTokenOnlyGroupHost({
+      groupId: input.groupId,
+      groupName: input.instanceName ?? input.groupId,
+      hostId: input.hostId,
+      deviceName: input.deviceName ?? input.hostId,
+      accessToken: input.hostToken,
+    });
+  }
+
+  private upsertTokenOnlyGroupHost(input: {
+    groupId: string;
+    groupName: string;
+    hostId: string;
+    deviceName: string;
+    accessToken: string;
+    serverId?: string;
+    serverName?: string;
+  }): boolean {
+    verifyCoordinatorAccessToken(input.accessToken);
+    const now = this.nowIso();
+    let group = this.groups.get(input.groupId);
+    let upserted = false;
+    const tokenHash = hashSecret(input.accessToken);
+
+    if (!group) {
+      group = {
+        groupId: input.groupId,
+        name: input.groupName,
+        accessKeyHash: tokenHash,
+        currentHostId: null,
+        currentHostGeneration: 0,
+        latestSnapshotId: null,
+        createdAt: now,
+        updatedAt: now,
+        members: new Map([
+          [
+            TOKEN_ONLY_OWNER_MEMBER_ID,
+            {
+              memberId: TOKEN_ONLY_OWNER_MEMBER_ID,
+              displayName: input.groupName,
+              role: "owner",
+              createdAt: now,
+            },
+          ],
+        ]),
+        hosts: new Map(),
+        artifacts: new Map(),
+        latestArtifacts: new Map(),
+        lastElection: null,
+        activeTakeoverAssignmentId: null,
+        takeoverAssignments: new Map(),
+        playerSessions: new Map(),
+        tunnelSessions: new Map(),
+        invites: new Map(),
+      };
+      this.groups.set(input.groupId, group);
+      upserted = true;
+    } else {
+      group.name = input.groupName;
+      group.accessKeyHash = tokenHash;
+      group.updatedAt = now;
+      if (!group.members.has(TOKEN_ONLY_OWNER_MEMBER_ID)) {
+        group.members.set(TOKEN_ONLY_OWNER_MEMBER_ID, {
+          memberId: TOKEN_ONLY_OWNER_MEMBER_ID,
+          displayName: input.groupName,
+          role: "owner",
+          createdAt: now,
+        });
+        upserted = true;
+      }
+    }
+
+    let host = group.hosts.get(input.hostId);
+    if (!host) {
+      host = {
+        hostId: input.hostId,
+        memberId: TOKEN_ONLY_OWNER_MEMBER_ID,
+        deviceName: input.deviceName,
+        platform: "token-only",
+        agentVersion: "token-only-relay-v1",
+        status: "standby",
+        hostTokenHash: tokenHash,
+        latestLocalSnapshotId: null,
+        latestLocalArtifacts: {},
+        hostScoreHints: {},
+        connection: null,
+        computedHostScore: 0,
+        recentFailureCount: 0,
+        manualPriority: 0,
+        lastElectionCandidateAt: null,
+        createdAt: now,
+        updatedAt: now,
+        lastHeartbeatAt: now,
+      };
+      group.hosts.set(input.hostId, host);
+      upserted = true;
+    } else {
+      host.deviceName = input.deviceName;
+      host.hostTokenHash = tokenHash;
+      host.updatedAt = now;
+      upserted = true;
+    }
+
+    group.updatedAt = now;
+    this.triggerMutation();
+    return upserted;
+  }
+
   private requireAuthenticatedHost(input: {
     groupId: string;
     hostId: string;
     hostToken: string;
   }): { group: GroupRecord; host: HostRecord; member: MemberRecord } {
+    this.ensureTokenOnlyInstance(input);
     const group = this.requireGroup(input.groupId);
     const host = this.requireHost(group, input.hostId);
     this.verifyHostToken(host, input.hostToken);
@@ -1951,6 +2117,35 @@ function describeManifestReadFailure(error: unknown): string {
     return "manifest validation failed";
   }
   return "manifest storage read failed";
+}
+
+export function isTokenOnlyRelayEnabled(): boolean {
+  return configuredAccessTokenHash() !== null;
+}
+
+function configuredAccessTokenHash(): string | null {
+  const token = process.env.ACBH_ACCESS_TOKEN?.trim();
+  if (!token) {
+    return null;
+  }
+  return hashSecret(token);
+}
+
+function isCoordinatorAccessToken(token: string): boolean {
+  const expected = configuredAccessTokenHash();
+  if (!expected) {
+    return false;
+  }
+  return verifySecret(token, expected);
+}
+
+function verifyCoordinatorAccessToken(token: string): void {
+  if (!isTokenOnlyRelayEnabled()) {
+    throw new StoreError(503, "Token-only relay is not configured on this coordinator", "token_only_not_configured");
+  }
+  if (!isCoordinatorAccessToken(token)) {
+    throw new StoreError(401, "Invalid access token", "access_token_invalid");
+  }
 }
 
 function createId(prefix: string): string {

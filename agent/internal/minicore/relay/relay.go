@@ -16,6 +16,7 @@ import (
 )
 
 type Client interface {
+	Bootstrap(ctx context.Context, accessToken string, req coordinatorclient.BootstrapRequest) (coordinatorclient.BootstrapResponse, *coreerrors.Error)
 	EnsureActiveLease(ctx context.Context, groupID string, hostID string, hostToken string) (coordinatorclient.EnsureActiveLeaseResponse, *coreerrors.Error)
 	SendHeartbeat(ctx context.Context, req coordinatorclient.HeartbeatRequest) (coordinatorclient.HeartbeatResponse, *coreerrors.Error)
 	GetLeaseStatus(ctx context.Context, groupID string, hostID string, hostToken string) (coordinatorclient.HostLeaseStatus, *coreerrors.Error)
@@ -64,6 +65,16 @@ func (s Service) Configure(ctx context.Context, cfg coreconfig.Config, req Confi
 			return ConfigureResult{}, err
 		}
 		client = created
+	}
+	if _, bootstrapErr := client.Bootstrap(ctx, coordIdentity.OwnerToken, coordinatorclient.BootstrapRequest{
+		InstanceID:   cfg.Instance.InstanceID,
+		InstanceName: cfg.Instance.DisplayName,
+		DeviceID:     cfg.Device.DeviceID,
+		DeviceName:   cfg.Device.DisplayName,
+		ServerID:     cfg.Server.ServerID,
+		ServerName:   cfg.Server.DisplayName,
+	}); bootstrapErr != nil {
+		return ConfigureResult{}, bootstrapErr
 	}
 	lease, leaseErr := client.EnsureActiveLease(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken)
 	if leaseErr != nil {

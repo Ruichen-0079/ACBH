@@ -84,6 +84,7 @@ func testBackupConfig(serverDir string) coreconfig.Config {
 	cfg.CoordinatorURL = "http://public.test:6121"
 	cfg.Server.Dir = serverDir
 	cfg.Instance.InstanceID = "inst_123"
+	cfg.Instance.OwnerToken = "ht_123"
 	cfg.Device.DeviceID = "dev_123"
 	cfg.Server.ServerID = "srv_123"
 	cfg.Compat.LegacyGroupID = "grp_123"

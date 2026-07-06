@@ -313,6 +313,15 @@ const leaseEnsureSchema = z.object({
   generation: z.number().int().nonnegative().optional(),
 });
 
+const bootstrapIdentitySchema = z.object({
+  instanceId: z.string().min(1),
+  instanceName: z.string().trim().min(1).max(120),
+  deviceId: z.string().min(1),
+  deviceName: z.string().trim().min(1).max(120),
+  serverId: z.string().min(1),
+  serverName: z.string().trim().min(1).max(120),
+});
+
 const coordinatorVersion = process.env.ACBH_VERSION ?? "v0.5.1-public-relay-hotfix";
 const buildCommit = process.env.ACBH_BUILD_COMMIT ?? "dev";
 const protocolVersion = Number.parseInt(process.env.ACBH_PROTOCOL_VERSION ?? "2", 10);
@@ -327,6 +336,8 @@ const alpha6Capabilities = [
   "lease_renew_v1",
   "world_backup_v1",
   "group_whoami_v1",
+  "token_only_relay_v1",
+  "bootstrap_upsert_v1",
 ] as const;
 
 export async function registerRoutes(
@@ -370,8 +381,36 @@ export async function registerRoutes(
       minimumClientProtocol,
       capabilities: [...alpha6Capabilities],
       serverTime: new Date().toISOString(),
-      authenticationMode: "host_token_or_owner_access_key",
+      authenticationMode: "access_token_bearer",
     };
+  });
+
+  app.post("/v1/bootstrap", async (request, reply) => {
+    const accessToken = parseBearerToken(request);
+    if (!accessToken) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "access_token_required",
+        message: "Authorization Bearer access token is required",
+      });
+    }
+    const body = parseBody(bootstrapIdentitySchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => store.bootstrap({ ...body, accessToken }));
+  });
+
+  app.post("/v1/auth/verify", async (request, reply) => {
+    const accessToken = parseBearerToken(request);
+    if (!accessToken) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "access_token_required",
+        message: "Authorization Bearer access token is required",
+      });
+    }
+    return handleStoreCall(reply, () => store.verifyAccessToken(accessToken));
   });
 
   app.get("/v1/info", async () => {
@@ -1702,6 +1741,15 @@ function parseOptionalIntHeader(value: string | string[] | undefined): number | 
   if (raw === undefined) return null;
   const parsed = Number(raw);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function parseBearerToken(request: FastifyRequest): string | undefined {
+  const header = singleHeader(request.headers.authorization);
+  if (!header) {
+    return undefined;
+  }
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  return match?.[1]?.trim();
 }
 
 function singleHeader(value: string | string[] | undefined): string | undefined {

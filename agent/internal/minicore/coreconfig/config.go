@@ -400,6 +400,12 @@ func applyDefaults(cfg Config) Config {
 	if cfg.Compat.LegacyHostID == "" {
 		cfg.Compat.LegacyHostID = cfg.Device.DeviceID
 	}
+	if cfg.Compat.LegacyHostToken == "" && cfg.Instance.OwnerToken != "" && cfg.Instance.OwnerToken != "[redacted]" {
+		cfg.Compat.LegacyHostToken = cfg.Instance.OwnerToken
+	}
+	if cfg.Compat.LegacyMemberID == "" {
+		cfg.Compat.LegacyMemberID = "owner"
+	}
 	if cfg.Listener.LocalHost == "" {
 		cfg.Listener.LocalHost = defaults.Listener.LocalHost
 	}
