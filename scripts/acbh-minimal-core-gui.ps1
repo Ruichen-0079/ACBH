@@ -7,6 +7,150 @@
 
 $ErrorActionPreference = "Stop"
 
+function Get-ControlTextSafe {
+    param(
+        $control,
+        [string]$default = ""
+    )
+    if ($null -eq $control) { return $default }
+    try {
+        if ($null -eq $control.Text) { return $default }
+        return [string]$control.Text
+    } catch {
+        return $default
+    }
+}
+
+function Get-TrimmedTextSafe {
+    param(
+        $control,
+        [string]$default = ""
+    )
+    return (Get-ControlTextSafe $control $default).Trim()
+}
+
+function Get-ComboValueSafe {
+    param(
+        $control,
+        [string]$default = ""
+    )
+    if ($null -eq $control) { return $default }
+    try {
+        if ($null -ne $control.SelectedItem) {
+            return [string]$control.SelectedItem
+        }
+        if ($null -ne $control.Text -and [string]$control.Text -ne "") {
+            return [string]$control.Text
+        }
+        return $default
+    } catch {
+        return $default
+    }
+}
+
+function Set-ControlTextSafe {
+    param(
+        $control,
+        $value
+    )
+    if ($null -eq $control) { return }
+    if ($null -eq $value) { $value = "" }
+    $control.Text = [string]$value
+    try { $control.SelectionStart = 0 } catch {}
+}
+
+function Get-StringSafe {
+    param(
+        $value,
+        [string]$default = ""
+    )
+    if ($null -eq $value) { return $default }
+    return ([string]$value).Trim()
+}
+
+function Get-ConfigFieldSafe {
+    param(
+        $object,
+        [string]$property,
+        [string]$default = ""
+    )
+    if ($null -eq $object) { return $default }
+    try {
+        $value = $object.$property
+        if ($null -eq $value) { return $default }
+        return [string]$value
+    } catch {
+        return $default
+    }
+}
+
+function Get-IntFromTextSafe {
+    param(
+        [string]$text,
+        [int]$default = 25565
+    )
+    if ([string]::IsNullOrWhiteSpace($text)) { return $default }
+    $parsed = 0
+    if ([int]::TryParse($text.Trim(), [ref]$parsed)) { return $parsed }
+    return $default
+}
+
+function Test-GuiNullReferenceMessage {
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
+    return ($Message -match "不能对 Null 值表达式调用方法|You cannot call a method on a null-valued expression")
+}
+
+function Write-ActionDiagnosticLog {
+    param(
+        [string]$Action,
+        [object]$ErrorRecord
+    )
+    $entry = New-Object System.Collections.Generic.List[string]
+    $entry.Add("action=$Action")
+    if ($ErrorRecord) {
+        if ($ErrorRecord.Exception) {
+            $entry.Add("exception=" + $ErrorRecord.Exception.Message)
+        }
+        if ($ErrorRecord.InvocationInfo) {
+            $entry.Add("scriptLine=" + $ErrorRecord.InvocationInfo.ScriptLineNumber)
+            $entry.Add("position=" + $ErrorRecord.InvocationInfo.PositionMessage)
+        }
+        if ($ErrorRecord.ScriptStackTrace) {
+            $entry.Add("stackTrace=" + $ErrorRecord.ScriptStackTrace)
+        }
+    }
+    $text = $entry -join [Environment]::NewLine
+    if ($script:SelfTestMode) {
+        [Console]::Out.WriteLine("[diagnostic] " + $text)
+        return
+    }
+    if (Get-Command Add-Log -ErrorAction SilentlyContinue) {
+        Add-Log ("[诊断] " + $text)
+    }
+}
+
+function Format-GuiActionErrorMessage {
+    param(
+        [string]$Action,
+        [object]$ErrorRecord
+    )
+    $message = ""
+    if ($ErrorRecord -and $ErrorRecord.Exception) {
+        $message = [string]$ErrorRecord.Exception.Message
+    } elseif ($ErrorRecord) {
+        $message = [string]$ErrorRecord
+    }
+    if (Test-GuiNullReferenceMessage $message) {
+        return ($Action + "失败：GUI 内部字段为空。" + [Environment]::NewLine +
+            "请重新打开 ACBH 后再试；详细错误已写入诊断日志。")
+    }
+    if ([string]::IsNullOrWhiteSpace($message)) {
+        return ($Action + "失败：操作未完成，请查看诊断信息。")
+    }
+    return ($Action + "失败：" + $message)
+}
+
 function Normalize-GuiStatusValue {
     param(
         [string]$Kind,
@@ -69,6 +213,7 @@ function Convert-GuiCoordinatorInput {
         [string]$InputText,
         [string]$DefaultPort = "6121"
     )
+    if ($null -eq $InputText) { $InputText = "" }
     $value = $InputText.Trim()
     if ([string]::IsNullOrWhiteSpace($value)) {
         return [pscustomobject]@{ Url = ""; Host = ""; Port = ""; Warning = "VPS Coordinator 未配置" }
@@ -108,15 +253,25 @@ function Convert-GuiCoordinatorInput {
 
 function Test-GuiTimestampLikeId {
     param([string]$Value)
+    if ($null -eq $Value) { $Value = "" }
     $text = $Value.Trim()
     if ($text -match "^(inst_|dev_)?\d{8}T\d{6}Z$") { return $true }
     if ($text -match "^(inst_|dev_)?\d{5}T\d{6}Z$") { return $true }
     return $false
 }
 
-if ($SelfTest) {
+$script:SelfTestMode = [bool]$SelfTest
+
+function Test-GuiStaticChecks {
     $source = Get-Content -Raw -Path $PSCommandPath
     $checks = @(
+        "Get-ControlTextSafe",
+        "Get-TrimmedTextSafe",
+        "Get-ComboValueSafe",
+        "Set-ControlTextSafe",
+        "Format-GuiActionErrorMessage",
+        "Write-ActionDiagnosticLog",
+        "Test-GuiNullSafeBehavior",
         "Refresh-ListenerStatus",
         "Save-ListenerConfig",
         "Format-BodyError",
@@ -225,8 +380,167 @@ if ($SelfTest) {
             throw "GUI self-test failed: legacy identity label found"
         }
     }
-    Write-Output "ACBH minimal-core GUI self-test ok"
-    exit 0
+    $norm = Convert-GuiCoordinatorInput $null
+    if ($norm.Url -ne "" -or $norm.Warning -ne "VPS Coordinator 未配置") {
+        throw "GUI self-test failed: null coordinator input"
+    }
+    $nullMsg = Format-GuiActionErrorMessage "保存配置" ([System.Management.Automation.ErrorRecord]::new(
+        [System.NullReferenceException]::new("不能对 Null 值表达式调用方法。"), "保存配置", [System.Management.Automation.ErrorCategory]::InvalidOperation, $null))
+    if ($nullMsg -match "不能对 Null 值表达式调用方法|You cannot call a method on a null-valued expression") {
+        throw "GUI self-test failed: null reference message leaked to user"
+    }
+    if ($nullMsg -notmatch "GUI 内部字段为空") {
+        throw "GUI self-test failed: friendly null reference message missing"
+    }
+}
+
+function New-MockTextControl {
+    param([string]$Text = "")
+    return [pscustomobject]@{ Text = $Text }
+}
+
+function New-MockComboControl {
+    param(
+        [object]$SelectedItem = $null,
+        [string]$Text = ""
+    )
+    return [pscustomobject]@{ SelectedItem = $SelectedItem; Text = $Text }
+}
+
+function Install-MockGuiControls {
+    param([hashtable]$Overrides = @{})
+
+    function Resolve-MockControl {
+        param([string]$Name, $Default)
+        if ($Overrides.ContainsKey($Name)) { return $Overrides[$Name] }
+        return $Default
+    }
+
+    $script:txtCoordinator = Resolve-MockControl "txtCoordinator" (New-MockTextControl "")
+    $script:txtAccessToken = Resolve-MockControl "txtAccessToken" (New-MockTextControl "")
+    $script:txtInstanceName = Resolve-MockControl "txtInstanceName" (New-MockTextControl "")
+    $script:txtDeviceName = Resolve-MockControl "txtDeviceName" (New-MockTextControl "")
+    $script:txtServerName = Resolve-MockControl "txtServerName" (New-MockTextControl "")
+    $script:txtServerDir = Resolve-MockControl "txtServerDir" (New-MockTextControl "")
+    $script:txtListenerHost = Resolve-MockControl "txtListenerHost" (New-MockTextControl "")
+    $script:txtListenerPort = Resolve-MockControl "txtListenerPort" (New-MockTextControl "")
+    $script:txtPublicHost = Resolve-MockControl "txtPublicHost" (New-MockTextControl "")
+    $script:txtPublicPort = Resolve-MockControl "txtPublicPort" (New-MockTextControl "")
+    $script:cmbMode = Resolve-MockControl "cmbMode" (New-MockComboControl "remote-public" "")
+    $script:txtInstanceId = Resolve-MockControl "txtInstanceId" $null
+    $script:txtDeviceId = Resolve-MockControl "txtDeviceId" $null
+    $script:txtServerId = Resolve-MockControl "txtServerId" $null
+}
+
+function Test-GuiNullSafeBehavior {
+    function Assert-NullSafeTest {
+        param([string]$Name, [scriptblock]$Block)
+        try {
+            & $Block
+            Write-Output ("PASS: " + $Name)
+        } catch {
+            throw ("GUI self-test failed: " + $Name + " - " + $_.Exception.Message)
+        }
+    }
+
+    Assert-NullSafeTest "null advanced controls save config" {
+        Install-MockGuiControls @{
+            txtInstanceId = $null
+            txtDeviceId = $null
+            txtServerId = $null
+            cmbMode = (New-MockComboControl $null "")
+        }
+        $cfg = Build-ConfigFromForm
+        if ($null -eq $cfg) { throw "config is null" }
+        if ($cfg.mode -ne "remote-public") { throw "unexpected mode: $($cfg.mode)" }
+    }
+
+    Assert-NullSafeTest "empty access token save config" {
+        Install-MockGuiControls @{ txtAccessToken = (New-MockTextControl "") }
+        $cfg = Build-ConfigFromForm
+        if ($cfg.instance.ownerToken -ne "[redacted]") { throw "token not redacted" }
+        if ((Normalize-GuiStatusValue "token" "") -ne "未配置") { throw "token status not 未配置" }
+    }
+
+    Assert-NullSafeTest "empty VPS save config" {
+        Install-MockGuiControls @{ txtCoordinator = (New-MockTextControl "") }
+        $cfg = Build-ConfigFromForm
+        if ($cfg.coordinatorUrl -ne "") { throw "coordinatorUrl should be empty" }
+    }
+
+    Assert-NullSafeTest "empty server dir save config" {
+        Install-MockGuiControls @{ txtServerDir = (New-MockTextControl "") }
+        $cfg = Build-ConfigFromForm
+        if ($cfg.server.dir -ne "") { throw "server dir should be empty" }
+    }
+
+    Assert-NullSafeTest "null combo selected item save config" {
+        Install-MockGuiControls @{ cmbMode = (New-MockComboControl $null "") }
+        $cfg = Build-ConfigFromForm
+        if ($cfg.mode -ne "remote-public") { throw "mode default missing" }
+    }
+
+    Assert-NullSafeTest "empty status values render safely" {
+        if ((Normalize-GuiStatusValue "generic" $null) -ne "未知") { throw "generic null status" }
+        if ((Normalize-GuiStatusValue "token" $null) -ne "未配置") { throw "token null status" }
+        if ((Normalize-GuiStatusValue "body" "") -ne "未配置") { throw "body empty status" }
+        if ((Normalize-GuiStatusValue "coordinator" "") -ne "未配置") { throw "coordinator empty status" }
+    }
+
+    Assert-NullSafeTest "save defaults applied" {
+        Install-MockGuiControls @{}
+        $cfg = Build-ConfigFromForm
+        if ($cfg.instance.displayName -ne "私人 ACBH 实例") { throw "instance default missing" }
+        if ($cfg.device.displayName -ne $env:COMPUTERNAME) { throw "device default missing" }
+        if ($cfg.server.displayName -ne "Minecraft 服务端") { throw "server default missing" }
+        if ($cfg.listener.localHost -ne "127.0.0.1") { throw "listener host default missing" }
+        if ($cfg.listener.localPort -ne 25565) { throw "listener port default missing" }
+    }
+
+    $testAppData = Join-Path $env:TEMP ("acbh-gui-selftest-" + [guid]::NewGuid().ToString("N"))
+    $savedAppData = $AppDataDir
+    $savedAgentPath = $AgentPath
+    try {
+        New-Item -ItemType Directory -Force -Path $testAppData | Out-Null
+        $AppDataDir = $testAppData
+        $AgentPath = Join-Path $PSScriptRoot "..\acbh-agent-windows-amd64.exe"
+        if (-not (Test-Path $AgentPath)) {
+            $built = Get-ChildItem -Path (Join-Path $PSScriptRoot "..\agent") -Filter "acbh-agent*.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($built) { $AgentPath = $built.FullName }
+        }
+        if (Test-Path $AgentPath) {
+            Install-MockGuiControls @{
+                txtCoordinator = (New-MockTextControl "")
+                txtAccessToken = (New-MockTextControl "")
+                txtServerDir = (New-MockTextControl "")
+            }
+            [void](Sync-FormConfig -Quiet)
+            $op = Invoke-BodyJson -Method "POST" -Path "/v1/local/init"
+            if ($op.state -ne "success") { throw "local init failed: $($op | ConvertTo-Json -Compress)" }
+            $configPath = Join-Path $testAppData "config.json"
+            if (-not (Test-Path $configPath)) { throw "config.json not created" }
+            $configRaw = Get-Content -Raw -Path $configPath -Encoding UTF8
+            if ($configRaw -notmatch "acbh_instance_") { throw "instance id missing" }
+            if ($configRaw -notmatch "acbh_device_") { throw "device id missing" }
+            if ($script:BodyProcess -and -not $script:BodyProcess.HasExited) {
+                try { $script:BodyProcess.Kill() } catch {}
+            }
+            $script:BodyProcess = $null
+            Write-Output "PASS: local init creates config with empty VPS/token/server dir"
+        } else {
+            Write-Output "SKIP: local init integration (agent binary missing)"
+        }
+    } finally {
+        $AppDataDir = $savedAppData
+        $AgentPath = $savedAgentPath
+        if ($script:BodyProcess -and -not $script:BodyProcess.HasExited) {
+            try { $script:BodyProcess.Kill() } catch {}
+        }
+        $script:BodyProcess = $null
+        if (Test-Path $testAppData) {
+            Remove-Item -LiteralPath $testAppData -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -405,7 +719,12 @@ function Format-BodyError {
 function Add-Log {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return }
-    $txtLog.AppendText(("[" + (Get-Date -Format "HH:mm:ss") + "] " + (Redact-Secrets $Text) + [Environment]::NewLine))
+    $safe = ("[" + (Get-Date -Format "HH:mm:ss") + "] " + (Redact-Secrets $Text))
+    if ($null -eq $txtLog) {
+        if ($script:SelfTestMode) { [Console]::Out.WriteLine("[log] " + $safe) }
+        return
+    }
+    $txtLog.AppendText($safe + [Environment]::NewLine)
     $txtLog.SelectionStart = $txtLog.TextLength
     $txtLog.ScrollToCaret()
 }
@@ -420,10 +739,11 @@ function Set-ControlText {
     $text = ""
     if ($null -ne $Value) { $text = [string]$Value }
     if ([string]::IsNullOrWhiteSpace($text)) { $text = $EmptyText }
-    $Control.Text = $text
+    Set-ControlTextSafe $Control $text
     if ($Control -is [System.Windows.Forms.TextBox]) {
-        $Control.SelectionStart = 0
-        $Control.SelectionLength = 0
+        try {
+            $Control.SelectionLength = 0
+        } catch {}
     }
 }
 
@@ -457,9 +777,8 @@ function Show-ActionError {
         [string]$Action,
         [object]$ErrorRecord
     )
-    $message = $ErrorRecord.Exception.Message
-    if ([string]::IsNullOrWhiteSpace($message)) { $message = [string]$ErrorRecord }
-    Show-Error ($Action + "失败：" + $message)
+    Write-ActionDiagnosticLog $Action $ErrorRecord
+    Show-Error (Format-GuiActionErrorMessage $Action $ErrorRecord)
 }
 
 function Test-BodyPort {
@@ -484,11 +803,19 @@ function Start-Body {
         throw "找不到 ACBH Agent：$AgentPath"
     }
     New-Item -ItemType Directory -Force -Path $AppDataDir | Out-Null
-    $args = @("body", "serve", "--listen", $BodyListen, "--app-data-dir", $AppDataDir)
+    $bodyArgs = @("body", "serve", "--listen", $BodyListen, "--app-data-dir", $AppDataDir)
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $AgentPath
-    foreach ($arg in $args) {
-        [void]$psi.ArgumentList.Add($arg)
+    $argList = $null
+    try { $argList = $psi.ArgumentList } catch {}
+    if ($null -ne $argList) {
+        foreach ($arg in $bodyArgs) {
+            [void]$argList.Add($arg)
+        }
+    } else {
+        $psi.Arguments = ($bodyArgs | ForEach-Object {
+            if ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+        }) -join ' '
     }
     $psi.WorkingDirectory = Split-Path -Parent $AgentPath
     $psi.UseShellExecute = $false
@@ -528,7 +855,7 @@ function Refresh-Health {
         Set-ControlText $txtBodyApi $health.bodyApi
         Set-Status $txtLocalBodyStatus "ok" "body"
         if ($health.coordinatorUrl) { Set-ControlText $txtCoordinator $health.coordinatorUrl }
-        if ($health.mode) { $cmbMode.SelectedItem = $health.mode }
+        if ($health.mode -and $cmbMode) { $cmbMode.SelectedItem = $health.mode }
         if ($health.configError) {
             $lblState.Text = "状态：本地 Body API 就绪，配置需处理"
             Set-Diagnostics ("配置提示：" + $health.configError.errorCode + " " + $health.configError.message)
@@ -546,25 +873,30 @@ function Refresh-Health {
 function Load-Config {
     try {
         $cfg = Invoke-BodyJson -Method "GET" -Path "/v1/config"
-        $cmbMode.SelectedItem = $cfg.mode
-        Set-ControlText $txtCoordinator $cfg.coordinatorUrl
-        Set-ControlText $txtInstanceName $cfg.instance.displayName
-        Set-ControlText $txtInstanceId $cfg.instance.instanceId
-        Set-ControlText $txtDeviceName $cfg.device.displayName
-        Set-ControlText $txtDeviceId $cfg.device.deviceId
-        Set-ControlText $txtServerName $cfg.server.displayName
-        Set-ControlText $txtServerDir $cfg.server.dir
+        if ($cmbMode) {
+            $mode = Get-ConfigFieldSafe $cfg "mode" "remote-public"
+            if ($mode) { $cmbMode.SelectedItem = $mode }
+        }
+        Set-ControlText $txtCoordinator (Get-ConfigFieldSafe $cfg "coordinatorUrl")
+        Set-ControlText $txtInstanceName (Get-ConfigFieldSafe $cfg.instance "displayName")
+        Set-ControlText $txtInstanceId (Get-ConfigFieldSafe $cfg.instance "instanceId")
+        Set-ControlText $txtDeviceName (Get-ConfigFieldSafe $cfg.device "displayName")
+        Set-ControlText $txtDeviceId (Get-ConfigFieldSafe $cfg.device "deviceId")
+        Set-ControlText $txtServerName (Get-ConfigFieldSafe $cfg.server "displayName")
+        Set-ControlText $txtServerDir (Get-ConfigFieldSafe $cfg.server "dir")
         Set-Status $txtTokenStatus "not_configured" "token"
-        if ($cfg.instance.ownerToken -eq "[redacted]" -or $cfg.compat.legacyHostToken -eq "[redacted]") {
+        $ownerToken = Get-ConfigFieldSafe $cfg.instance "ownerToken"
+        $legacyHostToken = Get-ConfigFieldSafe $cfg.compat "legacyHostToken"
+        if ($ownerToken -eq "[redacted]" -or $legacyHostToken -eq "[redacted]") {
             Set-Status $txtTokenStatus "configured" "token"
         }
         if ($cfg.listener) {
-            Set-ControlText $txtListenerHost $cfg.listener.localHost
-            Set-ControlText $txtListenerPort ([string]$cfg.listener.localPort)
+            Set-ControlText $txtListenerHost (Get-ConfigFieldSafe $cfg.listener "localHost" "127.0.0.1")
+            Set-ControlText $txtListenerPort (Get-ConfigFieldSafe $cfg.listener "localPort" "25565")
         }
         if ($cfg.relay) {
-            Set-ControlText $txtPublicHost $cfg.relay.publicHost
-            Set-ControlText $txtPublicPort ([string]$cfg.relay.minecraftPort)
+            Set-ControlText $txtPublicHost (Get-ConfigFieldSafe $cfg.relay "publicHost")
+            Set-ControlText $txtPublicPort (Get-ConfigFieldSafe $cfg.relay "minecraftPort" "25565")
         }
         Add-Log "配置已加载。"
     } catch {
@@ -573,42 +905,43 @@ function Load-Config {
 }
 
 function Build-ConfigFromForm {
-    $coord = Convert-GuiCoordinatorInput $txtCoordinator.Text
-    Set-ControlText $txtCoordinator $coord.Url
+    $coordInput = Get-TrimmedTextSafe $txtCoordinator
+    $coord = Convert-GuiCoordinatorInput $coordInput
+    Set-ControlTextSafe $txtCoordinator $coord.Url
     if ($coord.Warning) {
-        Set-Diagnostics $coord.Warning
-        Add-Log $coord.Warning
+        if (Get-Command Set-Diagnostics -ErrorAction SilentlyContinue) { Set-Diagnostics $coord.Warning }
+        if (Get-Command Add-Log -ErrorAction SilentlyContinue) { Add-Log $coord.Warning }
     }
-    $ownerToken = $txtAccessToken.Text.Trim()
+    $ownerToken = Get-TrimmedTextSafe $txtAccessToken
     if ([string]::IsNullOrWhiteSpace($ownerToken)) { $ownerToken = "[redacted]" }
-    $listenerPort = 25565
-    if (-not [int]::TryParse($txtListenerPort.Text.Trim(), [ref]$listenerPort)) {
-        throw "本地端口必须是数字，例如 25565。"
-    }
-    $publicPort = $listenerPort
-    if (-not [string]::IsNullOrWhiteSpace($txtPublicPort.Text.Trim())) {
-        if (-not [int]::TryParse($txtPublicPort.Text.Trim(), [ref]$publicPort)) {
-            throw "公网端口必须是数字，例如 25565。"
-        }
-    }
+    $listenerPort = Get-IntFromTextSafe (Get-TrimmedTextSafe $txtListenerPort) 25565
+    $publicPort = Get-IntFromTextSafe (Get-TrimmedTextSafe $txtPublicPort) $listenerPort
+    $instanceName = Get-TrimmedTextSafe $txtInstanceName
+    if ([string]::IsNullOrWhiteSpace($instanceName)) { $instanceName = "私人 ACBH 实例" }
+    $deviceName = Get-TrimmedTextSafe $txtDeviceName
+    if ([string]::IsNullOrWhiteSpace($deviceName)) { $deviceName = $env:COMPUTERNAME }
+    $serverName = Get-TrimmedTextSafe $txtServerName
+    if ([string]::IsNullOrWhiteSpace($serverName)) { $serverName = "Minecraft 服务端" }
+    $listenerHost = Get-TrimmedTextSafe $txtListenerHost
+    if ([string]::IsNullOrWhiteSpace($listenerHost)) { $listenerHost = "127.0.0.1" }
     return @{
         schemaVersion = 2
-        mode = [string]$cmbMode.SelectedItem
+        mode = Get-ComboValueSafe $cmbMode "remote-public"
         coordinatorUrl = $coord.Url
         instance = @{
-            instanceId = ""
-            displayName = $txtInstanceName.Text.Trim()
+            instanceId = Get-TrimmedTextSafe $txtInstanceId
+            displayName = $instanceName
             ownerToken = $ownerToken
         }
         device = @{
-            deviceId = ""
-            displayName = $txtDeviceName.Text.Trim()
+            deviceId = Get-TrimmedTextSafe $txtDeviceId
+            displayName = $deviceName
             platform = "windows"
         }
         server = @{
-            serverId = $txtServerId.Text.Trim()
-            displayName = $txtServerName.Text.Trim()
-            dir = $txtServerDir.Text.Trim()
+            serverId = Get-TrimmedTextSafe $txtServerId
+            displayName = $serverName
+            dir = Get-TrimmedTextSafe $txtServerDir
         }
         compat = @{
             coordinatorProtocol = 2
@@ -616,8 +949,19 @@ function Build-ConfigFromForm {
             legacyHostId = ""
             legacyHostToken = $ownerToken
         }
-        listener = @{ enabled = $true; localHost = $txtListenerHost.Text.Trim(); localPort = $listenerPort; expectedProcessNames = @("java.exe", "javaw.exe"); serverDirMatchRequired = $false }
-        relay = @{ enabled = $true; publicHost = $txtPublicHost.Text.Trim(); coordinatorPort = 6121; minecraftPort = $publicPort }
+        listener = @{
+            enabled = $true
+            localHost = $listenerHost
+            localPort = $listenerPort
+            expectedProcessNames = @("java.exe", "javaw.exe")
+            serverDirMatchRequired = $false
+        }
+        relay = @{
+            enabled = $true
+            publicHost = Get-TrimmedTextSafe $txtPublicHost
+            coordinatorPort = 6121
+            minecraftPort = $publicPort
+        }
         backup = @{
             profileId = "minecraft-migratable"
             include = @("dir:world","dir:mods","dir:config","dir:defaultconfigs","dir:datapacks","dir:resourcepacks","dir:global_packs","dir:patchouli_books","file:server.properties","file:eula.txt","file:ops.json","file:whitelist.json","file:banned-ips.json","file:banned-players.json","file:server-icon.png","file:manifest.json","file:variables.txt","file:user_jvm_args.txt","file:start.bat","file:start.ps1","file:start.sh","file:run.sh","file:双击直接开服！！！.bat","file:HOW-TO-RUN.md")
@@ -636,6 +980,7 @@ function Sync-FormConfig {
         Refresh-Identity
         return $true
     } catch {
+        Write-ActionDiagnosticLog "保存配置" $_
         if (-not $Quiet) { Show-ActionError "保存配置" $_ }
         return $false
     }
@@ -674,7 +1019,7 @@ function Test-Coordinator {
         } else {
             $lblState.Text = "状态：VPS Coordinator 连接失败"
             Set-Status $txtCoordinatorCheckStatus "failed" "coordinator"
-            Set-ControlText $txtTokenValidationStatus $txtTokenStatus.Text
+            Set-ControlText $txtTokenValidationStatus (Get-TrimmedTextSafe $txtTokenStatus "未配置")
             Set-ControlText $txtRelayCheckStatus "未检测"
             if ($op.error) {
                 Set-ControlText $txtActualRequestUrl $op.error.details.url
@@ -705,7 +1050,7 @@ function Test-Coordinator {
 }
 
 function Test-TokenValidation {
-    if ($txtTokenStatus.Text -ne "已配置") {
+    if ((Get-TrimmedTextSafe $txtTokenStatus "未配置") -ne "已配置") {
         Set-Status $txtTokenStatus "not_configured" "token"
         Set-Status $txtTokenValidationStatus "not_configured" "token"
         return
@@ -719,14 +1064,14 @@ function Test-TokenValidation {
             Set-Status $txtTokenStatus "invalid" "token"
             Set-Status $txtTokenValidationStatus "invalid" "token"
         } else {
-            Set-ControlText $txtTokenValidationStatus $txtTokenStatus.Text
+            Set-ControlText $txtTokenValidationStatus (Get-TrimmedTextSafe $txtTokenStatus "未配置")
         }
     } catch {
         if ($_.Exception.Message -match "401|auth|token|令牌") {
             Set-Status $txtTokenStatus "invalid" "token"
             Set-Status $txtTokenValidationStatus "invalid" "token"
         } else {
-            Set-ControlText $txtTokenValidationStatus $txtTokenStatus.Text
+            Set-ControlText $txtTokenValidationStatus (Get-TrimmedTextSafe $txtTokenStatus "未配置")
             Add-Log ("访问令牌验证跳过：" + $_.Exception.Message)
         }
     }
@@ -779,7 +1124,16 @@ function Refresh-Identity {
 
 function Run-LocalInit {
     try {
-        if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法初始化本机。" }
+        $saved = $false
+        try {
+            $saved = Sync-FormConfig -Quiet
+        } catch {
+            Write-ActionDiagnosticLog "保存配置" $_
+            Add-Log ("保存表单时出现问题，将继续尝试本机初始化：" + $_.Exception.Message)
+        }
+        if (-not $saved) {
+            Add-Log "表单未完整保存，直接调用本机初始化 API。"
+        }
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/local/init"
         Set-ControlText $txtOperation ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
@@ -813,8 +1167,8 @@ function Save-ListenerConfig {
     try {
         $cfg = @{
             enabled = $true
-            localHost = $txtListenerHost.Text.Trim()
-            localPort = [int]$txtListenerPort.Text.Trim()
+            localHost = Get-TrimmedTextSafe $txtListenerHost "127.0.0.1"
+            localPort = Get-IntFromTextSafe (Get-TrimmedTextSafe $txtListenerPort) 25565
             expectedProcessNames = @("java.exe", "javaw.exe")
             serverDirMatchRequired = $false
         }
@@ -886,9 +1240,9 @@ function Configure-Relay {
     try {
         if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法配置 VPS 中转。" }
         $body = @{
-            localMinecraftHost = $txtListenerHost.Text.Trim()
-            localMinecraftPort = [int]$txtListenerPort.Text.Trim()
-            publicMinecraftPort = [int]$txtPublicPort.Text.Trim()
+            localMinecraftHost = Get-TrimmedTextSafe $txtListenerHost "127.0.0.1"
+            localMinecraftPort = Get-IntFromTextSafe (Get-TrimmedTextSafe $txtListenerPort) 25565
+            publicMinecraftPort = Get-IntFromTextSafe (Get-TrimmedTextSafe $txtPublicPort) 25565
         }
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/relay/configure" -Body $body
         Set-ControlText $txtOperation ($op | ConvertTo-Json -Depth 12)
@@ -987,7 +1341,8 @@ function Refresh-Snapshots {
 function Choose-RestoreDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = "选择一个新的空恢复目录"
-    if ($txtRestoreTargetDir.Text) { $dialog.SelectedPath = $txtRestoreTargetDir.Text }
+    $restoreDir = Get-TrimmedTextSafe $txtRestoreTargetDir
+    if ($restoreDir) { $dialog.SelectedPath = $restoreDir }
     if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
         Set-ControlText $txtRestoreTargetDir $dialog.SelectedPath
     }
@@ -995,7 +1350,10 @@ function Choose-RestoreDir {
 
 function Download-LatestSnapshot {
     try {
-        $body = @{ targetDir = $txtRestoreTargetDir.Text.Trim(); allowNonEmpty = $chkAllowNonEmpty.Checked }
+        $body = @{
+            targetDir = Get-TrimmedTextSafe $txtRestoreTargetDir
+            allowNonEmpty = $(if ($chkAllowNonEmpty) { $chkAllowNonEmpty.Checked } else { $false })
+        }
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/snapshots/latest/download" -Body $body
         $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
@@ -1009,9 +1367,12 @@ function Download-LatestSnapshot {
 
 function Download-SelectedSnapshot {
     try {
-        $snapshotId = $txtSnapshotId.Text.Trim()
+        $snapshotId = Get-TrimmedTextSafe $txtSnapshotId
         if (-not $snapshotId) { throw "Snapshot ID is required." }
-        $body = @{ targetDir = $txtRestoreTargetDir.Text.Trim(); allowNonEmpty = $chkAllowNonEmpty.Checked }
+        $body = @{
+            targetDir = Get-TrimmedTextSafe $txtRestoreTargetDir
+            allowNonEmpty = $(if ($chkAllowNonEmpty) { $chkAllowNonEmpty.Checked } else { $false })
+        }
         $op = Invoke-BodyJson -Method "POST" -Path ("/v1/snapshots/" + [uri]::EscapeDataString($snapshotId) + "/download") -Body $body
         $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
@@ -1026,7 +1387,8 @@ function Download-SelectedSnapshot {
 function Choose-ServerDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
     $dialog.Description = "选择 Minecraft 服务端目录"
-    if ($txtServerDir.Text) { $dialog.SelectedPath = $txtServerDir.Text }
+    $serverDir = Get-TrimmedTextSafe $txtServerDir
+    if ($serverDir) { $dialog.SelectedPath = $serverDir }
     if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
         Set-ControlText $txtServerDir $dialog.SelectedPath
         Update-StepStatus
@@ -1116,17 +1478,28 @@ function Set-StepLabel {
 
 function Update-StepStatus {
     $step1 = "需要处理"
-    if (-not [string]::IsNullOrWhiteSpace($txtCoordinator.Text) -and $txtTokenStatus.Text -ne "未配置") { $step1 = "已完成" }
+    $coordText = Get-TrimmedTextSafe $txtCoordinator
+    $tokenStatus = Get-TrimmedTextSafe $txtTokenStatus "未配置"
+    if (-not [string]::IsNullOrWhiteSpace($coordText) -and $tokenStatus -ne "未配置") { $step1 = "已完成" }
     $step2 = "需要处理"
-    if (-not [string]::IsNullOrWhiteSpace($txtServerDir.Text)) { $step2 = "已完成" }
+    $serverDirText = Get-TrimmedTextSafe $txtServerDir
+    if (-not [string]::IsNullOrWhiteSpace($serverDirText)) {
+        $step2 = "已完成"
+    } else {
+        $step2 = "服务器目录未配置"
+    }
     $step3 = "未完成"
-    if ($txtInstanceId.Text -like "acbh_instance_*" -and $txtDeviceId.Text -like "acbh_device_*" -and $txtInstanceId.Text -ne $txtDeviceId.Text) { $step3 = "已完成" }
+    $instanceId = Get-TrimmedTextSafe $txtInstanceId
+    $deviceId = Get-TrimmedTextSafe $txtDeviceId
+    if ($instanceId -like "acbh_instance_*" -and $deviceId -like "acbh_device_*" -and $instanceId -ne $deviceId) { $step3 = "已完成" }
     $step4 = "未完成"
-    if ($txtCoordinatorCheckStatus.Text -in @("已连接", "不可达", "失败", "返回错误", "版本不匹配")) { $step4 = "已完成" }
+    $coordinatorStatus = Get-TrimmedTextSafe $txtCoordinatorCheckStatus "未配置"
+    if ($coordinatorStatus -in @("已连接", "不可达", "失败", "返回错误", "版本不匹配")) { $step4 = "已完成" }
     $step5 = "未完成"
-    if ($txtRelayCheckStatus.Text -in @("已配置", "运行中")) { $step5 = "已完成" }
+    $relayStatus = Get-TrimmedTextSafe $txtRelayCheckStatus "未配置"
+    if ($relayStatus -in @("已配置", "运行中")) { $step5 = "已完成" }
     $step6 = "未完成"
-    if (-not [string]::IsNullOrWhiteSpace($txtPublicEndpoint.Text)) { $step6 = "已完成" }
+    if (-not [string]::IsNullOrWhiteSpace((Get-TrimmedTextSafe $txtPublicEndpoint))) { $step6 = "已完成" }
     Set-StepLabel $lblStep1 "步骤 1：填写 VPS 地址和访问令牌" $step1
     Set-StepLabel $lblStep2 "步骤 2：选择 Minecraft 服务端目录" $step2
     Set-StepLabel $lblStep3 "步骤 3：点击「一键初始化本机」" $step3
@@ -1397,5 +1770,16 @@ $form.Add_FormClosed({
         try { $script:BodyProcess.Kill() } catch { }
     }
 })
+
+if ($SelfTest) {
+    Test-GuiStaticChecks
+    Test-GuiNullSafeBehavior
+    if ($script:BodyProcess -and -not $script:BodyProcess.HasExited) {
+        try { $script:BodyProcess.Kill() } catch {}
+    }
+    $script:BodyProcess = $null
+    Write-Output "ACBH minimal-core GUI self-test ok"
+    exit 0
+}
 
 [void]$form.ShowDialog()
