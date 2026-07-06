@@ -141,13 +141,17 @@ Minimal-core Windows GUI and matching VPS Coordinator bundle.
 
 - Windows minimal-core GUI bundle
 - Local body runtime API on 127.0.0.1:6120
-- Single-owner/private instance identity model
+- Token-only relay mode (ACBH_ACCESS_TOKEN bearer auth)
+- POST /v1/bootstrap remote instance upsert
 - Listener status and VPS relay configuration
 - Matching Linux amd64 Coordinator bundle from commit $Commit
 
+## VPS requirement
+
+Set ACBH_ACCESS_TOKEN on the Coordinator before clients connect. The GUI access token must match this value.
+
 ## Not Included
 
-- GitHub Release publishing
 - User config, logs, backup data, restore data, or tokens
 "@
     Set-Content -LiteralPath $Path -Value $text -Encoding UTF8
@@ -190,6 +194,10 @@ function Write-CoordinatorReadme {
         "tar -xzf acbh-coordinator-linux-amd64-bundle-$Version.tar.gz",
         "cd acbh-coordinator-linux-amd64-bundle-$Version",
         '```',
+        "",
+        "## Configure Access Token",
+        "",
+        "Copy .env.example to .env and set ACBH_ACCESS_TOKEN to a strong secret. Clients must use the same token in the GUI.",
         "",
         "## Start Coordinator",
         "",
@@ -397,6 +405,7 @@ Invoke-NpmInstallProduction -Directory $coordinatorRoot
 $envExample = @"
 PORT=6121
 HOST=0.0.0.0
+ACBH_ACCESS_TOKEN=change-me-to-a-strong-secret
 ACBH_VERSION=$Version
 ACBH_BUILD_COMMIT=$commit
 ACBH_PROTOCOL_VERSION=2
