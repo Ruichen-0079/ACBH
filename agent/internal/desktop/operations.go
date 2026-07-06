@@ -114,6 +114,16 @@ type ManagedServerRepairResult struct {
 	Message      string `json:"message,omitempty"`
 }
 
+type ServerRepairResult struct {
+	OK           bool               `json:"ok"`
+	Repairable   bool               `json:"repairable"`
+	Repaired     bool               `json:"repaired"`
+	RemovedState bool               `json:"removedState"`
+	RemovedLock  bool               `json:"removedLock"`
+	Message      string             `json:"message,omitempty"`
+	Status       ManagedServerState `json:"status"`
+}
+
 type StartServerResult struct {
 	OK               bool     `json:"ok"`
 	ErrorCode        string   `json:"errorCode,omitempty"`
@@ -644,6 +654,27 @@ func ManagedServerRepairState(opts Options) (ManagedServerRepairResult, error) {
 	return out, nil
 }
 
+func RepairServerState(opts Options) (ServerRepairResult, error) {
+	opts = withDefaults(opts)
+	result, err := ManagedServerRepairState(opts)
+	after, _ := ManagedServerStatus(opts)
+	if err != nil {
+		return ServerRepairResult{OK: false, Repairable: false, Message: "修复启动状态失败：" + err.Error(), Status: after}, nil
+	}
+	if !result.Repaired {
+		return ServerRepairResult{OK: true, Repairable: false, Message: "没有需要修复的 server.lock 或 server-state。", Status: after}, nil
+	}
+	return ServerRepairResult{
+		OK:           true,
+		Repairable:   false,
+		Repaired:     result.Repaired,
+		RemovedState: result.RemovedState,
+		RemovedLock:  result.RemovedLock,
+		Message:      "启动状态已安全修复，可再次启动服务端。",
+		Status:       after,
+	}, nil
+}
+
 func DesktopServerStatus(opts Options) (map[string]any, error) {
 	managed, err := ManagedServerStatus(opts)
 	if err != nil {
@@ -667,7 +698,7 @@ func DesktopServerStatus(opts Options) (map[string]any, error) {
 		resp["state"] = map[string]any{
 			"pid": status.State.PID, "supervisorPid": status.State.SupervisorPID,
 			"status": status.State.Status, "serverDir": status.State.ServerDir,
-			"command": firstNonEmpty(status.State.Command, managed.CommandLine),
+			"command":   firstNonEmpty(status.State.Command, managed.CommandLine),
 			"startedAt": status.State.StartedAt, "stdoutLog": status.State.StdoutLog,
 			"stderrLog": status.State.StderrLog,
 		}

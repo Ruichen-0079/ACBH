@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 const (
@@ -13,6 +15,10 @@ const (
 	FileName       = "config.json"
 	LegacyFileName = "config.yaml"
 	AgentVersion   = "0.1.0"
+
+	DefaultServerStartTimeout = 120 * time.Second
+
+	minServerStartTimeout = 10 * time.Second
 )
 
 type Config struct {
@@ -30,14 +36,33 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Dir         string `json:"dir,omitempty"`
-	Command     string `json:"command,omitempty"`
-	LogDir      string `json:"logDir,omitempty"`
-	StopTimeout string `json:"stopTimeout,omitempty"`
-	LaunchPath  string `json:"launchPath,omitempty"`
-	JavaPath    string `json:"javaPath,omitempty"`
-	WorkingDir  string `json:"workingDir,omitempty"`
-	UpdatedAt   string `json:"updatedAt,omitempty"`
+	Dir          string   `json:"dir,omitempty"`
+	Command      string   `json:"command,omitempty"`
+	LogDir       string   `json:"logDir,omitempty"`
+	LaunchType   string   `json:"launchType,omitempty"`
+	LaunchPath   string   `json:"launchPath,omitempty"`
+	JavaPath     string   `json:"javaPath,omitempty"`
+	WorkingDir   string   `json:"workingDir,omitempty"`
+	StartArgs    []string `json:"startArgs,omitempty"`
+	StartTimeout string   `json:"startTimeout,omitempty"`
+	StopTimeout  string   `json:"stopTimeout,omitempty"`
+	UpdatedAt    string   `json:"updatedAt,omitempty"`
+}
+
+func (s ServerConfig) ResolvedStartTimeout() (time.Duration, error) {
+	raw := strings.TrimSpace(s.StartTimeout)
+	if raw == "" {
+		return DefaultServerStartTimeout, nil
+	}
+
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.startTimeout %q: %w", raw, err)
+	}
+	if duration < minServerStartTimeout {
+		return 0, fmt.Errorf("server.startTimeout must be at least %s", minServerStartTimeout)
+	}
+	return duration, nil
 }
 
 type BackupProfileConfig struct {

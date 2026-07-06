@@ -61,18 +61,24 @@ const joinGroupSchema = z.object({
 });
 
 const createInviteSchema = z.object({
-  accessKey: z.string().min(1),
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
   expiresInSeconds: z.number().int().positive().optional(),
   oneTime: z.boolean().optional(),
 });
 
 const revokeInviteSchema = z.object({
-  accessKey: z.string().min(1),
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
   inviteId: z.string().min(1),
 });
 
 const listInviteSchema = z.object({
-  accessKey: z.string().min(1),
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
 });
 
 const joinInviteSchema = z.object({
@@ -312,10 +318,15 @@ const buildCommit = process.env.ACBH_BUILD_COMMIT ?? "dev";
 const protocolVersion = Number.parseInt(process.env.ACBH_PROTOCOL_VERSION ?? "2", 10);
 const minimumClientProtocol = 2;
 const alpha6Capabilities = [
+  "capabilities_v1",
+  "desktop_protocol_v2",
+  "world_backup_resume",
+  "public_relay_v1",
+  "bootstrap_packages_v1",
+  "invite_management_v1",
   "lease_renew_v1",
   "world_backup_v1",
   "group_whoami_v1",
-  "invite_management_v1",
 ] as const;
 
 export async function registerRoutes(
@@ -359,7 +370,7 @@ export async function registerRoutes(
       minimumClientProtocol,
       capabilities: [...alpha6Capabilities],
       serverTime: new Date().toISOString(),
-      authenticationMode: "host-token",
+      authenticationMode: "host_token_or_owner_access_key",
     };
   });
 
@@ -886,6 +897,8 @@ export async function registerRoutes(
       store.createInvite({
         groupId: params.groupId,
         accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
         expiresInSeconds: body.expiresInSeconds,
         oneTime: body.oneTime,
       }),
@@ -902,6 +915,8 @@ export async function registerRoutes(
       store.listInvites({
         groupId: params.groupId,
         accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
       }),
     );
   });
@@ -916,6 +931,8 @@ export async function registerRoutes(
       store.revokeInvite({
         groupId: params.groupId,
         accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
         inviteId: body.inviteId,
       }),
     );
@@ -980,6 +997,38 @@ export async function registerRoutes(
     return handleStoreCall(reply, () => {
       const whoami = ((store as any).whoAmI ?? (store as any).whoami).bind(store);
       return whoami({ groupId: params.groupId, ...authResult.data });
+    });
+  });
+
+  app.get("/v1/groups/:groupId/members", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const authResult = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!authResult.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "missing_host_token",
+        message: "Host authentication headers are required",
+        issues: authResult.error.issues,
+      });
+    }
+    return handleStoreCall(reply, () => {
+      store.verifyHost({ groupId: params.groupId, ...authResult.data });
+      const state = store.getGroupState(params.groupId);
+      const localHost = state.hosts.find((host) => host.hostId === authResult.data.hostId);
+      return {
+        groupId: state.groupId,
+        groupName: state.name,
+        members: state.members.map((member) => ({
+          ...member,
+          isLocal: member.memberId === localHost?.memberId,
+        })),
+      };
     });
   });
 

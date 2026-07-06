@@ -29,6 +29,7 @@ var newSupervisorCommand = func(executable string, args ...string) *exec.Cmd {
 
 type StartOptions struct {
 	ServerDir   string
+	WorkingDir  string
 	Command     string
 	CommandArgv []string
 	LogDir      string
@@ -122,6 +123,7 @@ func Start(ctx context.Context, executable string, opts StartOptions) (State, er
 	args := []string{
 		"server", "supervise",
 		"--server-dir", opts.ServerDir,
+		"--working-dir", opts.WorkingDir,
 		"--command", opts.Command,
 		"--log-dir", opts.LogDir,
 		"--runtime-dir", opts.RuntimeDir,
@@ -218,7 +220,7 @@ func RunSupervisor(ctx context.Context, opts SupervisorOptions) error {
 	}
 
 	serverCmd := exec.Command(args[0], args[1:]...)
-	serverCmd.Dir = normalized.ServerDir
+	serverCmd.Dir = normalized.WorkingDir
 	serverCmd.Stdout = stdoutFile
 	serverCmd.Stderr = stderrFile
 	stdin, err := serverCmd.StdinPipe()
@@ -234,6 +236,7 @@ func RunSupervisor(ctx context.Context, opts SupervisorOptions) error {
 		SupervisorPID: os.Getpid(),
 		LauncherPID:   serverCmd.Process.Pid,
 		ServerDir:     normalized.ServerDir,
+		WorkingDir:    normalized.WorkingDir,
 		Command:       normalized.Command,
 		CommandArgv:   normalized.CommandArgv,
 		StartedAt:     time.Now().UTC(),
@@ -462,6 +465,23 @@ func normalizeStartOptions(opts StartOptions) (StartOptions, error) {
 	}
 	if !info.IsDir() {
 		return opts, errors.New("server directory is not a directory")
+	}
+	if strings.TrimSpace(opts.WorkingDir) == "" {
+		opts.WorkingDir = opts.ServerDir
+	}
+	if !filepath.IsAbs(opts.WorkingDir) {
+		opts.WorkingDir = filepath.Join(opts.ServerDir, opts.WorkingDir)
+	}
+	opts.WorkingDir, err = filepath.Abs(opts.WorkingDir)
+	if err != nil {
+		return opts, fmt.Errorf("resolve working directory: %w", err)
+	}
+	workingInfo, err := os.Stat(opts.WorkingDir)
+	if err != nil {
+		return opts, fmt.Errorf("inspect working directory: %w", err)
+	}
+	if !workingInfo.IsDir() {
+		return opts, errors.New("working directory is not a directory")
 	}
 	if len(opts.CommandArgv) > 0 {
 		if opts.CommandArgv[0] == "" {

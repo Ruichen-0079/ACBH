@@ -35,6 +35,19 @@ function Assert-UnderRoot {
     }
 }
 
+function Get-RelativePathCompat {
+    param([string]$Root, [string]$Path)
+    $fullRoot = [System.IO.Path]::GetFullPath($Root)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if (-not $fullRoot.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $fullRoot = $fullRoot + [System.IO.Path]::DirectorySeparatorChar
+    }
+    $rootUri = New-Object System.Uri($fullRoot)
+    $pathUri = New-Object System.Uri($fullPath)
+    $relativeUri = $rootUri.MakeRelativeUri($pathUri)
+    return [System.Uri]::UnescapeDataString($relativeUri.ToString()).Replace("/", [System.IO.Path]::DirectorySeparatorChar)
+}
+
 function Remove-DirectoryIfExists {
     param([string]$Path, [string]$AllowedRoot)
     if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -44,28 +57,37 @@ function Remove-DirectoryIfExists {
 
 function Assert-SensitivePathsExcluded {
     param([string[]]$RelativePaths)
-    $forbidden = @(
+    $forbiddenExactFiles = @(
         "config.json",
         "migration-report.json",
-        "legacy/",
-        "logs/",
-        "restore-v0.5-test",
         "test.pem",
-        ".env",
+        ".env"
+    )
+    $forbiddenSegments = @(
+        "legacy",
+        "logs",
+        "restore-v0.5-test",
         "%APPDATA%/ACBH",
         "AppData/Roaming/ACBH",
         "MinecraftServers/example-server-data"
     )
     foreach ($path in $RelativePaths) {
         $normalized = $path.Replace("\", "/")
-        foreach ($item in $forbidden) {
-            if ($item -eq ".env") {
-                if ($normalized -eq ".env" -or $normalized -like "*/.env") {
+        $segments = @($normalized.Split("/") | Where-Object { $_ -ne "" })
+        foreach ($file in $forbiddenExactFiles) {
+            if ($segments -contains $file) {
+                throw "Sensitive path would be packaged: $path"
+            }
+        }
+        foreach ($item in $forbiddenSegments) {
+            $itemSegments = @($item.Split("/") | Where-Object { $_ -ne "" })
+            if ($itemSegments.Count -eq 1) {
+                if ($segments -contains $itemSegments[0]) {
                     throw "Sensitive path would be packaged: $path"
                 }
                 continue
             }
-            if ($normalized -like "*$item*") {
+            if ($normalized -eq $item -or $normalized -like "$item/*" -or $normalized -like "*/$item/*") {
                 throw "Sensitive path would be packaged: $path"
             }
         }
@@ -76,7 +98,7 @@ function Assert-BundleHasNoSensitiveFiles {
     param([string]$BundleRoot)
     $root = [System.IO.Path]::GetFullPath($BundleRoot)
     $paths = Get-ChildItem -LiteralPath $BundleRoot -Recurse -File | ForEach-Object {
-        [System.IO.Path]::GetRelativePath($root, $_.FullName)
+        Get-RelativePathCompat -Root $root -Path $_.FullName
     }
     Assert-SensitivePathsExcluded -RelativePaths @($paths)
 }

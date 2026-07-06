@@ -799,6 +799,45 @@ func SelectServerLaunch(opts Options, selectedPath string) (InspectServerSetupRe
 	return saveInspectedServer(opts, report)
 }
 
+func SelectServerJava(opts Options, selectedPath string) (map[string]any, error) {
+	opts = withDefaults(opts)
+	selectedPath = strings.TrimSpace(selectedPath)
+	if selectedPath == "" {
+		return map[string]any{"ok": false, "message": "请选择 java.exe。"}, nil
+	}
+	info, err := os.Stat(selectedPath)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return map[string]any{"ok": false, "message": "选择的 Java 路径是目录，不是 java.exe。"}, nil
+	}
+
+	version := DetectJavaVersion(selectedPath)
+	setup, _ := LoadSetup(opts)
+	setup.JavaPath = selectedPath
+	setup.JavaVersion = version
+	if setup.LaunchProfile.Kind != "" {
+		setup.LaunchProfile.JavaPath = selectedPath
+		setup.LaunchProfile.DetectedJavaVersion = version
+	}
+	setup.UpdatedAt = time.Now().Format(time.RFC3339)
+	if err := SaveSetup(opts, setup); err != nil {
+		return nil, err
+	}
+	if cfg, err := agentconfig.Load(filepath.Join(opts.AppDataDir, agentconfig.FileName)); err == nil {
+		cfg.Server.JavaPath = selectedPath
+		cfg.Server.UpdatedAt = time.Now().Format(time.RFC3339)
+		if err := agentconfig.Save(filepath.Join(opts.AppDataDir, agentconfig.FileName), cfg); err != nil {
+			return nil, err
+		}
+	}
+	_ = syncDesktopConfig(opts, func(cfg *DesktopConfig) {
+		cfg.JavaPath = selectedPath
+	})
+	return map[string]any{"ok": true, "javaPath": selectedPath, "javaVersion": version, "message": "Java 路径已保存。"}, nil
+}
+
 func CurrentLaunchProfile(opts Options) (mcimport.LaunchProfile, error) {
 	opts = withDefaults(opts)
 	setup, _ := LoadSetup(opts)

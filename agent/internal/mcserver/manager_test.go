@@ -516,6 +516,7 @@ func TestStartSupervisorProcess(t *testing.T) {
 	}
 	flags := flag.NewFlagSet("supervise", flag.ContinueOnError)
 	serverDir := flags.String("server-dir", "", "")
+	workingDir := flags.String("working-dir", "", "")
 	command := flags.String("command", "", "")
 	commandArgv := flags.String("command-argv", "", "")
 	logDir := flags.String("log-dir", "", "")
@@ -527,7 +528,7 @@ func TestStartSupervisorProcess(t *testing.T) {
 	}
 	err := RunSupervisor(context.Background(), SupervisorOptions{
 		StartOptions: StartOptions{
-			ServerDir: *serverDir, Command: *command, LogDir: *logDir,
+			ServerDir: *serverDir, WorkingDir: *workingDir, Command: *command, LogDir: *logDir,
 			CommandArgv: DecodeCommandArgv(*commandArgv),
 			RuntimeDir:  *runtimeDir, StopTimeout: *stopTimeout,
 		},

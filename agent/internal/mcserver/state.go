@@ -20,6 +20,7 @@ type State struct {
 	LauncherPID   int       `json:"launcherPid,omitempty"`
 	MinecraftPID  int       `json:"minecraftPid,omitempty"`
 	ServerDir     string    `json:"serverDir"`
+	WorkingDir    string    `json:"workingDir,omitempty"`
 	Command       string    `json:"command"`
 	CommandArgv   []string  `json:"commandArgv,omitempty"`
 	StartedAt     time.Time `json:"startedAt"`

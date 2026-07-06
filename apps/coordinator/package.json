@@ -1,6 +1,6 @@
 {
   "name": "@acbh/coordinator",
-  "version": "0.4.0-alpha6-hotfix2",
+  "version": "v0.5.1-public-relay-hotfix",
   "private": true,
   "type": "module",
   "scripts": {
