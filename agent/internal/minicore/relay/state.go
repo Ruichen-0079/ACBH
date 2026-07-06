@@ -35,6 +35,21 @@ const (
 	DisconnectPublicListenerDown  = "public_listener_not_ready"
 )
 
+type SessionDiagnostic struct {
+	SessionID             string `json:"sessionId"`
+	StartedAt             string `json:"startedAt,omitempty"`
+	ClosedAt              string `json:"closedAt,omitempty"`
+	RemotePlayerAddress   string `json:"remotePlayerAddress,omitempty"`
+	LocalConnected        bool   `json:"localConnected"`
+	ForwardingStarted     bool   `json:"forwardingStarted"`
+	BytesPlayerToLocal    int64  `json:"bytesPlayerToLocal"`
+	BytesLocalToPlayer    int64  `json:"bytesLocalToPlayer"`
+	UpstreamClosed        bool   `json:"upstreamClosed"`
+	DownstreamClosed      bool   `json:"downstreamClosed"`
+	CloseReason           string `json:"closeReason,omitempty"`
+	Error                 string `json:"error,omitempty"`
+}
+
 type State struct {
 	Configured                bool                `json:"configured"`
 	CurrentHost               bool                `json:"currentHost"`
@@ -57,6 +72,10 @@ type State struct {
 	SessionPumpRunning        bool                `json:"sessionPumpRunning"`
 	PublicListenerReady       bool                `json:"publicListenerReady"`
 	LocalMinecraftReachable   bool                `json:"localMinecraftReachable"`
+	PublicMinecraftPingOk     bool                `json:"publicMinecraftPingOk"`
+	RecentPublicPingOk        bool                `json:"recentPublicPingOk"`
+	LastPublicPingAt          string              `json:"lastPublicPingAt,omitempty"`
+	RecentSessions            []SessionDiagnostic `json:"recentSessions"`
 	LastTunnelError           string              `json:"lastTunnelError,omitempty"`
 	LastDisconnectReason      string              `json:"lastDisconnectReason,omitempty"`
 	Errors                    []*coreerrors.Error `json:"errors"`

@@ -1327,16 +1327,29 @@ function Set-RelayFields {
         "sessionPumpRunning=$($Relay.sessionPumpRunning)",
         "publicListenerReady=$($Relay.publicListenerReady)",
         "localMinecraftReachable=$($Relay.localMinecraftReachable)",
+        "publicMinecraftPingOk=$($Relay.publicMinecraftPingOk)",
+        "recentPublicPingOk=$($Relay.recentPublicPingOk)",
         "lastHeartbeatAt=$($Relay.lastHeartbeatAt)",
         "leaseExpiresAt=$($Relay.leaseExpiresAt)",
         "activeUntil=$($Relay.activeUntil)",
         "lastDisconnectReason=$($Relay.lastDisconnectReason)"
     )
     Set-ControlText $txtRelayState ($stateParts -join " ")
+    $publicPathOk = $Relay.publicMinecraftPingOk -or $Relay.recentPublicPingOk
     if ($Relay.active) {
         Set-Status $txtRelayCheckStatus "running" "relay"
-        if ($txtRelayEntryStatus) { Set-Status $txtRelayEntryStatus "running" "relay" }
-        $lblState.Text = "状态：公网入口可用（数据面已连通）"
+        if ($txtRelayEntryStatus) {
+            if ($publicPathOk) {
+                Set-Status $txtRelayEntryStatus "running" "relay"
+            } else {
+                Set-Status $txtRelayEntryStatus "failed" "relay"
+            }
+        }
+        if ($publicPathOk) {
+            $lblState.Text = "状态：公网入口可用（Minecraft status ping 成功）"
+        } else {
+            $lblState.Text = "状态：控制面已连通，公网 Minecraft status ping 尚未成功"
+        }
     } elseif ($Relay.configured) {
         Set-Status $txtRelayCheckStatus "failed" "relay"
         if ($txtRelayEntryStatus) { Set-Status $txtRelayEntryStatus "failed" "relay" }

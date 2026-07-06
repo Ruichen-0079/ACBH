@@ -144,6 +144,7 @@ export class PublicRelayIngress {
     }
 
     const sessionId = tun.sessionId;
+    this.opts.relay.setRemotePlayerAddress(sessionId, remoteAddress);
     this.log("tunnel session created", {
       groupId,
       sessionId,
@@ -170,50 +171,107 @@ export class PublicRelayIngress {
         sessionId,
         err: String(e),
         remotePlayerAddress: remoteAddress,
+        closeReason: "timeout_waiting_for_player_ws",
       });
       tcpConn.destroy();
       return;
     }
 
-    if (currentHost?.hostId && this.opts.relay.hasHostClient(groupId, currentHost.hostId)) {
-      this.log("relay client attached", { groupId, sessionId, deviceId: currentHost.hostId });
-    } else {
-      this.log("no active tunnel", {
-        reason: "relay client not connected",
-        groupId,
-        sessionId,
-        deviceId: currentHost?.hostId,
-        remotePlayerAddress: remoteAddress,
-      });
-    }
+    this.log("player side attached", {
+      groupId,
+      sessionId,
+      remotePlayerAddress: remoteAddress,
+    });
 
-    this.log("forwarding started", { groupId, sessionId, remotePlayerAddress: remoteAddress });
-
-    const bufSize = defaultBufferSize;
+    const pendingTcpChunks: Buffer[] = [];
+    let bytesPlayerToLocal = 0;
+    let bytesLocalToPlayer = 0;
+    let upstreamCopyStarted = false;
+    let downstreamCopyStarted = false;
     let closed = false;
-    const closeAll = (reason: string) => {
+
+    const closeAll = (reason: string, err?: string) => {
       if (closed) return;
       closed = true;
-      this.log("forwarding closed", { groupId, sessionId, reason, remotePlayerAddress: remoteAddress });
+      const pair = this.opts.relay.getPair(sessionId);
+      this.log("forwarding closed", {
+        groupId,
+        sessionId,
+        reason,
+        error: err,
+        remotePlayerAddress: remoteAddress,
+        playerAttached: pair?.playerAttached ?? false,
+        hostAttached: pair?.hostAttached ?? false,
+        bytesPlayerToLocal,
+        bytesLocalToPlayer,
+        upstreamCopyStarted,
+        downstreamCopyStarted,
+        closeInitiator: "public-relay",
+      });
       try { tcpConn.destroy(); } catch {}
       try { if (ws.readyState === WebSocket.OPEN) ws.close(1000, "public relay close"); } catch {}
     };
 
     tcpConn.on("data", (chunk: Buffer) => {
+      if (closed) return;
+      if (!upstreamCopyStarted) {
+        pendingTcpChunks.push(Buffer.from(chunk));
+        return;
+      }
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(chunk);
+        bytesPlayerToLocal += chunk.length;
       }
     });
     tcpConn.on("close", () => closeAll("player tcp closed"));
-    tcpConn.on("error", () => closeAll("player tcp error"));
+    tcpConn.on("error", (e) => closeAll("player tcp error", String(e)));
+
+    const bridge = await this.opts.relay.waitForBridge(sessionId, tunnelAttachTimeoutMs, (waitingFor) => {
+      this.log(`waiting for ${waitingFor} side`, {
+        sessionId,
+        groupId,
+        remotePlayerAddress: remoteAddress,
+        waitingFor,
+      });
+    });
+
+    if (!bridge.ok) {
+      closeAll(bridge.reason ?? "timeout_waiting_for_peer");
+      return;
+    }
+
+    if (currentHost?.hostId && this.opts.relay.hasHostClient(groupId, currentHost.hostId)) {
+      this.log("host relay client attached", { groupId, sessionId, deviceId: currentHost.hostId });
+    }
+
+    upstreamCopyStarted = true;
+    downstreamCopyStarted = true;
+    this.log("bidirectional bridge started", {
+      groupId,
+      sessionId,
+      remotePlayerAddress: remoteAddress,
+      copyStartedUpstream: upstreamCopyStarted,
+      copyStartedDownstream: downstreamCopyStarted,
+      bytesPlayerToLocal,
+      bytesLocalToPlayer,
+    });
+
+    for (const chunk of pendingTcpChunks) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(chunk);
+        bytesPlayerToLocal += chunk.length;
+      }
+    }
+    pendingTcpChunks.length = 0;
 
     ws.on("message", (data: Buffer) => {
-      if (!tcpConn.destroyed) {
-        tcpConn.write(data);
-      }
+      if (closed || tcpConn.destroyed) return;
+      const chunk = Buffer.from(data);
+      tcpConn.write(chunk);
+      bytesLocalToPlayer += chunk.length;
     });
     ws.on("close", () => closeAll("player websocket closed"));
-    ws.on("error", () => closeAll("player websocket error"));
+    ws.on("error", (e) => closeAll("player websocket error", String(e)));
   }
 
   private buildWSURL(groupId: string, sessionId: string): string {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -16,6 +17,23 @@ import (
 const (
 	defaultBufferSize = 32 * 1024
 )
+
+type SessionStats struct {
+	SessionID            string
+	StartedAt            time.Time
+	ClosedAt             time.Time
+	RemotePlayerAddress  string
+	LocalConnected       bool
+	ForwardingStarted    bool
+	BytesPlayerToLocal   int64
+	BytesLocalToPlayer   int64
+	UpstreamCopyStarted  bool
+	DownstreamCopyStarted bool
+	UpstreamClosed       bool
+	DownstreamClosed     bool
+	CloseReason          string
+	Error                string
+}
 
 type HostRelayOptions struct {
 	CoordinatorURL  string
@@ -26,6 +44,7 @@ type HostRelayOptions struct {
 	HostGeneration  int
 	TargetAddress   string
 	BufferSize      int
+	OnClose         func(SessionStats)
 }
 
 type HostRelayClient struct {
@@ -40,10 +59,24 @@ func NewHostRelayClient(opts HostRelayOptions) *HostRelayClient {
 }
 
 func (c *HostRelayClient) Run(ctx context.Context) error {
+	stats := SessionStats{
+		SessionID:  c.opts.SessionID,
+		StartedAt:  time.Now().UTC(),
+	}
+	defer func() {
+		stats.ClosedAt = time.Now().UTC()
+		if c.opts.OnClose != nil {
+			c.opts.OnClose(stats)
+		}
+	}()
+
 	wsURL := fmt.Sprintf("%s/v1/groups/%s/relay/tunnel-sessions/%s/host",
 		wsScheme(c.opts.CoordinatorURL), c.opts.GroupID, c.opts.SessionID)
 	if wsURL == "" {
-		return fmt.Errorf("relay: invalid coordinator URL: %s", c.opts.CoordinatorURL)
+		err := fmt.Errorf("relay: invalid coordinator URL: %s", c.opts.CoordinatorURL)
+		stats.CloseReason = "invalid_coordinator_url"
+		stats.Error = err.Error()
+		return err
 	}
 
 	headers := http.Header{}
@@ -56,6 +89,8 @@ func (c *HostRelayClient) Run(ctx context.Context) error {
 
 	var wsConn *websocket.Conn
 	var tcpConn *net.TCPConn
+	var bytesPlayerToLocal int64
+	var bytesLocalToPlayer int64
 
 	var closeOnce sync.Once
 	closeConns := func() {
@@ -75,6 +110,8 @@ func (c *HostRelayClient) Run(ctx context.Context) error {
 		HTTPHeader: headers,
 	})
 	if err != nil {
+		stats.CloseReason = "websocket_dial_failed"
+		stats.Error = err.Error()
 		return fmt.Errorf("relay: websocket dial failed: %w", err)
 	}
 
@@ -83,9 +120,15 @@ func (c *HostRelayClient) Run(ctx context.Context) error {
 	var dialer net.Dialer
 	rawTCPConn, err := dialer.DialContext(dialCtx, "tcp", c.opts.TargetAddress)
 	if err != nil {
+		stats.CloseReason = "local_dial_failed"
+		stats.Error = err.Error()
 		return fmt.Errorf("relay: target dial to %s failed: %w", c.opts.TargetAddress, err)
 	}
 	tcpConn = rawTCPConn.(*net.TCPConn)
+	stats.LocalConnected = true
+	stats.ForwardingStarted = true
+	stats.UpstreamCopyStarted = true
+	stats.DownstreamCopyStarted = true
 
 	go func() {
 		<-ctx.Done()
@@ -93,28 +136,54 @@ func (c *HostRelayClient) Run(ctx context.Context) error {
 	}()
 
 	bufSize := c.opts.BufferSize
-
-	errCh := make(chan error, 2)
+	errCh := make(chan copyResult, 2)
 
 	go func() {
-		errCh <- forwardTCPToWS(ctx, tcpConn, wsConn, bufSize)
+		errCh <- copyResult{
+			direction: "local_to_player",
+			err:       forwardTCPToWS(ctx, tcpConn, wsConn, bufSize, &bytesLocalToPlayer),
+		}
 	}()
 
 	go func() {
-		errCh <- forwardWSToTCP(ctx, wsConn, tcpConn, bufSize)
+		errCh <- copyResult{
+			direction: "player_to_local",
+			err:       forwardWSToTCP(ctx, wsConn, tcpConn, bufSize, &bytesPlayerToLocal),
+		}
 	}()
 
-	firstErr := <-errCh
+	first := <-errCh
 	cancel()
 	closeConns()
-	secondErr := <-errCh
+	second := <-errCh
 
-	for _, err := range []error{firstErr, secondErr} {
-		if !isNormalShutdown(err) {
-			return err
+	stats.BytesPlayerToLocal = atomic.LoadInt64(&bytesPlayerToLocal)
+	stats.BytesLocalToPlayer = atomic.LoadInt64(&bytesLocalToPlayer)
+	if first.direction == "player_to_local" {
+		stats.UpstreamClosed = true
+	} else {
+		stats.DownstreamClosed = true
+	}
+	if second.direction == "player_to_local" {
+		stats.UpstreamClosed = true
+	} else {
+		stats.DownstreamClosed = true
+	}
+
+	for _, result := range []copyResult{first, second} {
+		if !isNormalShutdown(result.err) {
+			stats.CloseReason = result.direction + "_copy_error"
+			stats.Error = result.err.Error()
+			return result.err
 		}
 	}
+	stats.CloseReason = "normal_shutdown"
 	return nil
+}
+
+type copyResult struct {
+	direction string
+	err       error
 }
 
 func wsScheme(coordinatorURL string) string {
@@ -127,7 +196,7 @@ func wsScheme(coordinatorURL string) string {
 	return ""
 }
 
-func forwardTCPToWS(ctx context.Context, tcpConn *net.TCPConn, wsConn *websocket.Conn, bufSize int) error {
+func forwardTCPToWS(ctx context.Context, tcpConn *net.TCPConn, wsConn *websocket.Conn, bufSize int, bytesOut *int64) error {
 	buf := make([]byte, bufSize)
 	for {
 		select {
@@ -138,6 +207,7 @@ func forwardTCPToWS(ctx context.Context, tcpConn *net.TCPConn, wsConn *websocket
 
 		n, readErr := tcpConn.Read(buf)
 		if n > 0 {
+			atomic.AddInt64(bytesOut, int64(n))
 			writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			writeErr := wsConn.Write(writeCtx, websocket.MessageBinary, buf[:n])
 			cancel()
@@ -157,7 +227,8 @@ func forwardTCPToWS(ctx context.Context, tcpConn *net.TCPConn, wsConn *websocket
 	}
 }
 
-func forwardWSToTCP(ctx context.Context, wsConn *websocket.Conn, tcpConn *net.TCPConn, bufSize int) error {
+func forwardWSToTCP(ctx context.Context, wsConn *websocket.Conn, tcpConn *net.TCPConn, bufSize int, bytesOut *int64) error {
+	_ = bufSize
 	for {
 		select {
 		case <-ctx.Done():
@@ -173,6 +244,7 @@ func forwardWSToTCP(ctx context.Context, wsConn *websocket.Conn, tcpConn *net.TC
 			return fmt.Errorf("relay: websocket read error: %w", err)
 		}
 
+		atomic.AddInt64(bytesOut, int64(len(data)))
 		for written := 0; written < len(data); {
 			n, writeErr := tcpConn.Write(data[written:])
 			if writeErr != nil {

@@ -245,6 +245,16 @@ func TestLocalMinecraftUnreachable(t *testing.T) {
 		}
 		return defaultTCPProber(ctx, address, timeout)
 	})
+	rt.pingStatus = func(ctx context.Context, address string, timeout time.Duration) (bool, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return false, err
+		}
+		if host == "127.0.0.1" && port == "25565" {
+			return false, nil
+		}
+		return true, nil
+	}
 	cfg := testConfig()
 	cfg.Relay.Enabled = true
 	deadline := time.Now().Add(8 * time.Second)

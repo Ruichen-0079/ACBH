@@ -841,7 +841,7 @@ export async function registerRoutes(
       }
 
       request.log.info({
-        event: "relay client attached",
+        event: "host keepalive client attached",
         groupId: params.groupId,
         hostId,
         hostGeneration,
@@ -885,6 +885,13 @@ export async function registerRoutes(
         return;
       }
 
+      request.log.info({
+        event: "host side attached",
+        groupId: params.groupId,
+        sessionId: params.sessionId,
+        hostId,
+        remoteAddress: request.socket.remoteAddress,
+      });
       relay.registerHost(params.sessionId, params.groupId, socket.socket);
     },
   );
@@ -932,6 +939,13 @@ export async function registerRoutes(
         return;
       }
 
+      request.log.info({
+        event: "player side attached",
+        groupId: params.groupId,
+        sessionId: params.sessionId,
+        playerId,
+        remoteAddress: request.socket.remoteAddress,
+      });
       relay.registerPlayer(params.sessionId, params.groupId, socket.socket);
     },
   );

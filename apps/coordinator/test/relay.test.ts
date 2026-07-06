@@ -534,6 +534,82 @@ test("player relay rejected without headers", async () => {
   }
 });
 
+test("player data sent before host attaches is delivered after bridge starts", async () => {
+  const ctx = await setupRelayTest();
+  try {
+    const { store, port } = ctx;
+
+    const host = makeHost(store, "host");
+    heartbeat(store, host, "standby");
+    completeTakeover(store, host);
+
+    const player = store.createPlayerSession({ groupId: host.groupId, displayName: "Steve" });
+    const tunnel = store.createTunnelSession({ groupId: host.groupId, playerId: player.playerId });
+
+    const playerWs = connectRelayWS(port, host.groupId, tunnel.sessionId, "player",
+      { "x-acbh-player-id": player.playerId, "x-acbh-player-token": player.playerToken! });
+    await waitForOpen(playerWs);
+    await sleep(50);
+
+    const testData = Buffer.from([0x10, 0x00, 0x03]);
+    const hostReceived = new Promise<Buffer>((resolve) => {
+      const hostWs = connectRelayWS(port, host.groupId, tunnel.sessionId, "host", hostHeaders(host, 1));
+      hostWs.on("open", () => {
+        hostWs.once("message", (data: Buffer) => resolve(Buffer.from(data)));
+      });
+      hostWs.on("error", () => {});
+    });
+
+    playerWs.send(testData);
+    const received = await Promise.race([
+      hostReceived,
+      sleep(2000).then(() => Buffer.alloc(0)),
+    ]);
+    assert.deepEqual(received, testData);
+
+    playerWs.close();
+    await sleep(50);
+  } finally {
+    await ctx.close();
+  }
+});
+
+test("waitForBridge resolves only after both sides attach", async () => {
+  const ctx = await setupRelayTest();
+  try {
+    const { store, port, relay } = ctx;
+
+    const host = makeHost(store, "host");
+    heartbeat(store, host, "standby");
+    completeTakeover(store, host);
+
+    const player = store.createPlayerSession({ groupId: host.groupId, displayName: "Steve" });
+    const tunnel = store.createTunnelSession({ groupId: host.groupId, playerId: player.playerId });
+
+    const playerWs = connectRelayWS(port, host.groupId, tunnel.sessionId, "player",
+      { "x-acbh-player-id": player.playerId, "x-acbh-player-token": player.playerToken! });
+    await waitForOpen(playerWs);
+
+    const pending = relay.waitForBridge(tunnel.sessionId, 2000);
+    await sleep(100);
+    assert.equal(relay.isBothAttached(tunnel.sessionId), false);
+
+    const hostWs = connectRelayWS(port, host.groupId, tunnel.sessionId, "host", hostHeaders(host, 1));
+    await waitForOpen(hostWs);
+    await sleep(100);
+
+    const result = await pending;
+    assert.equal(result.ok, true);
+    assert.equal(relay.isBothAttached(tunnel.sessionId), true);
+
+    hostWs.close();
+    playerWs.close();
+    await sleep(50);
+  } finally {
+    await ctx.close();
+  }
+});
+
 test("bytes forwarded counter tracks transfers", async () => {
   const ctx = await setupRelayTest();
   try {

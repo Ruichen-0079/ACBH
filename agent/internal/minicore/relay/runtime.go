@@ -24,6 +24,7 @@ type Runtime struct {
 	httpClient *http.Client
 	prober     TCPProber
 	runPump    SessionPumpRunner
+	pingStatus MCPingFunc
 
 	mu              sync.RWMutex
 	running         bool
@@ -46,10 +47,15 @@ type Runtime struct {
 	currentDevice           bool
 	publicListenerReady     bool
 	localMinecraftReachable bool
+	publicMinecraftPingOk   bool
+	lastPublicPingAt        time.Time
+	recentSessions          []SessionDiagnostic
 	lastTunnelError         string
 	lastDisconnectReason    string
 	errors                  []*coreerrors.Error
 }
+
+type MCPingFunc func(ctx context.Context, address string, timeout time.Duration) (bool, error)
 
 func NewRuntime(client Client, httpClient *http.Client) *Runtime {
 	return &Runtime{
@@ -57,6 +63,7 @@ func NewRuntime(client Client, httpClient *http.Client) *Runtime {
 		httpClient:     httpClient,
 		prober:         defaultTCPProber,
 		runPump:        defaultSessionPump,
+		pingStatus:     pingMinecraftStatus,
 		activeSessions: map[string]context.CancelFunc{},
 	}
 }
@@ -189,6 +196,12 @@ func (r *Runtime) Snapshot(cfg coreconfig.Config, lease coordinatorclient.HostLe
 	state.SessionPumpRunning = r.running && r.sessionPumpLive
 	state.PublicListenerReady = r.publicListenerReady
 	state.LocalMinecraftReachable = r.localMinecraftReachable
+	state.PublicMinecraftPingOk = r.publicMinecraftPingOk
+	if !r.lastPublicPingAt.IsZero() {
+		state.LastPublicPingAt = r.lastPublicPingAt.UTC().Format(time.RFC3339)
+		state.RecentPublicPingOk = time.Since(r.lastPublicPingAt) <= 5*time.Minute
+	}
+	state.RecentSessions = append([]SessionDiagnostic{}, r.recentSessions...)
 	state.LastTunnelError = firstNonEmpty(r.lastTunnelError, keepaliveErr)
 	state.LastDisconnectReason = r.lastDisconnectReason
 	state.Errors = append([]*coreerrors.Error{}, r.errors...)
@@ -413,14 +426,18 @@ func (r *Runtime) runSessionPump(ctx context.Context, cfg coreconfig.Config, coo
 	if gen == 0 {
 		gen = generation
 	}
+	sessionID := session.SessionID
 	err := r.runPump(ctx, hostrelay.HostRelayOptions{
 		CoordinatorURL: cfg.CoordinatorURL,
 		GroupID:        coordIdentity.GroupID,
-		SessionID:      session.SessionID,
+		SessionID:      sessionID,
 		HostID:         coordIdentity.HostID,
 		HostToken:      coordIdentity.HostToken,
 		HostGeneration: gen,
 		TargetAddress:  target,
+		OnClose: func(stats hostrelay.SessionStats) {
+			r.recordSessionDiagnostic(sessionID, stats)
+		},
 	})
 	if err != nil && ctx.Err() == nil {
 		r.mu.Lock()
@@ -429,6 +446,29 @@ func (r *Runtime) runSessionPump(ctx context.Context, cfg coreconfig.Config, coo
 		r.mu.Unlock()
 		r.recordError(coreerrors.RelayTunnelExited, err.Error())
 	}
+}
+
+func (r *Runtime) recordSessionDiagnostic(sessionID string, stats hostrelay.SessionStats) {
+	diag := SessionDiagnostic{
+		SessionID:          sessionID,
+		StartedAt:          stats.StartedAt.UTC().Format(time.RFC3339),
+		ClosedAt:           stats.ClosedAt.UTC().Format(time.RFC3339),
+		RemotePlayerAddress: stats.RemotePlayerAddress,
+		LocalConnected:     stats.LocalConnected,
+		ForwardingStarted:  stats.ForwardingStarted,
+		BytesPlayerToLocal: stats.BytesPlayerToLocal,
+		BytesLocalToPlayer: stats.BytesLocalToPlayer,
+		UpstreamClosed:     stats.UpstreamClosed,
+		DownstreamClosed:   stats.DownstreamClosed,
+		CloseReason:        stats.CloseReason,
+		Error:              stats.Error,
+	}
+	r.mu.Lock()
+	r.recentSessions = append(r.recentSessions, diag)
+	if len(r.recentSessions) > 16 {
+		r.recentSessions = r.recentSessions[len(r.recentSessions)-16:]
+	}
+	r.mu.Unlock()
 }
 
 func (r *Runtime) healthCheckLoop(ctx context.Context) {
@@ -452,16 +492,32 @@ func (r *Runtime) checkHealth(ctx context.Context) {
 
 	localAddr := netJoinHostPort(req.LocalMinecraftHost, req.LocalMinecraftPort)
 	publicAddr := netJoinHostPort(publicHost(cfg), req.PublicMinecraftPort)
-	localOK := r.prober(ctx, localAddr, 800*time.Millisecond)
-	publicOK := r.prober(ctx, publicAddr, 1200*time.Millisecond)
+	publicTCP := r.prober(ctx, publicAddr, 1200*time.Millisecond)
+
+	localOK := false
+	if r.pingStatus != nil {
+		localOK, _ = r.pingStatus(ctx, localAddr, 2*time.Second)
+	}
+	if !localOK {
+		localOK = r.prober(ctx, localAddr, 800*time.Millisecond)
+	}
+
+	publicPingOK := false
+	if publicTCP && r.pingStatus != nil {
+		publicPingOK, _ = r.pingStatus(ctx, publicAddr, 4*time.Second)
+	}
 
 	r.mu.Lock()
 	r.localMinecraftReachable = localOK
-	r.publicListenerReady = publicOK
+	r.publicListenerReady = publicTCP
+	r.publicMinecraftPingOk = publicPingOK
+	if publicPingOK {
+		r.lastPublicPingAt = time.Now().UTC()
+	}
 	if !localOK {
 		r.lastDisconnectReason = DisconnectLocalMCUnreachable
 	}
-	if !publicOK && r.lastDisconnectReason == "" {
+	if !publicTCP && r.lastDisconnectReason == "" {
 		r.lastDisconnectReason = DisconnectPublicListenerDown
 	}
 	r.mu.Unlock()
@@ -469,7 +525,7 @@ func (r *Runtime) checkHealth(ctx context.Context) {
 	if !localOK {
 		r.recordError(coreerrors.LocalMinecraftUnreachable, fmt.Sprintf("local target %s unreachable", localAddr))
 	}
-	if !publicOK {
+	if !publicTCP {
 		r.recordError(coreerrors.PublicListenerNotReady, fmt.Sprintf("public listener %s unreachable", publicAddr))
 	}
 }
