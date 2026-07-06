@@ -101,6 +101,24 @@ func TestRelayErrorsPropagateCodes(t *testing.T) {
 	}
 }
 
+func TestRelayRouteMissingPreservesCoordinatorDetails(t *testing.T) {
+	cfg := testConfig()
+	details := coreerrors.Details{
+		URL:          cfg.CoordinatorURL + "/v1/groups/grp/lease/ensure-active",
+		Method:       "POST",
+		HTTPStatus:   404,
+		ResponseBody: `{"message":"Route POST:/v1/groups/grp/lease/ensure-active not found"}`,
+	}
+	client := &fakeClient{ensureErr: coreerrors.New(coreerrors.CoordinatorRouteMissing, "route missing", details, "")}
+	_, err := Service{Client: client}.Configure(context.Background(), cfg, ConfigureRequest{})
+	if err == nil {
+		t.Fatal("Configure() error = nil")
+	}
+	if err.Details.URL != details.URL || err.Details.HTTPStatus != details.HTTPStatus || err.Details.ResponseBody != details.ResponseBody {
+		t.Fatalf("details = %#v, want %#v", err.Details, details)
+	}
+}
+
 func TestRelayDoesNotFallbackLocalhost(t *testing.T) {
 	cfg := testConfig()
 	cfg.CoordinatorURL = "http://public.test:6121"

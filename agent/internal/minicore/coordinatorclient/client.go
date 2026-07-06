@@ -353,6 +353,7 @@ func (c *Client) routeProbes(ctx context.Context) []RouteProbe {
 		{http.MethodGet, "/v1/groups/grp_test/lease/status", nil},
 		{http.MethodPost, "/v1/groups/grp_test/lease/ensure-active", map[string]any{}},
 		{http.MethodGet, "/v1/groups/grp_test/members", nil},
+		{http.MethodPost, "/v1/hosts/heartbeat", map[string]any{}},
 	}
 	probes := make([]RouteProbe, 0, len(requests))
 	for _, item := range requests {
@@ -363,7 +364,7 @@ func (c *Client) routeProbes(ctx context.Context) []RouteProbe {
 		} else {
 			probe.ErrorCode = classifyStatus(status, body)
 		}
-		probe.RouteMissing = status == http.StatusNotFound
+		probe.RouteMissing = isCoordinatorRouteMissing(status, body)
 		probes = append(probes, probe)
 	}
 	return probes
@@ -473,10 +474,23 @@ func responseError(method string, rawURL string, status int, body string) *coree
 	return coreerrors.New(code, message, coreerrors.Details{URL: rawURL, Method: method, HTTPStatus: status, ResponseBody: body}, "请检查实际请求 URL、HTTP 状态码、服务器返回内容和 VPS Coordinator 日志。")
 }
 
+func isCoordinatorRouteMissing(status int, body string) bool {
+	if status != http.StatusNotFound {
+		return false
+	}
+	lower := strings.ToLower(body)
+	return strings.Contains(lower, "route get:") ||
+		strings.Contains(lower, "route post:") ||
+		strings.Contains(lower, "route put:") ||
+		strings.Contains(lower, "route delete:") ||
+		strings.Contains(lower, "route_not_found") ||
+		strings.Contains(lower, "coordinator_capability_route_missing")
+}
+
 func classifyStatus(status int, body string) coreerrors.ErrorCode {
 	lower := strings.ToLower(body)
 	switch {
-	case status == http.StatusNotFound && (strings.Contains(lower, "route_not_found") || strings.Contains(lower, "coordinator_capability_route_missing") || strings.Contains(lower, "not found")):
+	case isCoordinatorRouteMissing(status, body):
 		return coreerrors.CoordinatorRouteMissing
 	case status == http.StatusUnauthorized && strings.Contains(lower, "host_auth_required"):
 		return coreerrors.AuthMissing
@@ -527,7 +541,7 @@ func authHeaders(hostID string, hostToken string) map[string]string {
 }
 
 func hasRequiredCapabilities(capabilities []string) bool {
-	required := []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1"}
+	required := []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"}
 	set := map[string]bool{}
 	for _, capability := range capabilities {
 		set[capability] = true

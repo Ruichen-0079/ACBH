@@ -382,6 +382,111 @@ test("health and capabilities expose alpha6 protocol compatibility", async (t) =
     assert.equal(body.protocolVersion, 2);
     assert.ok(body.capabilities.includes("lease_renew_v1"));
     assert.ok(body.capabilities.includes("world_backup_v1"));
+    assert.ok(body.capabilities.includes("group_whoami_v1"));
+    assert.ok(body.capabilities.includes("public_relay_v1"));
+  } finally {
+    await app.close();
+  }
+});
+
+test("relay lease and identity routes exist for minimal-core body API probes", async (t) => {
+  const app = await buildTestApp(t);
+
+  try {
+    const probes: Array<{ method: "GET" | "POST"; url: string; payload?: unknown }> = [
+      { method: "GET", url: "/v1/groups/grp_test/whoami" },
+      { method: "GET", url: "/v1/groups/grp_test/lease/status" },
+      { method: "POST", url: "/v1/groups/grp_test/lease/ensure-active", payload: {} },
+      { method: "GET", url: "/v1/groups/grp_test/members" },
+      { method: "POST", url: "/v1/hosts/heartbeat", payload: {} },
+    ];
+
+    for (const probe of probes) {
+      const response = await app.inject({
+        method: probe.method,
+        url: probe.url,
+        payload: probe.payload,
+      });
+      assert.notEqual(
+        response.statusCode,
+        404,
+        `${probe.method} ${probe.url} returned 404: ${response.body}`,
+      );
+    }
+
+    const group = (await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      payload: { name: "Relay Server", ownerName: "Owner" },
+    })).json<{ groupId: string; accessKey: string }>();
+
+    const joined = (await app.inject({
+      method: "POST",
+      url: `/v1/groups/${group.groupId}/join`,
+      payload: { accessKey: group.accessKey, displayName: "PlayerA" },
+    })).json<{ memberId: string }>();
+
+    const host = (await app.inject({
+      method: "POST",
+      url: "/v1/hosts/register",
+      payload: {
+        groupId: group.groupId,
+        accessKey: group.accessKey,
+        memberId: joined.memberId,
+        deviceName: "PlayerA-PC",
+        platform: "windows",
+        agentVersion: "v0.5.1-test",
+      },
+    })).json<{ hostId: string; hostToken: string }>();
+
+    const whoami = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${group.groupId}/whoami`,
+      headers: hostHeaders(host.hostId, host.hostToken),
+    });
+    assert.equal(whoami.statusCode, 200, whoami.body);
+    const whoamiBody = whoami.json<{ ok: boolean; groupId: string; hostId: string }>();
+    assert.equal(whoamiBody.ok, true);
+    assert.equal(whoamiBody.groupId, group.groupId);
+    assert.equal(whoamiBody.hostId, host.hostId);
+
+    const ensureActive = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${group.groupId}/lease/ensure-active`,
+      payload: {
+        groupId: group.groupId,
+        hostId: host.hostId,
+        hostToken: host.hostToken,
+      },
+    });
+    assert.equal(ensureActive.statusCode, 200, ensureActive.body);
+    const leaseBody = ensureActive.json<{
+      ok: boolean;
+      renewed: boolean;
+      message: string;
+      lease: { currentHostIdMatches: boolean; leaseValid: boolean; generation: number };
+    }>();
+    assert.equal(leaseBody.ok, true);
+    assert.equal(leaseBody.message, "Host lease is active");
+    assert.equal(leaseBody.lease.currentHostIdMatches, true);
+    assert.equal(leaseBody.lease.leaseValid, true);
+    assert.ok(leaseBody.lease.generation >= 1);
+
+    const heartbeat = await app.inject({
+      method: "POST",
+      url: "/v1/hosts/heartbeat",
+      payload: {
+        groupId: group.groupId,
+        hostId: host.hostId,
+        hostToken: host.hostToken,
+        status: "hosting",
+      },
+    });
+    assert.equal(heartbeat.statusCode, 200, heartbeat.body);
+    const heartbeatBody = heartbeat.json<{ ok: boolean; hostId: string; status: string }>();
+    assert.equal(heartbeatBody.ok, true);
+    assert.equal(heartbeatBody.hostId, host.hostId);
+    assert.equal(heartbeatBody.status, "hosting");
   } finally {
     await app.close();
   }

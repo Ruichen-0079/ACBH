@@ -22,7 +22,7 @@ func TestProbeUsesConfiguredCoordinatorURLAndClassifiesRoutes(t *testing.T) {
 		case "/v1/capabilities":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"protocolVersion":    2,
-				"capabilities":       []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1"},
+				"capabilities":       []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"},
 				"authenticationMode": "host_token_or_owner_access_key",
 			})
 		case "/v1/groups/grp_test/lease/ensure-active":
@@ -70,7 +70,8 @@ func TestResponseClassifiesAuthInvalidAndRouteMissing(t *testing.T) {
 		{"400 invalid request", http.StatusBadRequest, `{"code":"invalid_body"}`, coreerrors.InvalidRequest},
 		{"403 lease expired", http.StatusForbidden, `{"code":"host_lease_expired"}`, coreerrors.LeaseExpired},
 		{"403 not current host", http.StatusForbidden, `{"code":"not_current_host"}`, coreerrors.ActiveDeviceRequired},
-		{"404 route missing", http.StatusNotFound, `{"code":"route_not_found"}`, coreerrors.CoordinatorRouteMissing},
+		{"404 route missing", http.StatusNotFound, `{"message":"Route GET:/v1/groups/grp_test/lease/status not found"}`, coreerrors.CoordinatorRouteMissing},
+		{"404 group missing", http.StatusNotFound, `{"error":"Not Found","message":"Group does not exist"}`, coreerrors.CoordinatorUnreachable},
 		{"502 proxy", http.StatusBadGateway, `Proxy-Connection: keep-alive`, coreerrors.ProxyInterferenceSuspected},
 	}
 	for _, tc := range cases {
@@ -125,6 +126,15 @@ func TestTransportErrorClassification(t *testing.T) {
 	}
 }
 
+func TestIsCoordinatorRouteMissingDistinguishesFastifyRoute404(t *testing.T) {
+	if !isCoordinatorRouteMissing(http.StatusNotFound, `{"message":"Route GET:/v1/groups/x/lease/status not found"}`) {
+		t.Fatal("expected Fastify route 404 to be route missing")
+	}
+	if isCoordinatorRouteMissing(http.StatusNotFound, `{"message":"Group does not exist"}`) {
+		t.Fatal("entity missing 404 should not be route missing")
+	}
+}
+
 func TestProbeMarksOnly404RouteMissing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -133,7 +143,7 @@ func TestProbeMarksOnly404RouteMissing(t *testing.T) {
 		case "/v1/capabilities":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"protocolVersion": 2,
-				"capabilities":    []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1"},
+				"capabilities":    []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"},
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)

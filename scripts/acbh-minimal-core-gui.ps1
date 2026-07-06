@@ -276,6 +276,7 @@ function Test-GuiStaticChecks {
         "Save-ListenerConfig",
         "Format-BodyError",
         "Configure-Relay",
+        "Set-RelayConfigureDiagnostics",
         "Refresh-RelayStatus",
         "Convert-GuiCoordinatorInput",
         "Normalize-GuiStatusValue",
@@ -391,6 +392,21 @@ function Test-GuiStaticChecks {
     }
     if ($nullMsg -notmatch "GUI 内部字段为空") {
         throw "GUI self-test failed: friendly null reference message missing"
+    }
+    $relayDetails = [pscustomobject]@{
+        error = [pscustomobject]@{
+            errorCode = "coordinator_route_missing"
+            details = [pscustomobject]@{
+                url = "http://203.0.113.10:6121/v1/groups/grp_test/lease/ensure-active"
+                httpStatus = 404
+                responseBody = '{"message":"Route POST:/v1/groups/grp_test/lease/ensure-active not found"}'
+                traceId = "tr_gui_selftest"
+            }
+        }
+    }
+    $relayDiag = Set-RelayConfigureDiagnostics $relayDetails
+    if ($relayDiag -notmatch "实际请求 URL" -or $relayDiag -notmatch "HTTP 状态码" -or $relayDiag -notmatch "服务器返回内容") {
+        throw "GUI self-test failed: relay configure diagnostics missing URL/status/body"
     }
 }
 
@@ -1225,6 +1241,28 @@ function Probe-Listener {
     }
 }
 
+function Set-RelayConfigureDiagnostics {
+    param(
+        [object]$ErrorPayload,
+        [string]$FallbackMessage = "配置 VPS 中转失败"
+    )
+    $text = $FallbackMessage
+    if ($ErrorPayload -is [System.Management.Automation.ErrorRecord]) {
+        $text = Format-BodyError $ErrorPayload
+    } elseif ($null -ne $ErrorPayload) {
+        if ($ErrorPayload.error) {
+            $text = "errorCode=$($ErrorPayload.error.errorCode)" + [Environment]::NewLine + (Format-ErrorDetails $ErrorPayload.error.details)
+        } elseif ($ErrorPayload.errorCode) {
+            $text = "errorCode=$($ErrorPayload.errorCode)" + [Environment]::NewLine + (Format-ErrorDetails $ErrorPayload.details)
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($text)) { $text = $FallbackMessage }
+    $safe = Redact-Secrets $text
+    Set-ControlText $txtRelayError $safe
+    Set-Diagnostics $safe
+    return $safe
+}
+
 function Set-RelayFields {
     param([object]$Relay)
     Set-ControlText $txtPublicEndpoint $Relay.publicEndpoint
@@ -1253,10 +1291,11 @@ function Configure-Relay {
             Add-Log "VPS 中转已配置。"
         } elseif ($op.error) {
             Set-Status $txtRelayCheckStatus "failed" "relay"
-            Set-ControlText $txtRelayError ("errorCode=$($op.error.errorCode)" + [Environment]::NewLine + (Format-ErrorDetails $op.error.details))
+            Set-RelayConfigureDiagnostics $op
         }
     } catch {
         Set-Status $txtRelayCheckStatus "failed" "relay"
+        Set-RelayConfigureDiagnostics $_
         Show-ActionError "配置 VPS 中转" $_
     }
 }

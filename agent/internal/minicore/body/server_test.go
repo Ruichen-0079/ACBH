@@ -127,7 +127,7 @@ func mockCoordinator(t *testing.T) *httptest.Server {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"coordinatorVersion": "0.4.0-alpha6-hotfix2",
 				"protocolVersion":    2,
-				"capabilities":       []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1"},
+				"capabilities":       []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"},
 			})
 		case "/v1/groups/grp_123/whoami":
 			_ = json.NewEncoder(w).Encode(map[string]any{"groupId": "grp_123", "hostId": "host_123"})
@@ -874,6 +874,71 @@ func TestBodySnapshotDownloadRejectsNonEmptyTarget(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), string(coreerrors.TargetDirNotEmpty)) {
 		t.Fatalf("expected target_dir_not_empty: %s", rec.Body.String())
+	}
+}
+
+func TestRelayConfigureCoordinatorRouteMissingIncludesDetails(t *testing.T) {
+	missingURL := "http://public.test:6121/v1/groups/grp_123/lease/ensure-active"
+	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "protocolVersion": 2})
+		case "/v1/capabilities":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"protocolVersion": 2,
+				"capabilities":    []string{"lease_renew_v1", "world_backup_v1", "group_whoami_v1", "public_relay_v1"},
+			})
+		case "/v1/groups/grp_123/lease/ensure-active":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Route POST:/v1/groups/grp_123/lease/ensure-active not found"}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":"host_auth_required"}`))
+		}
+	}))
+	defer coord.Close()
+
+	targetURL, err := url.Parse(coord.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:6120", t.TempDir())
+	srv.HTTPClient = &http.Client{Transport: rewriteTransport{
+		fromHost: "public.test:6121",
+		toURL:    targetURL,
+		base:     http.DefaultTransport,
+	}}
+	cfg := testConfig("http://public.test:6121")
+	if err := srv.ConfigStore.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/relay/configure", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("relay/configure status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var op operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.State != operations.Failed || op.Error == nil {
+		t.Fatalf("relay configure op = %#v", op)
+	}
+	if op.Error.ErrorCode != coreerrors.CoordinatorRouteMissing {
+		t.Fatalf("errorCode = %s, want %s", op.Error.ErrorCode, coreerrors.CoordinatorRouteMissing)
+	}
+	if op.Error.Details.URL != missingURL {
+		t.Fatalf("details.url = %q, want %q", op.Error.Details.URL, missingURL)
+	}
+	if op.Error.Details.HTTPStatus != http.StatusNotFound {
+		t.Fatalf("details.httpStatus = %d, want %d", op.Error.Details.HTTPStatus, http.StatusNotFound)
+	}
+	if !strings.Contains(op.Error.Details.ResponseBody, "Route POST:") {
+		t.Fatalf("details.responseBody = %q", op.Error.Details.ResponseBody)
+	}
+	if op.TraceID == "" || op.Error.Details.TraceID != op.TraceID {
+		t.Fatalf("traceId not propagated: op=%q details=%q", op.TraceID, op.Error.Details.TraceID)
 	}
 }
 

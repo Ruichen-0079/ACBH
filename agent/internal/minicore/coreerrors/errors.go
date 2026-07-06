@@ -41,6 +41,7 @@ type Details struct {
 	Method         string `json:"method,omitempty"`
 	HTTPStatus     int    `json:"httpStatus,omitempty"`
 	ResponseBody   string `json:"responseBody,omitempty"`
+	TraceID        string `json:"traceId,omitempty"`
 	ConfigPath     string `json:"configPath,omitempty"`
 	CoordinatorURL string `json:"coordinatorUrl,omitempty"`
 	Path           string `json:"path,omitempty"`

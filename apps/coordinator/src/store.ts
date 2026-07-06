@@ -141,6 +141,7 @@ export type HostLeaseStatus = {
 };
 
 export type WhoAmIResponse = {
+  ok: true;
   groupId: string;
   memberId: string;
   hostId: string;
@@ -772,6 +773,7 @@ export class InMemoryCoordinatorStore {
   whoami(input: { groupId: string; hostId: string; hostToken: string }): WhoAmIResponse {
     const { group, host, member } = this.requireAuthenticatedHost(input);
     return {
+      ok: true,
       groupId: group.groupId,
       memberId: member.memberId,
       hostId: host.hostId,
@@ -806,7 +808,7 @@ export class InMemoryCoordinatorStore {
       host.updatedAt = nowIso;
       group.updatedAt = nowIso;
       this.triggerMutation();
-      return { ok: true, renewed: false, lease: this.hostLeaseStatusFor(group, host), message: "lease is active" };
+      return { ok: true, renewed: false, lease: this.hostLeaseStatusFor(group, host), message: "Host lease is active" };
     }
 
     if (group.currentHostId !== null && group.currentHostId !== host.hostId && currentLeaseFresh) {
@@ -822,7 +824,7 @@ export class InMemoryCoordinatorStore {
     host.updatedAt = nowIso;
     group.updatedAt = nowIso;
     this.triggerMutation();
-    return { ok: true, renewed: true, lease: this.hostLeaseStatusFor(group, host), message: "lease renewed" };
+    return { ok: true, renewed: true, lease: this.hostLeaseStatusFor(group, host), message: "Host lease is active" };
   }
 
   getGroupState(groupId: string): GroupState {

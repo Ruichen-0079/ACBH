@@ -92,6 +92,9 @@ func (s *Store) Fail(op Operation, err *coreerrors.Error) Operation {
 	op.Stage = "failed"
 	op.CompletedAt = time.Now().UTC().Format(time.RFC3339)
 	if err != nil {
+		if op.TraceID != "" && err.Details.TraceID == "" {
+			err.Details.TraceID = op.TraceID
+		}
 		op.ErrorCode = err.ErrorCode
 		op.Message = err.Message
 		op.Error = err
