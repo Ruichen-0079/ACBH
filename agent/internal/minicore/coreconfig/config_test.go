@@ -83,7 +83,7 @@ func TestConfigAliasesMigrateToCanonicalSchema(t *testing.T) {
 	if got.CoordinatorURL != "http://121.40.101.224:6121" {
 		t.Fatalf("coordinatorUrl = %q", got.CoordinatorURL)
 	}
-	if got.Instance.InstanceID != "abc" || got.Instance.DisplayName != "私人实例" {
+	if !strings.HasPrefix(got.Instance.InstanceID, "acbh_instance_") || got.Instance.DisplayName != "私人实例" {
 		t.Fatalf("instance = %#v", got.Instance)
 	}
 	if got.Device.DisplayName != "MSI" || got.Device.DeviceID == "" {
@@ -161,6 +161,30 @@ func TestTimestampLikeDuplicateIDsAreRegeneratedDistinctly(t *testing.T) {
 	}
 	if got.Instance.InstanceID == got.Device.DeviceID {
 		t.Fatalf("duplicate IDs survived normalization: %#v %#v", got.Instance, got.Device)
+	}
+	if !strings.HasPrefix(got.Instance.InstanceID, "acbh_instance_") || !strings.HasPrefix(got.Device.DeviceID, "acbh_device_") {
+		t.Fatalf("bad regenerated IDs: instance=%q device=%q", got.Instance.InstanceID, got.Device.DeviceID)
+	}
+}
+
+func TestNonPrefixedIDsAreRegeneratedDistinctly(t *testing.T) {
+	store := NewStore(t.TempDir())
+	cfg := DefaultConfig()
+	cfg.CoordinatorURL = "http://121.40.101.224:6121"
+	cfg.Instance.InstanceID = "inst_123"
+	cfg.Device.DeviceID = "dev_123"
+	if err := store.Save(cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, loadErr := store.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() error = %v", loadErr)
+	}
+	if got.Instance.InstanceID == "inst_123" || got.Device.DeviceID == "dev_123" {
+		t.Fatalf("non-prefixed IDs survived normalization: %#v %#v", got.Instance, got.Device)
+	}
+	if got.Instance.InstanceID == got.Device.DeviceID {
+		t.Fatalf("duplicate IDs after normalization: %#v %#v", got.Instance, got.Device)
 	}
 	if !strings.HasPrefix(got.Instance.InstanceID, "acbh_instance_") || !strings.HasPrefix(got.Device.DeviceID, "acbh_device_") {
 		t.Fatalf("bad regenerated IDs: instance=%q device=%q", got.Instance.InstanceID, got.Device.DeviceID)

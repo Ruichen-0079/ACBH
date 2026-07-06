@@ -28,6 +28,7 @@ type Health struct {
 	OK                    bool     `json:"ok"`
 	Version               string   `json:"version,omitempty"`
 	CoordinatorVersion    string   `json:"coordinatorVersion,omitempty"`
+	BuildCommit           string   `json:"buildCommit,omitempty"`
 	ProtocolVersion       int      `json:"protocolVersion,omitempty"`
 	MinimumClientProtocol int      `json:"minimumClientProtocol,omitempty"`
 	Capabilities          []string `json:"capabilities,omitempty"`
@@ -36,6 +37,7 @@ type Health struct {
 
 type Capabilities struct {
 	CoordinatorVersion    string   `json:"coordinatorVersion"`
+	BuildCommit           string   `json:"buildCommit,omitempty"`
 	ProtocolVersion       int      `json:"protocolVersion"`
 	MinimumClientProtocol int      `json:"minimumClientProtocol"`
 	Capabilities          []string `json:"capabilities"`
@@ -466,9 +468,9 @@ func responseError(method string, rawURL string, status int, body string) *coree
 	case coreerrors.BackupObjectTooLarge:
 		message = "backup object is too large"
 	case coreerrors.CoordinatorServerError:
-		message = "VPS Coordinator server error"
+		message = "VPS Coordinator 返回错误"
 	}
-	return coreerrors.New(code, message, coreerrors.Details{URL: rawURL, Method: method, HTTPStatus: status, ResponseBody: body}, "Check the URL, status and responseBody in details.")
+	return coreerrors.New(code, message, coreerrors.Details{URL: rawURL, Method: method, HTTPStatus: status, ResponseBody: body}, "请检查实际请求 URL、HTTP 状态码、服务器返回内容和 VPS Coordinator 日志。")
 }
 
 func classifyStatus(status int, body string) coreerrors.ErrorCode {

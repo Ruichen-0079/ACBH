@@ -57,6 +57,15 @@ func (t rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(clone)
 }
 
+type failRoundTripper struct {
+	t *testing.T
+}
+
+func (t failRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.t.Fatalf("unexpected coordinator request during local init: %s %s", req.Method, req.URL.String())
+	return nil, nil
+}
+
 func testConfig(coordinatorURL string) coreconfig.Config {
 	cfg := coreconfig.DefaultConfig()
 	cfg.Mode = "local-private"
@@ -520,6 +529,7 @@ func TestBodySmokeAPISet(t *testing.T) {
 		{http.MethodPut, "/v1/config", data},
 		{http.MethodGet, "/v1/config", nil},
 		{http.MethodGet, "/v1/identity", nil},
+		{http.MethodPost, "/v1/local/init", nil},
 		{http.MethodGet, "/v1/coordinator/probe", nil},
 		{http.MethodPost, "/v1/init", nil},
 		{http.MethodGet, "/v1/operations", nil},
@@ -557,6 +567,78 @@ func TestBodyIdentityAPI(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "ht_123") {
 		t.Fatalf("identity response leaked token: %s", rec.Body.String())
+	}
+}
+
+func TestBodyLocalInitCreatesConfigWithoutCoordinator(t *testing.T) {
+	srv := New("127.0.0.1:6120", filepath.Join(t.TempDir(), "ACBH 本地初始化"))
+	srv.HTTPClient = &http.Client{Transport: failRoundTripper{t: t}}
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/local/init", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("local init status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var op operations.Operation
+	if err := json.Unmarshal(rec.Body.Bytes(), &op); err != nil {
+		t.Fatal(err)
+	}
+	if op.State != operations.Success {
+		t.Fatalf("local init op = %#v", op)
+	}
+	got, loadErr := srv.ConfigStore.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() after local init error = %v", loadErr)
+	}
+	if got.Instance.InstanceID == got.Device.DeviceID {
+		t.Fatalf("local init generated duplicate IDs: instance=%q device=%q", got.Instance.InstanceID, got.Device.DeviceID)
+	}
+	if !strings.HasPrefix(got.Instance.InstanceID, "acbh_instance_") || !strings.HasPrefix(got.Device.DeviceID, "acbh_device_") {
+		t.Fatalf("local init generated bad IDs: instance=%q device=%q", got.Instance.InstanceID, got.Device.DeviceID)
+	}
+}
+
+func TestBodyLocalInitMigratesTimestampLikeDuplicateIDs(t *testing.T) {
+	appData := t.TempDir()
+	store := coreconfig.NewStore(appData)
+	if err := os.MkdirAll(filepath.Dir(store.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(`{
+  "schemaVersion": 2,
+  "mode": "remote-public",
+  "coordinatorUrl": "http://203.0.113.10:6121",
+  "instance": {"instanceId": "20260706T025526Z", "displayName": "私人 ACBH 实例"},
+  "device": {"deviceId": "20260706T025526Z", "displayName": "MSI", "platform": "windows"},
+  "server": {"displayName": "Minecraft 服务端"},
+  "compat": {"coordinatorProtocol": 2},
+  "listener": {"enabled": true, "localHost": "127.0.0.1", "localPort": 25565},
+  "relay": {"enabled": true, "coordinatorPort": 6121, "minecraftPort": 25565},
+  "backup": {"profileId": "minecraft-migratable", "include": ["dir:world"], "exclude": []}
+}`)
+	if err := os.WriteFile(store.Path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := New("127.0.0.1:6120", appData)
+	srv.HTTPClient = &http.Client{Transport: failRoundTripper{t: t}}
+
+	rec := httptest.NewRecorder()
+	srv.routes().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/local/init", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("local init status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	got, loadErr := srv.ConfigStore.Load()
+	if loadErr != nil {
+		t.Fatalf("Load() after local init error = %v", loadErr)
+	}
+	if got.Instance.InstanceID == got.Device.DeviceID {
+		t.Fatalf("timestamp-like duplicate IDs survived: instance=%q device=%q", got.Instance.InstanceID, got.Device.DeviceID)
+	}
+	if !strings.HasPrefix(got.Instance.InstanceID, "acbh_instance_") || !strings.HasPrefix(got.Device.DeviceID, "acbh_device_") {
+		t.Fatalf("local init migration generated bad IDs: instance=%q device=%q", got.Instance.InstanceID, got.Device.DeviceID)
+	}
+	if got.Instance.InstanceID == "20260706T025526Z" || got.Device.DeviceID == "20260706T025526Z" {
+		t.Fatalf("timestamp-like ID was not replaced: %#v %#v", got.Instance, got.Device)
 	}
 }
 

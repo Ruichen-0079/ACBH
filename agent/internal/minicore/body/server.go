@@ -78,6 +78,13 @@ type InitIdentity struct {
 	Message       string `json:"message"`
 }
 
+type LocalInitResult struct {
+	ConfigPath  string           `json:"configPath"`
+	Coordinator string           `json:"coordinatorUrl,omitempty"`
+	Identity    IdentityResponse `json:"identity"`
+	Message     string           `json:"message"`
+}
+
 type IdentityResponse struct {
 	OK            bool                `json:"ok"`
 	IdentityModel string              `json:"identityModel"`
@@ -156,6 +163,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("/v1/identity", s.handleIdentity)
 	mux.HandleFunc("/v1/coordinator/probe", s.handleCoordinatorProbe)
 	mux.HandleFunc("/v1/init", s.handleInit)
+	mux.HandleFunc("/v1/local/init", s.handleLocalInit)
 	mux.HandleFunc("/v1/listener/status", s.handleListenerStatus)
 	mux.HandleFunc("/v1/listener/config", s.handleListenerConfig)
 	mux.HandleFunc("/v1/listener/probe", s.handleListenerProbe)
@@ -602,6 +610,35 @@ func (s *Server) handleCoordinatorProbe(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "coordinator probe completed"))
+}
+
+func (s *Server) handleLocalInit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, r)
+		return
+	}
+	op := s.Operations.Start("local.init", "load_or_create_config", "creating or normalizing local config")
+	cfg, cfgErr := s.ConfigStore.LoadOrCreate()
+	if cfgErr != nil {
+		writeJSON(w, statusForCoreError(cfgErr), s.Operations.Fail(op, cfgErr))
+		return
+	}
+	if saveErr := s.ConfigStore.Save(cfg); saveErr != nil {
+		writeJSON(w, statusForCoreError(saveErr), s.Operations.Fail(op, saveErr))
+		return
+	}
+	cfg, cfgErr = s.ConfigStore.Load()
+	if cfgErr != nil {
+		writeJSON(w, statusForCoreError(cfgErr), s.Operations.Fail(op, cfgErr))
+		return
+	}
+	result := LocalInitResult{
+		ConfigPath:  s.ConfigStore.Path,
+		Coordinator: cfg.CoordinatorURL,
+		Identity:    identityResponse(cfg),
+		Message:     "本机初始化完成。下一步请点击“测试连接”检查 VPS Coordinator。",
+	}
+	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "local init completed"))
 }
 
 func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {

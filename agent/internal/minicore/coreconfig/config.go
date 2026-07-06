@@ -683,12 +683,18 @@ func shouldGenerateInstanceID(instanceID string, deviceID string) bool {
 	if instanceID == "" {
 		return true
 	}
+	if !strings.HasPrefix(instanceID, "acbh_instance_") {
+		return true
+	}
 	return isBadGeneratedID(instanceID) || (deviceID != "" && instanceID == strings.TrimSpace(deviceID))
 }
 
 func shouldGenerateDeviceID(deviceID string, instanceID string) bool {
 	deviceID = strings.TrimSpace(deviceID)
 	if deviceID == "" {
+		return true
+	}
+	if !strings.HasPrefix(deviceID, "acbh_device_") {
 		return true
 	}
 	return isBadGeneratedID(deviceID) || (instanceID != "" && deviceID == strings.TrimSpace(instanceID))

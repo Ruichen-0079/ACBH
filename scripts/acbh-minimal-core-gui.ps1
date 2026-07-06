@@ -7,6 +7,113 @@
 
 $ErrorActionPreference = "Stop"
 
+function Normalize-GuiStatusValue {
+    param(
+        [string]$Kind,
+        [object]$Value
+    )
+    $text = ""
+    if ($null -ne $Value) { $text = ([string]$Value).Trim() }
+    $key = $text.ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($key)) {
+        if ($Kind -eq "generic") { return "未知" }
+        return "未配置"
+    }
+    switch ($Kind) {
+        "token" {
+            switch ($key) {
+                { $_ -in @("missing", "empty", "not_configured", "not configured", "none", "false") } { return "未配置" }
+                { $_ -in @("configured", "present", "true") } { return "已配置" }
+                { $_ -in @("invalid", "auth_invalid", "failed") } { return "无效" }
+                { $_ -in @("verified", "valid", "ok", "success") } { return "已验证" }
+            }
+        }
+        "body" {
+            switch ($key) {
+                { $_ -in @("ok", "ready", "healthy", "connected") } { return "就绪" }
+                { $_ -in @("failed", "error", "bad") } { return "失败" }
+                { $_ -in @("unreachable", "offline", "timeout", "network_error", "network_timeout") } { return "不可达" }
+            }
+        }
+        "coordinator" {
+            switch ($key) {
+                { $_ -in @("ok", "ready", "connected", "success") } { return "已连接" }
+                { $_ -in @("failed", "error") } { return "失败" }
+                { $_ -in @("server_error", "coordinator_server_error", "returned_error") } { return "返回错误" }
+                { $_ -in @("unreachable", "offline", "timeout", "network_error", "network_timeout") } { return "不可达" }
+                { $_ -in @("version_mismatch", "protocol_mismatch", "coordinator_protocol_mismatch") } { return "版本不匹配" }
+                { $_ -in @("not_configured", "missing") } { return "未配置" }
+            }
+        }
+        "relay" {
+            switch ($key) {
+                { $_ -in @("running", "active", "connected") } { return "运行中" }
+                { $_ -in @("stopped", "inactive", "idle") } { return "未运行" }
+                { $_ -in @("failed", "error") } { return "失败" }
+                { $_ -in @("configured", "ready") } { return "已配置" }
+                { $_ -in @("not_configured", "missing") } { return "未配置" }
+            }
+        }
+        "bool" {
+            switch ($key) {
+                "true" { return "是" }
+                "false" { return "否" }
+            }
+        }
+    }
+    return $text
+}
+
+function Convert-GuiCoordinatorInput {
+    param(
+        [string]$InputText,
+        [string]$DefaultPort = "6121"
+    )
+    $value = $InputText.Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return [pscustomobject]@{ Url = ""; Host = ""; Port = ""; Warning = "VPS Coordinator 未配置" }
+    }
+    $hadScheme = $value -match "^[A-Za-z][A-Za-z0-9+.-]*://"
+    $explicitPort = $value -match "^[A-Za-z][A-Za-z0-9+.-]*://[^/]+:\d+(/|$)" -or ((-not $hadScheme) -and $value -match "^[^/]+:\d+(/|$)")
+    if (-not $hadScheme) {
+        $value = "http://" + $value
+    }
+    try {
+        $uri = [System.Uri]$value
+    } catch {
+        throw "VPS 地址格式无效。请填写例如 http://你的VPS_IP:6121。"
+    }
+    if ([string]::IsNullOrWhiteSpace($uri.Host)) {
+        throw "VPS 地址格式无效。请填写例如 http://你的VPS_IP:6121。"
+    }
+    $port = ""
+    if ($explicitPort) {
+        $port = [string]$uri.Port
+    } elseif ($uri.Scheme -eq "http") {
+        $port = $DefaultPort
+    }
+    $url = ""
+    if ($port) {
+        $builder = New-Object System.UriBuilder($uri.Scheme, $uri.Host, [int]$port)
+        $url = $builder.Uri.AbsoluteUri.TrimEnd("/")
+    } else {
+        $url = ($uri.Scheme + "://" + $uri.Host).TrimEnd("/")
+    }
+    $warning = ""
+    if ($port -eq "25565") {
+        $warning = "你填写的是 25565，这通常是 Minecraft 进服端口，不是 VPS Coordinator API 端口。Coordinator 默认端口是 6121。"
+    }
+    return [pscustomobject]@{ Url = $url; Host = $uri.Host; Port = $port; Warning = $warning }
+}
+
+function Test-GuiTimestampLikeId {
+    param([string]$Value)
+    $text = $Value.Trim()
+    if ($text -match "^(inst_|dev_)?\d{8}T\d{6}Z$") { return $true }
+    if ($text -match "^(inst_|dev_)?\d{5}T\d{6}Z$") { return $true }
+    return $false
+}
+
 if ($SelfTest) {
     $source = Get-Content -Raw -Path $PSCommandPath
     $checks = @(
@@ -15,6 +122,11 @@ if ($SelfTest) {
         "Format-BodyError",
         "Configure-Relay",
         "Refresh-RelayStatus",
+        "Convert-GuiCoordinatorInput",
+        "Normalize-GuiStatusValue",
+        "Toggle-AdvancedDiagnostics",
+        "Run-LocalInit",
+        "/v1/local/init",
         "txtPublicEndpoint",
         "txtListenerProcess",
         "txtRelayError",
@@ -35,6 +147,9 @@ if ($SelfTest) {
         "txtCoordinatorCheckStatus",
         "txtTokenValidationStatus",
         "txtRelayCheckStatus",
+        "显示高级诊断",
+        "一键初始化本机",
+        "配置 VPS 中转",
         "charset=utf-8",
         '$script:BodyUrl'
     )
@@ -59,6 +174,46 @@ if ($SelfTest) {
     if ($source -match ("Invoke-RestMethod\s+[^\r\n]*" + "txtCoordinator")) {
         throw "GUI self-test failed: direct coordinator REST call found"
     }
+    $forbiddenButtonTexts = @(
+        ("Refresh " + "health"),
+        ("Load " + "config"),
+        ("Save " + "config"),
+        ("Test " + "connection"),
+        ("Init" + "ialize"),
+        ("Choose " + "dir"),
+        ("Save " + "listener"),
+        ("Refresh " + "listener"),
+        ("Probe " + "listener"),
+        ("Configure " + "relay"),
+        ("Relay " + "status"),
+        ("Init " + "failed"),
+        ("Che" + "ck the URL" + ", status and responseBody" + " in details.")
+    )
+    foreach ($text in $forbiddenButtonTexts) {
+        if ($source.Contains('"' + $text + '"')) {
+            throw "GUI self-test failed: untranslated visible text found: $text"
+        }
+    }
+    if ((Normalize-GuiStatusValue "token" "") -ne "未配置") { throw "GUI self-test failed: empty token status" }
+    if ((Normalize-GuiStatusValue "token" "configured") -ne "已配置") { throw "GUI self-test failed: configured token status" }
+    if ((Normalize-GuiStatusValue "token" "invalid") -ne "无效") { throw "GUI self-test failed: invalid token status" }
+    if ((Normalize-GuiStatusValue "token" "verified") -ne "已验证") { throw "GUI self-test failed: verified token status" }
+    if ((Normalize-GuiStatusValue "coordinator" "coordinator_protocol_mismatch") -ne "版本不匹配") { throw "GUI self-test failed: version mismatch status" }
+    $norm = Convert-GuiCoordinatorInput "203.0.113.10"
+    if ($norm.Url -ne "http://203.0.113.10:6121") { throw "GUI self-test failed: coordinator IP normalization" }
+    $norm = Convert-GuiCoordinatorInput "http://203.0.113.10"
+    if ($norm.Url -ne "http://203.0.113.10:6121") { throw "GUI self-test failed: coordinator URL default port" }
+    $norm = Convert-GuiCoordinatorInput "http://203.0.113.10:6121/"
+    if ($norm.Url -ne "http://203.0.113.10:6121") { throw "GUI self-test failed: coordinator URL trailing slash" }
+    $norm = Convert-GuiCoordinatorInput "203.0.113.10:25565"
+    if ($norm.Warning -notmatch "25565") { throw "GUI self-test failed: coordinator port warning" }
+    if (-not (Test-GuiTimestampLikeId "20260706T025526Z")) { throw "GUI self-test failed: timestamp-like ID detection" }
+    if (-not $source.Contains("MinimumSize = New-Object System.Drawing.Size(1100, 800)")) {
+        throw "GUI self-test failed: minimum layout size is too small"
+    }
+    if (-not $source.Contains('$txtListenerHost = Add-GroupTextBox 150 54 260') -or -not $source.Contains('$txtListenerPort = Add-GroupTextBox 520 54 180') -or -not $source.Contains('$txtPublicHost = Add-GroupTextBox 150 96 260')) {
+        throw "GUI self-test failed: listener/relay text boxes are too narrow"
+    }
     $visibleForbidden = @(
         ('Add-Label "' + 'Group' + ' ID"'),
         ('Add-Label "' + 'Member' + ' ID"'),
@@ -76,6 +231,8 @@ if ($SelfTest) {
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
 if (-not $AgentPath) {
     $AgentPath = Join-Path $PSScriptRoot "..\acbh-agent-windows-amd64.exe"
@@ -96,10 +253,24 @@ function Redact-Secrets {
     param([string]$Text)
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     $safe = $Text
+    $jsonTokenPattern = '(?i)("(?:hostToken|ownerToken|legacyHostToken|accessKey|accessToken|authToken|relayToken|coordinatorToken|token|secret|privateKey)"\s*:\s*")[^"]+(")'
+    $safe = [regex]::Replace($safe, $jsonTokenPattern, '$1[hidden]$2')
     $tokenPattern = "(?i)(hostToken|ownerToken|legacyHostToken|accessKey|accessToken|authToken|relayToken|coordinatorToken|token|secret|privateKey)\s*[:=]\s*\S+"
     $safe = [regex]::Replace($safe, $tokenPattern, "[hidden]")
     $safe = [regex]::Replace($safe, "ht_[A-Za-z0-9_\-]+", "ht_[hidden]")
     return $safe
+}
+
+function Format-ErrorDetails {
+    param([object]$Details)
+    if ($null -eq $Details) { return "" }
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($Details.url) { $lines.Add("实际请求 URL：" + (Redact-Secrets ([string]$Details.url))) }
+    if ($Details.httpStatus) { $lines.Add("HTTP 状态码：" + [string]$Details.httpStatus) }
+    if ($Details.responseBody) { $lines.Add("服务器返回内容：" + (Redact-Secrets ([string]$Details.responseBody))) }
+    if ($Details.traceId) { $lines.Add("traceId：" + [string]$Details.traceId) }
+    if ($Details.configPath) { $lines.Add("配置文件：" + [string]$Details.configPath) }
+    return ($lines -join [Environment]::NewLine)
 }
 
 function Format-BodyError {
@@ -130,6 +301,7 @@ function Format-BodyError {
     if ($err.details -and $err.details.configPath) {
         $configPath = [string]$err.details.configPath
     }
+    $detailText = Format-ErrorDetails $err.details
 
     switch ($code) {
         "config_missing" {
@@ -168,6 +340,54 @@ function Format-BodyError {
             if ($configPath) { $text += [Environment]::NewLine + "配置文件：" + $configPath }
             return $text
         }
+        "coordinator_server_error" {
+            $text = "VPS Coordinator 返回错误。" +
+                [Environment]::NewLine + [Environment]::NewLine +
+                "可能原因：" + [Environment]::NewLine +
+                "- VPS 地址填写错误" + [Environment]::NewLine +
+                "- Coordinator 服务未启动" + [Environment]::NewLine +
+                "- VPS 防火墙或安全组未放行 6121" + [Environment]::NewLine +
+                "- 访问令牌无效" + [Environment]::NewLine +
+                "- Windows 客户端与 VPS Coordinator 版本不匹配" + [Environment]::NewLine + [Environment]::NewLine +
+                "请检查：" + [Environment]::NewLine +
+                "- 实际请求 URL" + [Environment]::NewLine +
+                "- HTTP 状态码" + [Environment]::NewLine +
+                "- 服务器返回内容" + [Environment]::NewLine +
+                "- VPS Coordinator 日志"
+            if ($detailText) { $text += [Environment]::NewLine + [Environment]::NewLine + $detailText }
+            return $text
+        }
+        "coordinator_protocol_mismatch" {
+            $text = "VPS Coordinator 版本不匹配。" +
+                [Environment]::NewLine + "Windows 客户端与 VPS Coordinator 版本不一致。请使用同一 release 中的 Windows zip 和 coordinator bundle。"
+            if ($detailText) { $text += [Environment]::NewLine + [Environment]::NewLine + $detailText }
+            return $text
+        }
+        "coordinator_unreachable" {
+            $text = "VPS Coordinator 不可达。请检查 VPS 地址、6121 端口、防火墙或安全组。"
+            if ($detailText) { $text += [Environment]::NewLine + [Environment]::NewLine + $detailText }
+            return $text
+        }
+        "network_error" {
+            $text = "网络请求失败。请检查 VPS 地址、网络连接和 Coordinator 服务状态。"
+            if ($detailText) { $text += [Environment]::NewLine + [Environment]::NewLine + $detailText }
+            return $text
+        }
+        "network_timeout" {
+            $text = "连接 VPS Coordinator 超时。请检查 6121 端口是否放行。"
+            if ($detailText) { $text += [Environment]::NewLine + [Environment]::NewLine + $detailText }
+            return $text
+        }
+        "auth_missing" {
+            $text = "访问令牌未配置。请填写访问令牌后再测试连接。"
+            if ($detailText) { $text += [Environment]::NewLine + [Environment]::NewLine + $detailText }
+            return $text
+        }
+        "auth_invalid" {
+            $text = "访问令牌无效。请确认令牌与 VPS Coordinator 中的实例一致。"
+            if ($detailText) { $text += [Environment]::NewLine + [Environment]::NewLine + $detailText }
+            return $text
+        }
         default {
             if ($code -or $message) {
                 $text = "请求失败"
@@ -190,10 +410,56 @@ function Add-Log {
     $txtLog.ScrollToCaret()
 }
 
+function Set-ControlText {
+    param(
+        [object]$Control,
+        [object]$Value,
+        [string]$EmptyText = ""
+    )
+    if ($null -eq $Control) { return }
+    $text = ""
+    if ($null -ne $Value) { $text = [string]$Value }
+    if ([string]::IsNullOrWhiteSpace($text)) { $text = $EmptyText }
+    $Control.Text = $text
+    if ($Control -is [System.Windows.Forms.TextBox]) {
+        $Control.SelectionStart = 0
+        $Control.SelectionLength = 0
+    }
+}
+
+function Set-Status {
+    param(
+        [object]$Control,
+        [object]$Value,
+        [string]$Kind = "generic"
+    )
+    Set-ControlText $Control (Normalize-GuiStatusValue $Kind $Value) "未知"
+}
+
+function Set-Diagnostics {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return }
+    Set-ControlText $txtErrorDetails (Redact-Secrets $Text)
+}
+
 function Show-Error {
     param([string]$Message)
-    Add-Log $Message
-    [System.Windows.Forms.MessageBox]::Show((Redact-Secrets $Message), "ACBH", "OK", "Error") | Out-Null
+    $safe = Redact-Secrets $Message
+    Add-Log $safe
+    Set-Diagnostics $safe
+    $brief = ($safe -split "(\r?\n)") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($brief)) { $brief = "操作失败，请查看诊断信息。" }
+    [System.Windows.Forms.MessageBox]::Show($brief, "ACBH", "OK", "Error") | Out-Null
+}
+
+function Show-ActionError {
+    param(
+        [string]$Action,
+        [object]$ErrorRecord
+    )
+    $message = $ErrorRecord.Exception.Message
+    if ([string]::IsNullOrWhiteSpace($message)) { $message = [string]$ErrorRecord }
+    Show-Error ($Action + "失败：" + $message)
 }
 
 function Test-BodyPort {
@@ -215,7 +481,7 @@ function Test-BodyPort {
 function Start-Body {
     if (Test-BodyPort) { return }
     if (-not (Test-Path $AgentPath)) {
-        throw "Cannot find ACBH Agent: $AgentPath"
+        throw "找不到 ACBH Agent：$AgentPath"
     }
     New-Item -ItemType Directory -Force -Path $AppDataDir | Out-Null
     $args = @("body", "serve", "--listen", $BodyListen, "--app-data-dir", $AppDataDir)
@@ -230,9 +496,9 @@ function Start-Body {
     $script:BodyProcess = [System.Diagnostics.Process]::Start($psi)
     Start-Sleep -Milliseconds 600
     if (-not (Test-BodyPort)) {
-        throw "Body API did not start on $BodyListen"
+        throw "本地 Body API 未能在 $BodyListen 启动"
     }
-    Add-Log "Body API started at $script:BodyUrl"
+    Add-Log "本地 Body API 已启动：$script:BodyUrl"
 }
 
 function Invoke-BodyJson {
@@ -258,21 +524,22 @@ function Invoke-BodyJson {
 function Refresh-Health {
     try {
         $health = Invoke-BodyJson -Method "GET" -Path "/v1/body/health"
-        $txtConfigPath.Text = $health.configPath
-        $txtBodyApi.Text = $health.bodyApi
-        if ($txtLocalBodyStatus -ne $null) { $txtLocalBodyStatus.Text = "就绪" }
-        if ($health.coordinatorUrl) { $txtCoordinator.Text = $health.coordinatorUrl }
+        Set-ControlText $txtConfigPath $health.configPath
+        Set-ControlText $txtBodyApi $health.bodyApi
+        Set-Status $txtLocalBodyStatus "ok" "body"
+        if ($health.coordinatorUrl) { Set-ControlText $txtCoordinator $health.coordinatorUrl }
         if ($health.mode) { $cmbMode.SelectedItem = $health.mode }
         if ($health.configError) {
             $lblState.Text = "状态：本地 Body API 就绪，配置需处理"
-            Add-Log ("Config error: " + $health.configError.errorCode + " " + $health.configError.message)
+            Set-Diagnostics ("配置提示：" + $health.configError.errorCode + " " + $health.configError.message)
+            Add-Log ("配置提示：" + $health.configError.errorCode + " " + $health.configError.message)
         } else {
             $lblState.Text = "状态：本地 Body API 就绪"
             Add-Log "本地 Body API 就绪。"
         }
     } catch {
-        if ($txtLocalBodyStatus -ne $null) { $txtLocalBodyStatus.Text = "异常" }
-        Show-Error ("Health failed: " + $_.Exception.Message)
+        Set-Status $txtLocalBodyStatus "failed" "body"
+        Show-ActionError "刷新状态" $_
     }
 }
 
@@ -280,43 +547,61 @@ function Load-Config {
     try {
         $cfg = Invoke-BodyJson -Method "GET" -Path "/v1/config"
         $cmbMode.SelectedItem = $cfg.mode
-        $txtCoordinator.Text = $cfg.coordinatorUrl
-        $txtInstanceName.Text = $cfg.instance.displayName
-        $txtInstanceId.Text = $cfg.instance.instanceId
-        $txtDeviceName.Text = $cfg.device.displayName
-        $txtDeviceId.Text = $cfg.device.deviceId
-        $txtServerName.Text = $cfg.server.displayName
-        $txtServerDir.Text = $cfg.server.dir
-        $txtTokenStatus.Text = "未配置"
+        Set-ControlText $txtCoordinator $cfg.coordinatorUrl
+        Set-ControlText $txtInstanceName $cfg.instance.displayName
+        Set-ControlText $txtInstanceId $cfg.instance.instanceId
+        Set-ControlText $txtDeviceName $cfg.device.displayName
+        Set-ControlText $txtDeviceId $cfg.device.deviceId
+        Set-ControlText $txtServerName $cfg.server.displayName
+        Set-ControlText $txtServerDir $cfg.server.dir
+        Set-Status $txtTokenStatus "not_configured" "token"
         if ($cfg.instance.ownerToken -eq "[redacted]" -or $cfg.compat.legacyHostToken -eq "[redacted]") {
-            $txtTokenStatus.Text = "已配置"
+            Set-Status $txtTokenStatus "configured" "token"
         }
         if ($cfg.listener) {
-            $txtListenerHost.Text = $cfg.listener.localHost
-            $txtListenerPort.Text = [string]$cfg.listener.localPort
+            Set-ControlText $txtListenerHost $cfg.listener.localHost
+            Set-ControlText $txtListenerPort ([string]$cfg.listener.localPort)
         }
         if ($cfg.relay) {
-            $txtPublicHost.Text = $cfg.relay.publicHost
-            $txtPublicPort.Text = [string]$cfg.relay.minecraftPort
+            Set-ControlText $txtPublicHost $cfg.relay.publicHost
+            Set-ControlText $txtPublicPort ([string]$cfg.relay.minecraftPort)
         }
-        Add-Log "config.json loaded."
+        Add-Log "配置已加载。"
     } catch {
-        Add-Log ("Config not loaded yet: " + $_.Exception.Message)
+        Add-Log ("配置尚未加载：" + $_.Exception.Message)
     }
 }
 
 function Build-ConfigFromForm {
+    $coord = Convert-GuiCoordinatorInput $txtCoordinator.Text
+    Set-ControlText $txtCoordinator $coord.Url
+    if ($coord.Warning) {
+        Set-Diagnostics $coord.Warning
+        Add-Log $coord.Warning
+    }
+    $ownerToken = $txtAccessToken.Text.Trim()
+    if ([string]::IsNullOrWhiteSpace($ownerToken)) { $ownerToken = "[redacted]" }
+    $listenerPort = 25565
+    if (-not [int]::TryParse($txtListenerPort.Text.Trim(), [ref]$listenerPort)) {
+        throw "本地端口必须是数字，例如 25565。"
+    }
+    $publicPort = $listenerPort
+    if (-not [string]::IsNullOrWhiteSpace($txtPublicPort.Text.Trim())) {
+        if (-not [int]::TryParse($txtPublicPort.Text.Trim(), [ref]$publicPort)) {
+            throw "公网端口必须是数字，例如 25565。"
+        }
+    }
     return @{
         schemaVersion = 2
         mode = [string]$cmbMode.SelectedItem
-        coordinatorUrl = $txtCoordinator.Text.Trim()
+        coordinatorUrl = $coord.Url
         instance = @{
-            instanceId = $txtInstanceId.Text.Trim()
+            instanceId = ""
             displayName = $txtInstanceName.Text.Trim()
-            ownerToken = "[redacted]"
+            ownerToken = $ownerToken
         }
         device = @{
-            deviceId = $txtDeviceId.Text.Trim()
+            deviceId = ""
             displayName = $txtDeviceName.Text.Trim()
             platform = "windows"
         }
@@ -327,12 +612,12 @@ function Build-ConfigFromForm {
         }
         compat = @{
             coordinatorProtocol = 2
-            legacyGroupId = $txtInstanceId.Text.Trim()
-            legacyHostId = $txtDeviceId.Text.Trim()
-            legacyHostToken = "[redacted]"
+            legacyGroupId = ""
+            legacyHostId = ""
+            legacyHostToken = $ownerToken
         }
-        listener = @{ enabled = $true; localHost = "127.0.0.1"; localPort = 25565 }
-        relay = @{ enabled = $true; publicHost = $txtPublicHost.Text.Trim(); coordinatorPort = 6121; minecraftPort = [int]$txtPublicPort.Text.Trim() }
+        listener = @{ enabled = $true; localHost = $txtListenerHost.Text.Trim(); localPort = $listenerPort; expectedProcessNames = @("java.exe", "javaw.exe"); serverDirMatchRequired = $false }
+        relay = @{ enabled = $true; publicHost = $txtPublicHost.Text.Trim(); coordinatorPort = 6121; minecraftPort = $publicPort }
         backup = @{
             profileId = "minecraft-migratable"
             include = @("dir:world","dir:mods","dir:config","dir:defaultconfigs","dir:datapacks","dir:resourcepacks","dir:global_packs","dir:patchouli_books","file:server.properties","file:eula.txt","file:ops.json","file:whitelist.json","file:banned-ips.json","file:banned-players.json","file:server-icon.png","file:manifest.json","file:variables.txt","file:user_jvm_args.txt","file:start.bat","file:start.ps1","file:start.sh","file:run.sh","file:双击直接开服！！！.bat","file:HOW-TO-RUN.md")
@@ -351,7 +636,7 @@ function Sync-FormConfig {
         Refresh-Identity
         return $true
     } catch {
-        if (-not $Quiet) { Show-Error ("Save config failed: " + $_.Exception.Message) }
+        if (-not $Quiet) { Show-ActionError "保存配置" $_ }
         return $false
     }
 }
@@ -362,64 +647,87 @@ function Save-Config {
 
 function Test-Coordinator {
     try {
-        $txtLocalBodyStatus.Text = "检测中"
-        $txtCoordinatorCheckStatus.Text = "检测中"
-        $txtTokenValidationStatus.Text = "检测中"
-        $txtRelayCheckStatus.Text = "检测中"
+        Set-ControlText $txtLocalBodyStatus "检测中"
+        Set-ControlText $txtCoordinatorCheckStatus "检测中"
+        Set-ControlText $txtTokenValidationStatus "检测中"
+        Set-ControlText $txtRelayCheckStatus "检测中"
         if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法测试连接。" }
-        $txtLocalBodyStatus.Text = "就绪"
+        Set-Status $txtLocalBodyStatus "ok" "body"
         $op = Invoke-BodyJson -Method "GET" -Path "/v1/coordinator/probe"
-        $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
-        $txtErrorDetails.Text = ""
+        Set-ControlText $txtOperation ($op | ConvertTo-Json -Depth 12)
+        Set-ControlText $txtErrorDetails ""
         if ($op.state -eq "success") {
             $lblState.Text = "状态：VPS Coordinator 可连接"
-            $txtCoordinatorCheckStatus.Text = "可连接"
-            $txtActualRequestUrl.Text = $op.result.actualRequestUrl
-            $txtProtocol.Text = [string]$op.result.capabilities.protocolVersion
-            $txtCapabilities.Text = (($op.result.capabilities.capabilities) -join ", ")
+            Set-Status $txtCoordinatorCheckStatus "ok" "coordinator"
+            Set-ControlText $txtActualRequestUrl $op.result.actualRequestUrl
+            Set-ControlText $txtProtocol ([string]$op.result.capabilities.protocolVersion)
+            Set-ControlText $txtCapabilities (($op.result.capabilities.capabilities) -join ", ")
+            if ($op.result.capabilities.coordinatorVersion) {
+                Set-ControlText $txtCoordinatorVersion $op.result.capabilities.coordinatorVersion
+            }
+            if ($op.result.capabilities.buildCommit) {
+                Set-ControlText $txtCoordinatorCommit $op.result.capabilities.buildCommit
+            }
             Refresh-Identity
             Test-TokenValidation
             Test-RelayStatus
         } else {
             $lblState.Text = "状态：VPS Coordinator 连接失败"
-            $txtCoordinatorCheckStatus.Text = "失败"
-            $txtTokenValidationStatus.Text = $txtTokenStatus.Text
-            $txtRelayCheckStatus.Text = "未检测"
+            Set-Status $txtCoordinatorCheckStatus "failed" "coordinator"
+            Set-ControlText $txtTokenValidationStatus $txtTokenStatus.Text
+            Set-ControlText $txtRelayCheckStatus "未检测"
             if ($op.error) {
-                $txtActualRequestUrl.Text = $op.error.details.url
-                $txtErrorDetails.Text = "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
+                Set-ControlText $txtActualRequestUrl $op.error.details.url
+                Set-Diagnostics ("errorCode=$($op.error.errorCode)" + [Environment]::NewLine + (Format-ErrorDetails $op.error.details))
+                if ($op.error.errorCode -eq "coordinator_protocol_mismatch") {
+                    Set-Status $txtCoordinatorCheckStatus "version_mismatch" "coordinator"
+                } elseif ($op.error.errorCode -eq "coordinator_unreachable") {
+                    Set-Status $txtCoordinatorCheckStatus "unreachable" "coordinator"
+                } elseif ($op.error.errorCode -eq "coordinator_server_error") {
+                    Set-Status $txtCoordinatorCheckStatus "server_error" "coordinator"
+                }
             }
         }
-        Add-Log ("Probe operation: " + $op.operationId + " state=" + $op.state)
+        Add-Log ("连接测试：" + $op.operationId + " state=" + $op.state)
     } catch {
-        Show-Error ("Coordinator probe failed: " + $_.Exception.Message)
+        $msg = $_.Exception.Message
+        if ($msg -match "protocol|版本不匹配") {
+            Set-Status $txtCoordinatorCheckStatus "version_mismatch" "coordinator"
+        } elseif ($msg -match "不可达|timeout|超时|network") {
+            Set-Status $txtCoordinatorCheckStatus "unreachable" "coordinator"
+        } elseif ($msg -match "server error|返回错误") {
+            Set-Status $txtCoordinatorCheckStatus "server_error" "coordinator"
+        } else {
+            Set-Status $txtCoordinatorCheckStatus "failed" "coordinator"
+        }
+        Show-ActionError "测试连接" $_
     }
 }
 
 function Test-TokenValidation {
     if ($txtTokenStatus.Text -ne "已配置") {
-        $txtTokenStatus.Text = "未配置"
-        $txtTokenValidationStatus.Text = "未配置"
+        Set-Status $txtTokenStatus "not_configured" "token"
+        Set-Status $txtTokenValidationStatus "not_configured" "token"
         return
     }
     try {
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/init"
         if ($op.state -eq "success") {
-            $txtTokenStatus.Text = "已验证"
-            $txtTokenValidationStatus.Text = "已验证"
+            Set-Status $txtTokenStatus "verified" "token"
+            Set-Status $txtTokenValidationStatus "verified" "token"
         } elseif ($op.error -and ($op.error.errorCode -eq "auth_invalid" -or $op.error.errorCode -eq "auth_missing")) {
-            $txtTokenStatus.Text = "无效"
-            $txtTokenValidationStatus.Text = "无效"
+            Set-Status $txtTokenStatus "invalid" "token"
+            Set-Status $txtTokenValidationStatus "invalid" "token"
         } else {
-            $txtTokenValidationStatus.Text = $txtTokenStatus.Text
+            Set-ControlText $txtTokenValidationStatus $txtTokenStatus.Text
         }
     } catch {
         if ($_.Exception.Message -match "401|auth|token|令牌") {
-            $txtTokenStatus.Text = "无效"
-            $txtTokenValidationStatus.Text = "无效"
+            Set-Status $txtTokenStatus "invalid" "token"
+            Set-Status $txtTokenValidationStatus "invalid" "token"
         } else {
-            $txtTokenValidationStatus.Text = $txtTokenStatus.Text
-            Add-Log ("Token validation skipped: " + $_.Exception.Message)
+            Set-ControlText $txtTokenValidationStatus $txtTokenStatus.Text
+            Add-Log ("访问令牌验证跳过：" + $_.Exception.Message)
         }
     }
 }
@@ -429,72 +737,76 @@ function Test-RelayStatus {
         $status = Invoke-BodyJson -Method "GET" -Path "/v1/relay/status"
         Set-RelayFields $status.relay
         if ($status.relay.active) {
-            $txtRelayCheckStatus.Text = "已连接"
+            Set-Status $txtRelayCheckStatus "running" "relay"
         } elseif ($status.relay.configured) {
-            $txtRelayCheckStatus.Text = "已配置"
+            Set-Status $txtRelayCheckStatus "configured" "relay"
         } else {
-            $txtRelayCheckStatus.Text = "未配置"
+            Set-Status $txtRelayCheckStatus "not_configured" "relay"
         }
     } catch {
-        $txtRelayCheckStatus.Text = "待初始化"
-        Add-Log ("Relay status not ready: " + $_.Exception.Message)
+        Set-Status $txtRelayCheckStatus "not_configured" "relay"
+        Add-Log ("中转状态尚未就绪：" + $_.Exception.Message)
     }
 }
 
 function Refresh-Identity {
     try {
         $id = Invoke-BodyJson -Method "GET" -Path "/v1/identity"
-        $txtInstanceId.Text = $id.instance.instanceId
-        $txtInstanceName.Text = $id.instance.displayName
-        $txtDeviceId.Text = $id.device.deviceId
-        $txtDeviceName.Text = $id.device.displayName
-        $txtServerId.Text = $id.server.serverId
-        $txtServerName.Text = $id.server.displayName
-        $txtTokenStatus.Text = "未配置"
+        Set-ControlText $txtInstanceId $id.instance.instanceId
+        Set-ControlText $txtInstanceName $id.instance.displayName
+        Set-ControlText $txtDeviceId $id.device.deviceId
+        Set-ControlText $txtDeviceName $id.device.displayName
+        Set-ControlText $txtServerId $id.server.serverId
+        Set-ControlText $txtServerName $id.server.displayName
+        Set-Status $txtTokenStatus "not_configured" "token"
         if ($id.compat.ownerTokenPresent -or $id.compat.legacyHostTokenPresent) {
-            $txtTokenStatus.Text = "已配置"
+            Set-Status $txtTokenStatus "configured" "token"
         }
+        Set-ControlText $txtLegacyGroupId ($(if ($id.compat.legacyGroupIdPresent) { "已生成" } else { "未配置" }))
+        Set-ControlText $txtLegacyHostId ($(if ($id.compat.legacyHostIdPresent) { "已生成" } else { "未配置" }))
         $debug = "usesLegacyGroupApi=$($id.compat.usesLegacyGroupApi); legacyGroupIdPresent=$($id.compat.legacyGroupIdPresent); legacyHostIdPresent=$($id.compat.legacyHostIdPresent)"
         Add-Log $debug
         if ($id.compat.usesLegacyGroupApi -and (-not $id.compat.legacyGroupIdPresent -or -not $id.compat.legacyHostIdPresent)) {
-            $txtAdvancedDiagnostics.Text = "检测到旧版组/主机协议，但当前配置缺少 groupId/hostId。程序将自动从实例 ID / 设备 ID 生成兼容字段。"
+            Set-ControlText $txtAdvancedDiagnostics "检测到旧版组/主机协议，但当前配置缺少 groupId/hostId。程序将自动从实例 ID / 设备 ID 生成兼容字段。"
         } else {
-            $txtAdvancedDiagnostics.Text = "兼容字段已就绪。"
+            Set-ControlText $txtAdvancedDiagnostics "兼容字段已就绪。"
         }
-        Add-Log "Private instance identity refreshed."
+        Add-Log "本机身份已刷新。"
     } catch {
-        Add-Log ("Identity not loaded yet: " + $_.Exception.Message)
+        Add-Log ("本机身份尚未加载：" + $_.Exception.Message)
+    }
+}
+
+function Run-LocalInit {
+    try {
+        if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法初始化本机。" }
+        $op = Invoke-BodyJson -Method "POST" -Path "/v1/local/init"
+        Set-ControlText $txtOperation ($op | ConvertTo-Json -Depth 12)
+        if ($op.state -eq "success") {
+            $lblState.Text = "状态：本机初始化完成"
+            Refresh-Health
+            Refresh-Identity
+            Update-StepStatus
+            [System.Windows.Forms.MessageBox]::Show("本机初始化完成。下一步请点击「测试连接」检查 VPS Coordinator。", "ACBH", "OK", "Information") | Out-Null
+        } else {
+            $lblState.Text = "状态：本机初始化失败"
+            if ($op.error) {
+                Set-Diagnostics ("errorCode=$($op.error.errorCode)" + [Environment]::NewLine + (Format-ErrorDetails $op.error.details))
+            }
+        }
+        Add-Log ("本机初始化：" + $op.operationId + " state=" + $op.state)
+    } catch {
+        Show-ActionError "本机初始化" $_
     }
 }
 
 function Run-Init {
-    try {
-        if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法初始化。" }
-        $op = Invoke-BodyJson -Method "POST" -Path "/v1/init"
-        $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
-        if ($op.state -eq "success") {
-            $lblState.Text = "State: private instance ready"
-            $txtTokenStatus.Text = "已验证"
-            $txtTokenValidationStatus.Text = "已验证"
-        } else {
-            $lblState.Text = "State: init failed"
-            if ($op.error -and $op.error.errorCode -eq "auth_invalid") {
-                $txtTokenStatus.Text = "无效"
-                $txtTokenValidationStatus.Text = "无效"
-            } elseif ($op.error -and $op.error.errorCode -eq "identity_incomplete") {
-                $txtTokenStatus.Text = "未配置"
-                $txtTokenValidationStatus.Text = "未配置"
-            }
-        }
-        Add-Log ("Init operation: " + $op.operationId + " state=" + $op.state)
-    } catch {
-        Show-Error ("Init failed: " + $_.Exception.Message)
-    }
+    Run-LocalInit
 }
 
 function Register-Identity {
-    Add-Log "正在保存配置并尝试生成/注册身份。"
-    Run-Init
+    Add-Log "正在保存配置并刷新本机身份。"
+    Run-LocalInit
 }
 
 function Save-ListenerConfig {
@@ -507,31 +819,31 @@ function Save-ListenerConfig {
             serverDirMatchRequired = $false
         }
         Invoke-BodyJson -Method "PUT" -Path "/v1/listener/config" -Body $cfg | Out-Null
-        Add-Log "Listener config saved."
+        Add-Log "监听配置已保存。"
         Refresh-ListenerStatus
     } catch {
-        Show-Error ("Save listener config failed: " + $_.Exception.Message)
+        Show-ActionError "保存监听" $_
     }
 }
 
 function Set-ListenerFields {
     param([object]$Status)
-    $txtListening.Text = [string]$Status.listening
-    $txtListenerWarnings.Text = ""
+    Set-Status $txtListening ([string]$Status.listening) "bool"
+    Set-ControlText $txtListenerWarnings ""
     if ($Status.warnings) {
-        $txtListenerWarnings.Text = (($Status.warnings | ForEach-Object { $_.code + ": " + $_.message }) -join "; ")
+        Set-ControlText $txtListenerWarnings (($Status.warnings | ForEach-Object { $_.code + ": " + $_.message }) -join "; ")
     }
     if ($Status.listeners -and $Status.listeners.Count -gt 0) {
         $item = $Status.listeners[0]
-        $txtListenerPid.Text = [string]$item.pid
-        $txtListenerProcess.Text = [string]$item.processName
-        $txtListenerCommand.Text = [string]$item.commandLine
-        $txtServerDirMatched.Text = [string]$item.serverDirMatched
+        Set-ControlText $txtListenerPid ([string]$item.pid)
+        Set-ControlText $txtListenerProcess ([string]$item.processName)
+        Set-ControlText $txtListenerCommand ([string]$item.commandLine)
+        Set-Status $txtServerDirMatched ([string]$item.serverDirMatched) "bool"
     } else {
-        $txtListenerPid.Text = ""
-        $txtListenerProcess.Text = ""
-        $txtListenerCommand.Text = ""
-        $txtServerDirMatched.Text = ""
+        Set-ControlText $txtListenerPid "未运行"
+        Set-ControlText $txtListenerProcess "未运行"
+        Set-ControlText $txtListenerCommand ""
+        Set-ControlText $txtServerDirMatched "未知"
     }
 }
 
@@ -540,12 +852,12 @@ function Refresh-ListenerStatus {
         $status = Invoke-BodyJson -Method "GET" -Path "/v1/listener/status"
         Set-ListenerFields $status
         if (-not $status.listening) {
-            Add-Log "ACBH does not start Minecraft. Start your server with MCSL or your own script, then refresh listener status."
+            Add-Log "未检测到 Minecraft 服务端监听。请先用你的启动器或脚本启动服务端，再刷新监听状态。"
         } else {
-            Add-Log "Listener status refreshed."
+            Add-Log "监听状态已刷新。"
         }
     } catch {
-        Show-Error ("Listener status failed: " + $_.Exception.Message)
+        Show-ActionError "刷新监听" $_
     }
 }
 
@@ -553,42 +865,45 @@ function Probe-Listener {
     try {
         $status = Invoke-BodyJson -Method "POST" -Path "/v1/listener/probe"
         Set-ListenerFields $status
-        Add-Log "Listener probe completed."
+        Add-Log "监听探测完成。"
     } catch {
-        Show-Error ("Listener probe failed: " + $_.Exception.Message)
+        Show-ActionError "探测监听" $_
     }
 }
 
 function Set-RelayFields {
     param([object]$Relay)
-    $txtPublicEndpoint.Text = [string]$Relay.publicEndpoint
-    $txtLocalEndpoint.Text = [string]$Relay.localEndpoint
-    $txtRelayState.Text = "configured=$($Relay.configured) active=$($Relay.active) currentDevice=$($Relay.currentDevice) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
-    $txtRelayError.Text = ""
+    Set-ControlText $txtPublicEndpoint $Relay.publicEndpoint
+    Set-ControlText $txtLocalEndpoint $Relay.localEndpoint
+    Set-ControlText $txtRelayState "configured=$($Relay.configured) active=$($Relay.active) currentDevice=$($Relay.currentDevice) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
+    Set-ControlText $txtRelayError ""
     if ($Relay.errors) {
-        $txtRelayError.Text = (($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + $_.details.responseBody }) -join "; ")
+        Set-ControlText $txtRelayError (($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + (Redact-Secrets ([string]$_.details.responseBody)) }) -join "; ")
     }
 }
 
 function Configure-Relay {
     try {
+        if (-not (Sync-FormConfig -Quiet)) { throw "保存当前表单配置失败，无法配置 VPS 中转。" }
         $body = @{
             localMinecraftHost = $txtListenerHost.Text.Trim()
             localMinecraftPort = [int]$txtListenerPort.Text.Trim()
             publicMinecraftPort = [int]$txtPublicPort.Text.Trim()
         }
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/relay/configure" -Body $body
-        $txtOperation.Text = ($op | ConvertTo-Json -Depth 12)
+        Set-ControlText $txtOperation ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
             Set-RelayFields $op.result.relay
-            $txtRelayCheckStatus.Text = "已配置"
-            Add-Log "Relay configured through body API."
+            Set-Status $txtRelayCheckStatus "configured" "relay"
+            Update-StepStatus
+            Add-Log "VPS 中转已配置。"
         } elseif ($op.error) {
-            $txtRelayCheckStatus.Text = "失败"
-            $txtRelayError.Text = "errorCode=$($op.error.errorCode) httpStatus=$($op.error.details.httpStatus) responseBody=$($op.error.details.responseBody)"
+            Set-Status $txtRelayCheckStatus "failed" "relay"
+            Set-ControlText $txtRelayError ("errorCode=$($op.error.errorCode)" + [Environment]::NewLine + (Format-ErrorDetails $op.error.details))
         }
     } catch {
-        Show-Error ("Relay configure failed: " + $_.Exception.Message)
+        Set-Status $txtRelayCheckStatus "failed" "relay"
+        Show-ActionError "配置 VPS 中转" $_
     }
 }
 
@@ -597,25 +912,25 @@ function Refresh-RelayStatus {
         $status = Invoke-BodyJson -Method "GET" -Path "/v1/relay/status"
         Set-RelayFields $status.relay
         if ($status.relay.active) {
-            $txtRelayCheckStatus.Text = "已连接"
+            Set-Status $txtRelayCheckStatus "running" "relay"
         } elseif ($status.relay.configured) {
-            $txtRelayCheckStatus.Text = "已配置"
+            Set-Status $txtRelayCheckStatus "configured" "relay"
         } else {
-            $txtRelayCheckStatus.Text = "未配置"
+            Set-Status $txtRelayCheckStatus "not_configured" "relay"
         }
-        Add-Log "Relay status refreshed."
+        Add-Log "中转状态已刷新。"
     } catch {
-        Show-Error ("Relay status failed: " + $_.Exception.Message)
+        Show-ActionError "中转状态" $_
     }
 }
 
 function Set-BackupOperation {
     param([object]$Op)
-    $txtOperation.Text = ($Op | ConvertTo-Json -Depth 16)
+    Set-ControlText $txtOperation ($Op | ConvertTo-Json -Depth 16)
     if ($Op.state -eq "success") {
-        $txtBackupError.Text = ""
+        Set-ControlText $txtBackupError ""
     } elseif ($Op.error) {
-        $txtBackupError.Text = "errorCode=$($Op.error.errorCode) httpStatus=$($Op.error.details.httpStatus) responseBody=$($Op.error.details.responseBody)"
+        Set-ControlText $txtBackupError ("errorCode=$($Op.error.errorCode)" + [Environment]::NewLine + (Format-ErrorDetails $Op.error.details))
     }
 }
 
@@ -635,11 +950,11 @@ function Wait-BodyOperation {
 function Analyze-Backup {
     try {
         $result = Invoke-BodyJson -Method "POST" -Path "/v1/backup/analyze"
-        $txtBackupSummary.Text = "files=$($result.fileCount) roots=$($result.rootCount) size=$($result.logicalSize) profile=$($result.profileId)"
-        $txtBackupError.Text = ""
-        Add-Log "Backup analysis completed through body API."
+        Set-ControlText $txtBackupSummary "files=$($result.fileCount) roots=$($result.rootCount) size=$($result.logicalSize) profile=$($result.profileId)"
+        Set-ControlText $txtBackupError ""
+        Add-Log "备份分析完成。"
     } catch {
-        Show-Error ("Backup analyze failed: " + $_.Exception.Message)
+        Show-ActionError "分析备份" $_
     }
 }
 
@@ -648,33 +963,33 @@ function Upload-Backup {
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/backup/upload"
         $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
-            $txtBackupSummary.Text = "snapshot=$($op.result.snapshotId) uploaded=$($op.result.uploadedSize) deduped=$($op.result.deduplicatedSize) actualRequestUrl=$($op.result.actualRequestUrl)"
-            Add-Log "Backup uploaded through body API."
+            Set-ControlText $txtBackupSummary "snapshot=$($op.result.snapshotId) uploaded=$($op.result.uploadedSize) deduped=$($op.result.deduplicatedSize) actualRequestUrl=$($op.result.actualRequestUrl)"
+            Add-Log "备份上传完成。"
         }
     } catch {
-        Show-Error ("Backup upload failed: " + $_.Exception.Message)
+        Show-ActionError "上传备份" $_
     }
 }
 
 function Refresh-Snapshots {
     try {
         $result = Invoke-BodyJson -Method "GET" -Path "/v1/snapshots"
-        $txtSnapshotList.Text = ($result.snapshots | ConvertTo-Json -Depth 8)
+        Set-ControlText $txtSnapshotList ($result.snapshots | ConvertTo-Json -Depth 8)
         if ($result.snapshots -and $result.snapshots.Count -gt 0) {
-            $txtSnapshotId.Text = $result.snapshots[0].snapshotId
+            Set-ControlText $txtSnapshotId $result.snapshots[0].snapshotId
         }
-        Add-Log "Snapshot list refreshed through body API."
+        Add-Log "快照列表已刷新。"
     } catch {
-        Show-Error ("Snapshot list failed: " + $_.Exception.Message)
+        Show-ActionError "刷新快照" $_
     }
 }
 
 function Choose-RestoreDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = "Choose a new empty restore directory"
+    $dialog.Description = "选择一个新的空恢复目录"
     if ($txtRestoreTargetDir.Text) { $dialog.SelectedPath = $txtRestoreTargetDir.Text }
     if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
-        $txtRestoreTargetDir.Text = $dialog.SelectedPath
+        Set-ControlText $txtRestoreTargetDir $dialog.SelectedPath
     }
 }
 
@@ -684,11 +999,11 @@ function Download-LatestSnapshot {
         $op = Invoke-BodyJson -Method "POST" -Path "/v1/snapshots/latest/download" -Body $body
         $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
-            $txtBackupSummary.Text = "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
-            Add-Log "Latest snapshot downloaded through body API."
+            Set-ControlText $txtBackupSummary "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
+            Add-Log "最新快照下载完成。"
         }
     } catch {
-        Show-Error ("Latest snapshot download failed: " + $_.Exception.Message)
+        Show-ActionError "下载最新快照" $_
     }
 }
 
@@ -700,291 +1015,370 @@ function Download-SelectedSnapshot {
         $op = Invoke-BodyJson -Method "POST" -Path ("/v1/snapshots/" + [uri]::EscapeDataString($snapshotId) + "/download") -Body $body
         $op = Wait-BodyOperation $op
         if ($op.state -eq "success") {
-            $txtBackupSummary.Text = "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
-            Add-Log "Selected snapshot downloaded through body API."
+            Set-ControlText $txtBackupSummary "downloaded=$($op.result.downloadedFiles) snapshot=$($op.result.snapshotId) target=$($op.result.targetDir)"
+            Add-Log "所选快照下载完成。"
         }
     } catch {
-        Show-Error ("Snapshot download failed: " + $_.Exception.Message)
+        Show-ActionError "下载所选快照" $_
     }
 }
 
 function Choose-ServerDir {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = "Choose Minecraft server directory"
+    $dialog.Description = "选择 Minecraft 服务端目录"
     if ($txtServerDir.Text) { $dialog.SelectedPath = $txtServerDir.Text }
     if ($dialog.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
-        $txtServerDir.Text = $dialog.SelectedPath
+        Set-ControlText $txtServerDir $dialog.SelectedPath
+        Update-StepStatus
     }
 }
 
 function Add-Label {
-    param([string]$Text, [int]$X, [int]$Y)
+    param([string]$Text, [int]$X, [int]$Y, [object]$Parent = $form, [int]$W = 140)
     $label = New-Object System.Windows.Forms.Label
     $label.Text = $Text
     $label.Location = New-Object System.Drawing.Point($X, $Y)
-    $label.Size = New-Object System.Drawing.Size(140, 22)
-    $form.Controls.Add($label)
+    $label.Size = New-Object System.Drawing.Size($W, 22)
+    $Parent.Controls.Add($label)
     return $label
 }
 
 function Add-TextBox {
-    param([int]$X, [int]$Y, [int]$W, [bool]$ReadOnly = $false)
+    param(
+        [int]$X,
+        [int]$Y,
+        [int]$W,
+        [bool]$ReadOnly = $false,
+        [object]$Parent = $form,
+        [bool]$Password = $false,
+        [int]$H = 24,
+        [bool]$MultiLine = $false
+    )
     $box = New-Object System.Windows.Forms.TextBox
     $box.Location = New-Object System.Drawing.Point($X, $Y)
-    $box.Size = New-Object System.Drawing.Size($W, 24)
+    $box.Size = New-Object System.Drawing.Size($W, $H)
     $box.ReadOnly = $ReadOnly
-    $form.Controls.Add($box)
+    $box.Multiline = $MultiLine
+    if ($MultiLine) { $box.ScrollBars = "Vertical" }
+    if ($Password) { $box.UseSystemPasswordChar = $true }
+    $Parent.Controls.Add($box)
     return $box
 }
 
 function Add-Button {
-    param([string]$Text, [int]$X, [int]$Y, [scriptblock]$Click)
+    param([string]$Text, [int]$X, [int]$Y, [scriptblock]$Click, [object]$Parent = $form, [int]$W = 170, [int]$H = 30)
     $button = New-Object System.Windows.Forms.Button
     $button.Text = $Text
     $button.Location = New-Object System.Drawing.Point($X, $Y)
-    $button.Size = New-Object System.Drawing.Size(150, 30)
+    $button.Size = New-Object System.Drawing.Size($W, $H)
     $button.Add_Click({ try { & $Click } catch { Show-Error $_.Exception.Message } }.GetNewClosure())
-    $form.Controls.Add($button)
+    $Parent.Controls.Add($button)
     return $button
+}
+
+function Add-GroupBox {
+    param([string]$Text, [int]$X, [int]$Y, [int]$W, [int]$H, [object]$Parent = $form)
+    $group = New-Object System.Windows.Forms.GroupBox
+    $group.Text = $Text
+    $group.Location = New-Object System.Drawing.Point($X, $Y)
+    $group.Size = New-Object System.Drawing.Size($W, $H)
+    $Parent.Controls.Add($group)
+    return $group
+}
+
+function Register-AdvancedControl {
+    param([object]$Control)
+    $script:AdvancedControls += $Control
+}
+
+function Set-AdvancedVisible {
+    param([bool]$Visible)
+    $script:AdvancedVisible = $Visible
+    foreach ($control in $script:AdvancedControls) {
+        if ($null -ne $control) { $control.Visible = $Visible }
+    }
+    if ($Visible) {
+        $btnToggleAdvanced.Text = "隐藏高级诊断"
+    } else {
+        $btnToggleAdvanced.Text = "显示高级诊断"
+    }
+}
+
+function Toggle-AdvancedDiagnostics {
+    Set-AdvancedVisible (-not $script:AdvancedVisible)
+}
+
+function Set-StepLabel {
+    param([object]$Label, [string]$Text, [string]$State)
+    if ($null -eq $Label) { return }
+    $Label.Text = $Text + "：" + $State
+}
+
+function Update-StepStatus {
+    $step1 = "需要处理"
+    if (-not [string]::IsNullOrWhiteSpace($txtCoordinator.Text) -and $txtTokenStatus.Text -ne "未配置") { $step1 = "已完成" }
+    $step2 = "需要处理"
+    if (-not [string]::IsNullOrWhiteSpace($txtServerDir.Text)) { $step2 = "已完成" }
+    $step3 = "未完成"
+    if ($txtInstanceId.Text -like "acbh_instance_*" -and $txtDeviceId.Text -like "acbh_device_*" -and $txtInstanceId.Text -ne $txtDeviceId.Text) { $step3 = "已完成" }
+    $step4 = "未完成"
+    if ($txtCoordinatorCheckStatus.Text -in @("已连接", "不可达", "失败", "返回错误", "版本不匹配")) { $step4 = "已完成" }
+    $step5 = "未完成"
+    if ($txtRelayCheckStatus.Text -in @("已配置", "运行中")) { $step5 = "已完成" }
+    $step6 = "未完成"
+    if (-not [string]::IsNullOrWhiteSpace($txtPublicEndpoint.Text)) { $step6 = "已完成" }
+    Set-StepLabel $lblStep1 "步骤 1：填写 VPS 地址和访问令牌" $step1
+    Set-StepLabel $lblStep2 "步骤 2：选择 Minecraft 服务端目录" $step2
+    Set-StepLabel $lblStep3 "步骤 3：点击「一键初始化本机」" $step3
+    Set-StepLabel $lblStep4 "步骤 4：点击「测试连接」" $step4
+    Set-StepLabel $lblStep5 "步骤 5：点击「配置 VPS 中转」" $step5
+    Set-StepLabel $lblStep6 "步骤 6：启动服务端并让玩家连接公网地址" $step6
 }
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH v0.5 Minimal Core"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(920, 1360)
-$form.MinimumSize = New-Object System.Drawing.Size(880, 900)
+$form.Size = New-Object System.Drawing.Size(1280, 980)
+$form.MinimumSize = New-Object System.Drawing.Size(1100, 800)
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
+$form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
+$form.AutoScroll = $true
+
+$script:AdvancedControls = @()
+$script:AdvancedVisible = $false
+$toolTip = New-Object System.Windows.Forms.ToolTip
 
 $title = New-Object System.Windows.Forms.Label
-$title.Text = "ACBH v0.5 Minimal Core"
+$title.Text = "ACBH minimal-core"
 $title.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 18, [System.Drawing.FontStyle]::Bold)
 $title.Location = New-Object System.Drawing.Point(20, 16)
-$title.Size = New-Object System.Drawing.Size(420, 36)
+$title.Size = New-Object System.Drawing.Size(360, 36)
 $form.Controls.Add($title)
 
 $lblState = New-Object System.Windows.Forms.Label
-$lblState.Text = "State: starting"
-$lblState.Location = New-Object System.Drawing.Point(460, 24)
-$lblState.Size = New-Object System.Drawing.Size(380, 24)
+$lblState.Text = "状态：启动中"
+$lblState.Location = New-Object System.Drawing.Point(400, 24)
+$lblState.Size = New-Object System.Drawing.Size(760, 24)
 $form.Controls.Add($lblState)
 
-Add-Label "Body API" 24 70 | Out-Null
-$txtBodyApi = Add-TextBox 170 68 650 $true
-Add-Label "Config path" 24 104 | Out-Null
-$txtConfigPath = Add-TextBox 170 102 650 $true
-Add-Label "Mode" 24 138 | Out-Null
-$cmbMode = New-Object System.Windows.Forms.ComboBox
-$cmbMode.Location = New-Object System.Drawing.Point(170, 136)
-$cmbMode.Size = New-Object System.Drawing.Size(180, 24)
-$cmbMode.DropDownStyle = "DropDownList"
-[void]$cmbMode.Items.Add("remote-public")
-[void]$cmbMode.Items.Add("local-private")
-$cmbMode.SelectedItem = "remote-public"
-$form.Controls.Add($cmbMode)
+$grpSteps = Add-GroupBox "首次使用步骤" 24 58 1210 92
+$lblStep1 = Add-Label "步骤 1：填写 VPS 地址和访问令牌：需要处理" 18 26 $grpSteps 540
+$lblStep2 = Add-Label "步骤 2：选择 Minecraft 服务端目录：需要处理" 18 56 $grpSteps 540
+$lblStep3 = Add-Label "步骤 3：点击「一键初始化本机」：未完成" 600 26 $grpSteps 560
+$lblStep4 = Add-Label "步骤 4：点击「测试连接」：未完成" 600 56 $grpSteps 300
+$lblStep5 = Add-Label "步骤 5：点击「配置 VPS 中转」：未完成" 900 56 $grpSteps 280
+$lblStep6 = Add-Label "步骤 6：启动服务端并让玩家连接公网地址：未完成" 900 26 $grpSteps 300
 
-Add-Label "VPS 地址" 24 172 | Out-Null
-$txtCoordinator = Add-TextBox 170 170 650
-$txtCoordinator.Text = "http://YOUR_VPS_IP:6121"
-Add-Label "私人实例" 24 206 | Out-Null
-$txtInstanceName = Add-TextBox 170 204 250
-$txtInstanceName.Text = "私人 ACBH 实例"
-Add-Label "实例 ID" 450 206 | Out-Null
-$txtInstanceId = Add-TextBox 560 204 260 $true
-Add-Label "当前设备" 24 240 | Out-Null
-$txtDeviceName = Add-TextBox 170 238 250
-$txtDeviceName.Text = $env:COMPUTERNAME
-Add-Label "设备 ID" 450 240 | Out-Null
-$txtDeviceId = Add-TextBox 560 238 260 $true
-Add-Label "服务端名称" 24 274 | Out-Null
-$txtServerName = Add-TextBox 170 272 250
-$txtServerName.Text = "Minecraft 服务端"
-Add-Label "访问令牌状态" 450 274 | Out-Null
-$txtTokenStatus = Add-TextBox 560 272 260 $true
-$txtTokenStatus.Text = "未配置"
-Add-Label "服务端目录" 24 308 | Out-Null
-$txtServerDir = Add-TextBox 170 306 500
-Add-Button "Choose dir" 680 303 { Choose-ServerDir } | Out-Null
+$grpConnection = Add-GroupBox "连接 VPS Coordinator" 24 160 1210 126
+Add-Label "VPS 地址" 18 34 $grpConnection 120 | Out-Null
+$txtCoordinator = Add-TextBox 150 32 540 $false $grpConnection
+$toolTip.SetToolTip($txtCoordinator, "填写 Coordinator API 地址，例如 http://你的VPS_IP:6121。这里不是 Minecraft 进服端口 25565。")
+$lblCoordinatorHint = Add-Label "示例：http://你的VPS_IP:6121（不是 Minecraft 进服端口 25565）" 710 34 $grpConnection 460
+Add-Label "访问令牌" 18 76 $grpConnection 120 | Out-Null
+$txtAccessToken = Add-TextBox 150 74 540 $false $grpConnection $true
+$toolTip.SetToolTip($txtAccessToken, "访问令牌会脱敏保存；不在界面明文显示完整 token。")
+Add-Label "令牌状态" 710 76 $grpConnection 100 | Out-Null
+$txtTokenStatus = Add-TextBox 820 74 150 $true $grpConnection
+Set-Status $txtTokenStatus "not_configured" "token"
+Add-Label "VPS 状态" 990 76 $grpConnection 90 | Out-Null
+$txtCoordinatorCheckStatus = Add-TextBox 1080 74 110 $true $grpConnection
+Set-Status $txtCoordinatorCheckStatus "not_configured" "coordinator"
 
-Add-Label "本地 Body API" 24 342 | Out-Null
-$txtLocalBodyStatus = Add-TextBox 170 340 170 $true
-Add-Label "VPS Coordinator" 370 342 | Out-Null
-$txtCoordinatorCheckStatus = Add-TextBox 520 340 140 $true
-Add-Label "访问令牌验证" 24 376 | Out-Null
-$txtTokenValidationStatus = Add-TextBox 170 374 170 $true
-$txtTokenValidationStatus.Text = "未配置"
-Add-Label "Relay 状态" 370 376 | Out-Null
-$txtRelayCheckStatus = Add-TextBox 520 374 140 $true
-Add-Label "实际请求 URL" 24 410 | Out-Null
-$txtActualRequestUrl = Add-TextBox 170 408 650 $true
-Add-Label "协议版本" 24 444 | Out-Null
-$txtProtocol = Add-TextBox 170 442 120 $true
-Add-Label "能力" 310 444 | Out-Null
-$txtCapabilities = Add-TextBox 420 442 400 $true
-Add-Label "诊断提示" 24 478 | Out-Null
-$txtErrorDetails = Add-TextBox 170 476 650 $true
-$txtServerId = Add-TextBox 24 510 120 $true
-$txtServerId.Visible = $false
-$txtAdvancedDiagnostics = Add-TextBox 170 510 650 $true
+$grpIdentity = Add-GroupBox "本机身份" 24 296 1210 82
+Add-Label "私人实例名称" 18 36 $grpIdentity 120 | Out-Null
+$txtInstanceName = Add-TextBox 150 34 390 $false $grpIdentity
+Set-ControlText $txtInstanceName "私人 ACBH 实例"
+Add-Label "当前设备名称" 620 36 $grpIdentity 120 | Out-Null
+$txtDeviceName = Add-TextBox 750 34 390 $false $grpIdentity
+Set-ControlText $txtDeviceName $env:COMPUTERNAME
 
-Add-Button "Refresh health" 170 548 { Refresh-Health; Refresh-Identity } | Out-Null
-Add-Button "Load config" 330 548 { Load-Config; Refresh-Identity } | Out-Null
-Add-Button "Save config" 490 548 { Save-Config } | Out-Null
-Add-Button "Test connection" 170 586 { Test-Coordinator } | Out-Null
-Add-Button "Initialize" 330 586 { Run-Init } | Out-Null
-Add-Button "生成/注册身份" 490 586 { Register-Identity } | Out-Null
+$grpServer = Add-GroupBox "Minecraft 服务端" 24 388 1210 102
+Add-Label "服务器名称" 18 34 $grpServer 120 | Out-Null
+$txtServerName = Add-TextBox 150 32 390 $false $grpServer
+Set-ControlText $txtServerName "Minecraft 服务端"
+Add-Label "服务器目录" 18 70 $grpServer 120 | Out-Null
+$txtServerDir = Add-TextBox 150 68 820 $false $grpServer
+Add-Button "选择目录" 990 65 { Choose-ServerDir } $grpServer 150 30 | Out-Null
 
-$txtOperation = New-Object System.Windows.Forms.TextBox
-$txtOperation.Location = New-Object System.Drawing.Point(24, 626)
-$txtOperation.Size = New-Object System.Drawing.Size(840, 70)
-$txtOperation.Multiline = $true
-$txtOperation.ScrollBars = "Vertical"
-$txtOperation.ReadOnly = $true
-$txtOperation.Font = New-Object System.Drawing.Font("Consolas", 9)
-$form.Controls.Add($txtOperation)
+$grpListenerRelay = Add-GroupBox "监听 / VPS 中转" 24 500 1210 214
+
+function Add-GroupLabel {
+    param([string]$Text, [int]$X, [int]$Y, [int]$W = 120)
+    return Add-Label $Text $X $Y $grpListenerRelay $W
+}
+
+function Add-GroupTextBox {
+    param([int]$X, [int]$Y, [int]$W, [bool]$ReadOnly = $false, [int]$H = 24, [bool]$MultiLine = $false)
+    return Add-TextBox $X $Y $W $ReadOnly $grpListenerRelay $false $H $MultiLine
+}
+
+function Add-GroupButton {
+    param([string]$Text, [int]$X, [int]$Y, [scriptblock]$Click, [int]$W = 130)
+    return Add-Button $Text $X $Y $Click $grpListenerRelay $W 28
+}
+
+Add-GroupLabel "本地监听" 18 26 200 | Out-Null
+Add-GroupLabel "本地地址" 18 56 | Out-Null
+$txtListenerHost = Add-GroupTextBox 150 54 260
+Set-ControlText $txtListenerHost "127.0.0.1"
+Add-GroupLabel "本地端口" 390 56 | Out-Null
+$txtListenerPort = Add-GroupTextBox 520 54 180
+Set-ControlText $txtListenerPort "25565"
+Add-GroupLabel "公网中转" 18 98 200 | Out-Null
+Add-GroupLabel "公网地址" 18 98 | Out-Null
+$txtPublicHost = Add-GroupTextBox 150 96 260
+Add-GroupLabel "公网端口" 390 98 | Out-Null
+$txtPublicPort = Add-GroupTextBox 520 96 180
+Set-ControlText $txtPublicPort "25565"
+Add-GroupLabel "监听状态" 740 56 | Out-Null
+$txtListening = Add-GroupTextBox 850 54 120 $true
+Set-ControlText $txtListening "未知"
+Add-GroupLabel "公网端点" 740 98 | Out-Null
+$txtPublicEndpoint = Add-GroupTextBox 850 96 330 $true
+
+Add-GroupButton "保存监听" 150 136 { Save-ListenerConfig } 130 | Out-Null
+Add-GroupButton "刷新监听" 290 136 { Refresh-ListenerStatus } 130 | Out-Null
+Add-GroupButton "探测监听" 430 136 { Probe-Listener } 130 | Out-Null
+Add-GroupButton "配置 VPS 中转" 570 136 { Configure-Relay } 160 | Out-Null
+Add-GroupButton "中转状态" 740 136 { Refresh-RelayStatus } 130 | Out-Null
+
+Add-GroupLabel "本地端点" 18 174 | Out-Null
+$txtLocalEndpoint = Add-GroupTextBox 150 172 260 $true
+Add-GroupLabel "中转状态" 430 174 | Out-Null
+$txtRelayCheckStatus = Add-GroupTextBox 520 172 180 $true
+Set-Status $txtRelayCheckStatus "not_configured" "relay"
+Add-GroupLabel "警告" 740 174 | Out-Null
+$txtListenerWarnings = Add-GroupTextBox 850 172 330 $true
+
+$grpActions = Add-GroupBox "操作" 24 724 1210 82
+Add-Button "一键初始化本机" 18 32 { Run-LocalInit } $grpActions 170 32 | Out-Null
+Add-Button "保存配置" 200 32 { Save-Config; Update-StepStatus } $grpActions 140 32 | Out-Null
+Add-Button "测试连接" 352 32 { Test-Coordinator; Update-StepStatus } $grpActions 140 32 | Out-Null
+Add-Button "配置 VPS 中转" 504 32 { Configure-Relay; Update-StepStatus } $grpActions 160 32 | Out-Null
+Add-Button "刷新状态" 676 32 { Refresh-Health; Load-Config; Refresh-Identity; Refresh-RelayStatus; Update-StepStatus } $grpActions 140 32 | Out-Null
+Add-Button "生成/注册身份" 828 32 { Register-Identity; Update-StepStatus } $grpActions 150 32 | Out-Null
+
+$grpStatus = Add-GroupBox "状态" 24 816 1210 146
+Add-Label "本地 Body API" 18 34 $grpStatus 120 | Out-Null
+$txtLocalBodyStatus = Add-TextBox 150 32 160 $true $grpStatus
+Set-Status $txtLocalBodyStatus "unreachable" "body"
+Add-Label "访问令牌验证" 340 34 $grpStatus 120 | Out-Null
+$txtTokenValidationStatus = Add-TextBox 470 32 160 $true $grpStatus
+Set-Status $txtTokenValidationStatus "not_configured" "token"
+Add-Label "协议版本" 660 34 $grpStatus 90 | Out-Null
+$txtProtocol = Add-TextBox 750 32 120 $true $grpStatus
+Add-Label "版本" 900 34 $grpStatus 60 | Out-Null
+$txtCoordinatorVersion = Add-TextBox 960 32 220 $true $grpStatus
+Add-Label "诊断提示" 18 74 $grpStatus 120 | Out-Null
+$txtErrorDetails = Add-TextBox 150 72 1030 $true $grpStatus $false 54 $true
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(24, 710)
-$txtLog.Size = New-Object System.Drawing.Size(840, 48)
+$txtLog.Location = New-Object System.Drawing.Point(24, 976)
+$txtLog.Size = New-Object System.Drawing.Size(1210, 72)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtLog)
 
-$grpListenerRelay = New-Object System.Windows.Forms.GroupBox
-$grpListenerRelay.Text = "监听 / VPS 中转"
-$grpListenerRelay.Location = New-Object System.Drawing.Point(24, 772)
-$grpListenerRelay.Size = New-Object System.Drawing.Size(840, 236)
-$form.Controls.Add($grpListenerRelay)
+$btnToggleAdvanced = Add-Button "显示高级诊断" 24 1062 { Toggle-AdvancedDiagnostics } $form 170 32
 
-function Add-GroupLabel {
-    param([string]$Text, [int]$X, [int]$Y)
-    $label = New-Object System.Windows.Forms.Label
-    $label.Text = $Text
-    $label.Location = New-Object System.Drawing.Point($X, $Y)
-    $label.Size = New-Object System.Drawing.Size(120, 22)
-    $grpListenerRelay.Controls.Add($label)
-    return $label
-}
+$grpAdvanced = Add-GroupBox "高级诊断" 24 1106 1210 360
+Register-AdvancedControl $grpAdvanced
 
-function Add-GroupTextBox {
-    param([int]$X, [int]$Y, [int]$W, [bool]$ReadOnly = $false)
-    $box = New-Object System.Windows.Forms.TextBox
-    $box.Location = New-Object System.Drawing.Point($X, $Y)
-    $box.Size = New-Object System.Drawing.Size($W, 24)
-    $box.ReadOnly = $ReadOnly
-    $grpListenerRelay.Controls.Add($box)
-    return $box
-}
+Add-Label "Body API 地址" 18 34 $grpAdvanced 120 | Out-Null
+$txtBodyApi = Add-TextBox 150 32 430 $true $grpAdvanced
+Add-Label "配置文件" 610 34 $grpAdvanced 100 | Out-Null
+$txtConfigPath = Add-TextBox 720 32 460 $true $grpAdvanced
+Add-Label "模式" 18 74 $grpAdvanced 120 | Out-Null
+$cmbMode = New-Object System.Windows.Forms.ComboBox
+$cmbMode.Location = New-Object System.Drawing.Point(150, 72)
+$cmbMode.Size = New-Object System.Drawing.Size(180, 24)
+$cmbMode.DropDownStyle = "DropDownList"
+[void]$cmbMode.Items.Add("remote-public")
+[void]$cmbMode.Items.Add("local-private")
+$cmbMode.SelectedItem = "remote-public"
+$grpAdvanced.Controls.Add($cmbMode)
+Add-Label "实例 ID" 360 74 $grpAdvanced 80 | Out-Null
+$txtInstanceId = Add-TextBox 450 72 300 $true $grpAdvanced
+Add-Label "设备 ID" 780 74 $grpAdvanced 80 | Out-Null
+$txtDeviceId = Add-TextBox 870 72 310 $true $grpAdvanced
+Add-Label "legacyGroupId" 18 114 $grpAdvanced 120 | Out-Null
+$txtLegacyGroupId = Add-TextBox 150 112 300 $true $grpAdvanced
+Add-Label "legacyHostId" 480 114 $grpAdvanced 120 | Out-Null
+$txtLegacyHostId = Add-TextBox 610 112 300 $true $grpAdvanced
+$txtServerId = Add-TextBox 930 112 250 $true $grpAdvanced
+$txtServerId.Visible = $false
+Add-Label "实际请求 URL" 18 154 $grpAdvanced 120 | Out-Null
+$txtActualRequestUrl = Add-TextBox 150 152 1030 $true $grpAdvanced
+Add-Label "构建" 18 194 $grpAdvanced 120 | Out-Null
+$txtCoordinatorCommit = Add-TextBox 150 192 300 $true $grpAdvanced
+Add-Label "能力" 480 194 $grpAdvanced 120 | Out-Null
+$txtCapabilities = Add-TextBox 610 192 570 $true $grpAdvanced
+Add-Label "进程 ID" 18 234 $grpAdvanced 120 | Out-Null
+$txtListenerPid = Add-TextBox 150 232 120 $true $grpAdvanced
+Add-Label "进程" 300 234 $grpAdvanced 80 | Out-Null
+$txtListenerProcess = Add-TextBox 380 232 240 $true $grpAdvanced
+Add-Label "目录匹配" 650 234 $grpAdvanced 100 | Out-Null
+$txtServerDirMatched = Add-TextBox 750 232 120 $true $grpAdvanced
+Add-Label "启动命令" 18 274 $grpAdvanced 120 | Out-Null
+$txtListenerCommand = Add-TextBox 150 272 1030 $true $grpAdvanced
+Add-Label "中转原始状态" 18 314 $grpAdvanced 120 | Out-Null
+$txtRelayState = Add-TextBox 150 312 460 $true $grpAdvanced
+Add-Label "中转错误" 640 314 $grpAdvanced 90 | Out-Null
+$txtRelayError = Add-TextBox 730 312 450 $true $grpAdvanced
 
-function Add-GroupButton {
-    param([string]$Text, [int]$X, [int]$Y, [scriptblock]$Click)
-    $button = New-Object System.Windows.Forms.Button
-    $button.Text = $Text
-    $button.Location = New-Object System.Drawing.Point($X, $Y)
-    $button.Size = New-Object System.Drawing.Size(130, 28)
-    $button.Add_Click({ try { & $Click } catch { Show-Error $_.Exception.Message } }.GetNewClosure())
-    $grpListenerRelay.Controls.Add($button)
-    return $button
-}
+$txtAdvancedDiagnostics = Add-TextBox 24 1480 1210 $true $form $false 46 $true
+Register-AdvancedControl $txtAdvancedDiagnostics
 
-Add-GroupLabel "Local host" 16 28 | Out-Null
-$txtListenerHost = Add-GroupTextBox 118 26 140
-$txtListenerHost.Text = "127.0.0.1"
-Add-GroupLabel "Local port" 270 28 | Out-Null
-$txtListenerPort = Add-GroupTextBox 368 26 80
-$txtListenerPort.Text = "25565"
-Add-GroupLabel "Public host" 470 28 | Out-Null
-$txtPublicHost = Add-GroupTextBox 568 26 140
-Add-GroupLabel "Public port" 16 62 | Out-Null
-$txtPublicPort = Add-GroupTextBox 118 60 80
-$txtPublicPort.Text = "25565"
+$txtOperation = Add-TextBox 24 1540 1210 $true $form $false 86 $true
+$txtOperation.Font = New-Object System.Drawing.Font("Consolas", 9)
+Register-AdvancedControl $txtOperation
 
-Add-GroupButton "Save listener" 220 58 { Save-ListenerConfig } | Out-Null
-Add-GroupButton "Refresh listener" 360 58 { Refresh-ListenerStatus } | Out-Null
-Add-GroupButton "Probe listener" 500 58 { Probe-Listener } | Out-Null
-Add-GroupButton "Configure relay" 640 58 { Configure-Relay } | Out-Null
-Add-GroupButton "Relay status" 640 92 { Refresh-RelayStatus } | Out-Null
-
-Add-GroupLabel "Listening" 16 96 | Out-Null
-$txtListening = Add-GroupTextBox 118 94 80 $true
-Add-GroupLabel "PID" 214 96 | Out-Null
-$txtListenerPid = Add-GroupTextBox 258 94 80 $true
-Add-GroupLabel "Process" 350 96 | Out-Null
-$txtListenerProcess = Add-GroupTextBox 430 94 190 $true
-Add-GroupLabel "Dir matched" 16 130 | Out-Null
-$txtServerDirMatched = Add-GroupTextBox 118 128 80 $true
-Add-GroupLabel "Local endpoint" 214 130 | Out-Null
-$txtLocalEndpoint = Add-GroupTextBox 318 128 160 $true
-Add-GroupLabel "Public endpoint" 490 130 | Out-Null
-$txtPublicEndpoint = Add-GroupTextBox 600 128 210 $true
-Add-GroupLabel "Command" 16 160 | Out-Null
-$txtListenerCommand = Add-GroupTextBox 118 158 350 $true
-Add-GroupLabel "Warnings" 482 160 | Out-Null
-$txtListenerWarnings = Add-GroupTextBox 560 158 250 $true
-$txtRelayState = Add-GroupTextBox 16 190 390 $true
-$txtRelayError = Add-GroupTextBox 420 190 390 $true
-
-$grpBackup = New-Object System.Windows.Forms.GroupBox
-$grpBackup.Text = "备份 / 快照"
-$grpBackup.Location = New-Object System.Drawing.Point(24, 1022)
-$grpBackup.Size = New-Object System.Drawing.Size(840, 230)
-$form.Controls.Add($grpBackup)
+$grpBackup = Add-GroupBox "备份 / 快照" 24 1640 1210 220
+Register-AdvancedControl $grpBackup
 
 function Add-BackupLabel {
     param([string]$Text, [int]$X, [int]$Y)
-    $label = New-Object System.Windows.Forms.Label
-    $label.Text = $Text
-    $label.Location = New-Object System.Drawing.Point($X, $Y)
-    $label.Size = New-Object System.Drawing.Size(120, 22)
-    $grpBackup.Controls.Add($label)
-    return $label
+    return Add-Label $Text $X $Y $grpBackup 120
 }
 
 function Add-BackupTextBox {
-    param([int]$X, [int]$Y, [int]$W, [bool]$ReadOnly = $false)
-    $box = New-Object System.Windows.Forms.TextBox
-    $box.Location = New-Object System.Drawing.Point($X, $Y)
-    $box.Size = New-Object System.Drawing.Size($W, 24)
-    $box.ReadOnly = $ReadOnly
-    $grpBackup.Controls.Add($box)
-    return $box
+    param([int]$X, [int]$Y, [int]$W, [bool]$ReadOnly = $false, [int]$H = 24, [bool]$MultiLine = $false)
+    return Add-TextBox $X $Y $W $ReadOnly $grpBackup $false $H $MultiLine
 }
 
 function Add-BackupButton {
     param([string]$Text, [int]$X, [int]$Y, [scriptblock]$Click)
-    $button = New-Object System.Windows.Forms.Button
-    $button.Text = $Text
-    $button.Location = New-Object System.Drawing.Point($X, $Y)
-    $button.Size = New-Object System.Drawing.Size(130, 28)
-    $button.Add_Click({ try { & $Click } catch { Show-Error $_.Exception.Message } }.GetNewClosure())
-    $grpBackup.Controls.Add($button)
-    return $button
+    return Add-Button $Text $X $Y $Click $grpBackup 130 28
 }
 
-Add-BackupButton "Analyze backup" 16 26 { Analyze-Backup } | Out-Null
-Add-BackupButton "Upload backup" 156 26 { Upload-Backup } | Out-Null
-Add-BackupButton "List snapshots" 296 26 { Refresh-Snapshots } | Out-Null
-Add-BackupButton "Download latest" 436 26 { Download-LatestSnapshot } | Out-Null
-Add-BackupButton "Download selected" 576 26 { Download-SelectedSnapshot } | Out-Null
+Add-BackupButton "分析备份" 16 26 { Analyze-Backup } | Out-Null
+Add-BackupButton "上传备份" 156 26 { Upload-Backup } | Out-Null
+Add-BackupButton "列出快照" 296 26 { Refresh-Snapshots } | Out-Null
+Add-BackupButton "下载最新" 436 26 { Download-LatestSnapshot } | Out-Null
+Add-BackupButton "下载所选" 576 26 { Download-SelectedSnapshot } | Out-Null
 
-Add-BackupLabel "Snapshot ID" 16 66 | Out-Null
-$txtSnapshotId = Add-BackupTextBox 118 64 210
-Add-BackupLabel "Restore target" 344 66 | Out-Null
-$txtRestoreTargetDir = Add-BackupTextBox 450 64 220
-Add-BackupButton "Choose target" 680 61 { Choose-RestoreDir } | Out-Null
+Add-BackupLabel "快照 ID" 16 66 | Out-Null
+$txtSnapshotId = Add-BackupTextBox 118 64 260
+Add-BackupLabel "恢复目录" 410 66 | Out-Null
+$txtRestoreTargetDir = Add-BackupTextBox 520 64 460
+Add-BackupButton "选择目录" 1000 61 { Choose-RestoreDir } | Out-Null
 $chkAllowNonEmpty = New-Object System.Windows.Forms.CheckBox
-$chkAllowNonEmpty.Text = "allow non-empty target"
+$chkAllowNonEmpty.Text = "允许非空目录"
 $chkAllowNonEmpty.Location = New-Object System.Drawing.Point(118, 96)
 $chkAllowNonEmpty.Size = New-Object System.Drawing.Size(180, 24)
 $grpBackup.Controls.Add($chkAllowNonEmpty)
 
-Add-BackupLabel "Summary" 16 128 | Out-Null
-$txtBackupSummary = Add-BackupTextBox 118 126 690 $true
-Add-BackupLabel "Snapshots" 16 160 | Out-Null
-$txtSnapshotList = Add-BackupTextBox 118 158 340 $true
-Add-BackupLabel "Error" 470 160 | Out-Null
-$txtBackupError = Add-BackupTextBox 530 158 278 $true
+Add-BackupLabel "摘要" 16 128 | Out-Null
+$txtBackupSummary = Add-BackupTextBox 118 126 1060 $true
+Add-BackupLabel "快照" 16 160 | Out-Null
+$txtSnapshotList = Add-BackupTextBox 118 158 520 $true
+Add-BackupLabel "错误" 660 160 | Out-Null
+$txtBackupError = Add-BackupTextBox 720 158 458 $true
+
+Set-AdvancedVisible $false
+Update-StepStatus
 
 $form.Add_Shown({
     try {
@@ -992,8 +1386,9 @@ $form.Add_Shown({
         Refresh-Health
         Load-Config
         Refresh-Identity
+        Update-StepStatus
     } catch {
-        Show-Error ("Startup failed: " + $_.Exception.Message)
+        Show-ActionError "启动" $_
     }
 })
 

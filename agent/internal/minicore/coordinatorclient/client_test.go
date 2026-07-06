@@ -86,6 +86,22 @@ func TestResponseClassifiesAuthInvalidAndRouteMissing(t *testing.T) {
 	}
 }
 
+func TestResponseErrorFormatsCoordinatorServerErrorInChinese(t *testing.T) {
+	err := responseError(http.MethodGet, "http://example.test/health", http.StatusInternalServerError, `{"traceId":"tr_123"}`)
+	if err.ErrorCode != coreerrors.CoordinatorServerError {
+		t.Fatalf("errorCode = %s, want %s", err.ErrorCode, coreerrors.CoordinatorServerError)
+	}
+	if strings.Contains(err.Message, "server error") || strings.Contains(err.Suggestion, "Check the URL") {
+		t.Fatalf("server error was not localized: %#v", err)
+	}
+	if !strings.Contains(err.Message, "VPS Coordinator") || !strings.Contains(err.Suggestion, "HTTP 状态码") {
+		t.Fatalf("localized guidance missing: %#v", err)
+	}
+	if err.Details.HTTPStatus != http.StatusInternalServerError || err.Details.ResponseBody == "" {
+		t.Fatalf("details not preserved: %#v", err.Details)
+	}
+}
+
 func TestTransportErrorClassification(t *testing.T) {
 	cases := []struct {
 		name string

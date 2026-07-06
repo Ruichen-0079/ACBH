@@ -355,6 +355,127 @@ test("storage info endpoint reports local backend", async (t) => {
   }
 });
 
+test("health and capabilities expose alpha6 protocol compatibility", async (t) => {
+  const app = await buildTestApp(t);
+
+  try {
+    const health = await app.inject({ method: "GET", url: "/health" });
+    assert.equal(health.statusCode, 200, health.body);
+    const healthBody = health.json<{ version: string; coordinatorVersion: string; buildCommit: string; protocolVersion: number }>();
+    assert.equal(healthBody.version, "v0.5.1-public-relay-hotfix");
+    assert.equal(healthBody.coordinatorVersion, "v0.5.1-public-relay-hotfix");
+    assert.equal(healthBody.buildCommit, "dev");
+    assert.equal(healthBody.protocolVersion, 2);
+
+    const version = await app.inject({ method: "GET", url: "/version" });
+    assert.equal(version.statusCode, 200, version.body);
+    const versionBody = version.json<{ version: string; buildCommit: string; protocolVersion: number }>();
+    assert.equal(versionBody.version, "v0.5.1-public-relay-hotfix");
+    assert.equal(versionBody.buildCommit, "dev");
+    assert.equal(versionBody.protocolVersion, 2);
+
+    const capabilities = await app.inject({ method: "GET", url: "/v1/capabilities" });
+    assert.equal(capabilities.statusCode, 200, capabilities.body);
+    const body = capabilities.json<{ capabilities: string[]; coordinatorVersion: string; buildCommit: string; protocolVersion: number }>();
+    assert.equal(body.coordinatorVersion, "v0.5.1-public-relay-hotfix");
+    assert.equal(body.buildCommit, "dev");
+    assert.equal(body.protocolVersion, 2);
+    assert.ok(body.capabilities.includes("lease_renew_v1"));
+    assert.ok(body.capabilities.includes("world_backup_v1"));
+  } finally {
+    await app.close();
+  }
+});
+
+test("world backup list exposes success metadata for committed snapshots", async (t) => {
+  const store = createInMemoryCoordinatorStore();
+  const app = await buildTestApp(t, { store });
+
+  try {
+    const group = store.createGroup({ name: "World Backup Server", ownerName: "Owner" });
+    const joined = store.joinGroup({ groupId: group.groupId, accessKey: group.accessKey, displayName: "PlayerA" });
+    const host = store.registerHost({
+      groupId: group.groupId,
+      accessKey: group.accessKey,
+      memberId: joined.memberId,
+      deviceName: "PlayerA-PC",
+      platform: "windows",
+      agentVersion: "0.4.0-alpha6-test",
+    });
+    const lease = store.ensureActiveLease({ groupId: group.groupId, hostId: host.hostId, hostToken: host.hostToken });
+
+    const content = Buffer.from("level data");
+    const objectSha = sha256(content);
+    const upload = await app.inject({
+      method: "PUT",
+      url: `/v1/groups/${group.groupId}/world-objects/${objectSha}`,
+      headers: {
+        "content-type": "application/octet-stream",
+        "x-acbh-group-id": group.groupId,
+        ...hostHeaders(host.hostId, host.hostToken),
+      },
+      payload: content,
+    });
+    assert.equal(upload.statusCode, 200, upload.body);
+
+    const manifest = {
+      schemaVersion: 1,
+      snapshotId: "ws_meta_001",
+      groupId: group.groupId,
+      sourceHostId: host.hostId,
+      hostGeneration: lease.lease.generation,
+      createdAt: "2026-06-30T00:00:00.000Z",
+      consistent: true,
+      logicalSize: content.byteLength,
+      uploadedSize: content.byteLength,
+      fileCount: 1,
+      changedFileCount: 1,
+      deletedFileCount: 0,
+      files: [
+        {
+          path: "world/level.dat",
+          size: content.byteLength,
+          sha256: objectSha,
+          objectId: `sha256:${objectSha}`,
+        },
+      ],
+      deletedPaths: [],
+    };
+
+    const commit = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${group.groupId}/world-backups/commit`,
+      payload: {
+        hostId: host.hostId,
+        hostToken: host.hostToken,
+        hostGeneration: lease.lease.generation,
+        manifest,
+      },
+    });
+    assert.equal(commit.statusCode, 200, commit.body);
+
+    const list = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${group.groupId}/world-backups`,
+      headers: hostHeaders(host.hostId, host.hostToken),
+    });
+    assert.equal(list.statusCode, 200, list.body);
+    const snapshots = list.json<{ snapshots: Array<Record<string, unknown>> }>().snapshots;
+    assert.equal(snapshots.length, 1);
+    assert.equal(snapshots[0].snapshotId, "ws_meta_001");
+    assert.equal(snapshots[0].status, "success");
+    assert.equal(snapshots[0].createdAt, "2026-06-30T00:00:00.000Z");
+    assert.equal(snapshots[0].profileId, "minecraft-migratable");
+    assert.equal(snapshots[0].fileCount, 1);
+    assert.equal(snapshots[0].logicalSize, content.byteLength);
+    assert.equal(snapshots[0].uploadedSize, content.byteLength);
+    assert.equal(snapshots[0].canRestore, true);
+    assert.equal(snapshots[0].canDownload, true);
+  } finally {
+    await app.close();
+  }
+});
+
 test("bootstrap manifest exposes locally installed runtime packages", async (t) => {
   const packageDir = await mkdtemp(path.join(os.tmpdir(), "acbh-bootstrap-packages-"));
   const previous = process.env.ACBH_BOOTSTRAP_PACKAGE_DIR;
@@ -817,7 +938,7 @@ test("streaming object upload validates auth, hashes, limits, duplicates, and bi
 
 async function buildTestApp(
   t: TestContext,
-  options: { maxObjectBytes?: number } = {},
+  options: { maxObjectBytes?: number; store?: ReturnType<typeof createInMemoryCoordinatorStore> } = {},
 ): Promise<Awaited<ReturnType<typeof buildApp>>> {
   const root = await mkdtemp(path.join(os.tmpdir(), "acbh-api-storage-"));
   t.after(async () => {
