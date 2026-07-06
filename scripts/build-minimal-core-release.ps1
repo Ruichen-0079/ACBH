@@ -1,6 +1,6 @@
 param(
-    [string]$Version = "v0.5.1-public-relay-hotfix",
-    [string]$OutputDir = "dist/v0.5.1-public-relay-hotfix",
+    [string]$Version = "v0.5.1-public-relay-hotfix2",
+    [string]$OutputDir = "dist/v0.5.1-public-relay-hotfix2",
     [switch]$AllowDirty,
     [switch]$DryRun
 )
