@@ -34,6 +34,15 @@ const (
 	SnapshotNotFound             ErrorCode = "snapshot_not_found"
 	SnapshotDownloadFailed       ErrorCode = "snapshot_download_failed"
 	OperationTimeout             ErrorCode = "operation_timeout"
+	RelayHeartbeatStopped        ErrorCode = "relay_heartbeat_stopped"
+	RelayLeaseExpired            ErrorCode = "relay_lease_expired"
+	RelayTTLExpired              ErrorCode = "relay_ttl_expired"
+	RelayTunnelNotConnected      ErrorCode = "relay_tunnel_not_connected"
+	RelayTunnelExited            ErrorCode = "relay_tunnel_exited"
+	RelaySessionPumpExited       ErrorCode = "relay_session_pump_exited"
+	LocalMinecraftUnreachable    ErrorCode = "local_minecraft_unreachable"
+	CoordinatorConnectionLost    ErrorCode = "coordinator_connection_lost"
+	PublicListenerNotReady       ErrorCode = "public_listener_not_ready"
 )
 
 type Details struct {

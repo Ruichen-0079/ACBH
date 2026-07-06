@@ -4,73 +4,14 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
 )
 
-type fakeClient struct {
-	bootstrapErr *coreerrors.Error
-	ensureErr    *coreerrors.Error
-	hbErr        *coreerrors.Error
-	statusErr    *coreerrors.Error
-	lease        coordinatorclient.HostLeaseStatus
-
-	bootstrapReq coordinatorclient.BootstrapRequest
-	ensureGroupID string
-	ensureHostID  string
-	ensureToken   string
-	heartbeat     coordinatorclient.HeartbeatRequest
-}
-
-func (f *fakeClient) Bootstrap(ctx context.Context, accessToken string, req coordinatorclient.BootstrapRequest) (coordinatorclient.BootstrapResponse, *coreerrors.Error) {
-	f.bootstrapReq = req
-	if f.bootstrapErr != nil {
-		return coordinatorclient.BootstrapResponse{}, f.bootstrapErr
-	}
-	return coordinatorclient.BootstrapResponse{OK: true, InstanceID: req.InstanceID, DeviceID: req.DeviceID, GroupID: "grp", HostID: "host"}, nil
-}
-
-func (f *fakeClient) EnsureActiveLease(ctx context.Context, groupID string, hostID string, hostToken string) (coordinatorclient.EnsureActiveLeaseResponse, *coreerrors.Error) {
-	f.ensureGroupID = groupID
-	f.ensureHostID = hostID
-	f.ensureToken = hostToken
-	if f.ensureErr != nil {
-		return coordinatorclient.EnsureActiveLeaseResponse{}, f.ensureErr
-	}
-	return coordinatorclient.EnsureActiveLeaseResponse{OK: true, Lease: f.lease}, nil
-}
-
-func (f *fakeClient) SendHeartbeat(ctx context.Context, req coordinatorclient.HeartbeatRequest) (coordinatorclient.HeartbeatResponse, *coreerrors.Error) {
-	f.heartbeat = req
-	if f.hbErr != nil {
-		return coordinatorclient.HeartbeatResponse{}, f.hbErr
-	}
-	return coordinatorclient.HeartbeatResponse{OK: true, HostID: req.HostID, Status: req.Status}, nil
-}
-
-func (f *fakeClient) GetLeaseStatus(ctx context.Context, groupID string, hostID string, hostToken string) (coordinatorclient.HostLeaseStatus, *coreerrors.Error) {
-	if f.statusErr != nil {
-		return coordinatorclient.HostLeaseStatus{}, f.statusErr
-	}
-	return f.lease, nil
-}
-
-func testConfig() coreconfig.Config {
-	cfg := coreconfig.DefaultConfig()
-	cfg.CoordinatorURL = "http://121.40.101.224:6121"
-	cfg.Instance = coreconfig.InstanceConfig{InstanceID: "inst", DisplayName: "private", OwnerToken: "ht"}
-	cfg.Device = coreconfig.DeviceConfig{DeviceID: "dev", DisplayName: "pc", Platform: "windows"}
-	cfg.Server.ServerID = "srv"
-	cfg.Compat = coreconfig.CompatConfig{CoordinatorProtocol: 2, LegacyGroupID: "grp", LegacyMemberID: "mem", LegacyHostID: "host", LegacyHostToken: "ht"}
-	cfg.Relay.PublicHost = "121.40.101.224"
-	return cfg
-}
-
 func TestConfigureUsesConfigIdentity(t *testing.T) {
 	cfg := testConfig()
-	client := &fakeClient{lease: coordinatorclient.HostLeaseStatus{CurrentHostID: "host", CurrentHostIDMatches: true, LeaseValid: true, ServerTime: "now"}}
-	result, err := Service{Client: client}.Configure(context.Background(), cfg, ConfigureRequest{})
+	client := &fakeClient{lease: testLease()}
+	result, err := (&Service{Client: client}).Configure(context.Background(), cfg, ConfigureRequest{})
 	if err != nil {
 		t.Fatalf("Configure() error = %v", err)
 	}
@@ -90,12 +31,24 @@ func TestConfigureUsesConfigIdentity(t *testing.T) {
 
 func TestStatusReturnsStructuredState(t *testing.T) {
 	cfg := testConfig()
-	client := &fakeClient{lease: coordinatorclient.HostLeaseStatus{CurrentHostID: "host", CurrentHostIDMatches: true, LeaseValid: true, ServerTime: "2026-07-04T00:00:00Z"}}
-	state, err := Service{Client: client}.Status(context.Background(), cfg)
+	cfg.Relay.Enabled = true
+	client := &fakeClient{lease: testLease()}
+	svc := &Service{Client: client}
+	_, err := svc.Configure(context.Background(), cfg, ConfigureRequest{})
+	if err != nil {
+		t.Fatalf("Configure() error = %v", err)
+	}
+	rt := svc.runtimeOrCreate()
+	rt.keepalive = &keepaliveClient{coordinatorURL: cfg.CoordinatorURL, groupID: "grp", hostID: "host", hostToken: "ht", generation: 1}
+	rt.keepalive.mu.Lock()
+	rt.keepalive.connected = true
+	rt.keepalive.mu.Unlock()
+	rt.prober = alwaysReachable
+	state, err := svc.Status(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Status() error = %v", err)
 	}
-	if !state.Active || !state.CurrentHost || state.PublicEndpoint != "121.40.101.224:25565" {
+	if !state.Configured || !state.CurrentHost || state.PublicEndpoint != "121.40.101.224:25565" {
 		t.Fatalf("state = %#v", state)
 	}
 }
@@ -106,7 +59,7 @@ func TestRelayErrorsPropagateCodes(t *testing.T) {
 		t.Run(string(code), func(t *testing.T) {
 			cfg := testConfig()
 			client := &fakeClient{ensureErr: coreerrors.New(code, "failed", coreerrors.Details{URL: cfg.CoordinatorURL + "/x", Method: "POST", HTTPStatus: 403, ResponseBody: "{}"}, "")}
-			_, err := Service{Client: client}.Configure(context.Background(), cfg, ConfigureRequest{})
+			_, err := (&Service{Client: client}).Configure(context.Background(), cfg, ConfigureRequest{})
 			if err == nil || err.ErrorCode != code {
 				t.Fatalf("Configure() error = %v, want %s", err, code)
 			}
@@ -123,7 +76,7 @@ func TestRelayRouteMissingPreservesCoordinatorDetails(t *testing.T) {
 		ResponseBody: `{"message":"Route POST:/v1/groups/grp/lease/ensure-active not found"}`,
 	}
 	client := &fakeClient{ensureErr: coreerrors.New(coreerrors.CoordinatorRouteMissing, "route missing", details, "")}
-	_, err := Service{Client: client}.Configure(context.Background(), cfg, ConfigureRequest{})
+	_, err := (&Service{Client: client}).Configure(context.Background(), cfg, ConfigureRequest{})
 	if err == nil {
 		t.Fatal("Configure() error = nil")
 	}
@@ -136,12 +89,24 @@ func TestRelayDoesNotFallbackLocalhost(t *testing.T) {
 	cfg := testConfig()
 	cfg.CoordinatorURL = "http://public.test:6121"
 	cfg.Relay.PublicHost = ""
-	client := &fakeClient{lease: coordinatorclient.HostLeaseStatus{CurrentHostID: "host", CurrentHostIDMatches: true, LeaseValid: true}}
-	result, err := Service{Client: client}.Configure(context.Background(), cfg, ConfigureRequest{})
+	client := &fakeClient{lease: testLease()}
+	result, err := (&Service{Client: client}).Configure(context.Background(), cfg, ConfigureRequest{})
 	if err != nil {
 		t.Fatalf("Configure() error = %v", err)
 	}
 	if result.Relay.PublicEndpoint != "public.test:25565" {
 		t.Fatalf("public endpoint = %q", result.Relay.PublicEndpoint)
 	}
+}
+
+func testConfig() coreconfig.Config {
+	cfg := coreconfig.DefaultConfig()
+	cfg.CoordinatorURL = "http://121.40.101.224:6121"
+	cfg.Instance = coreconfig.InstanceConfig{InstanceID: "inst", DisplayName: "private", OwnerToken: "ht"}
+	cfg.Device = coreconfig.DeviceConfig{DeviceID: "dev", DisplayName: "pc", Platform: "windows"}
+	cfg.Server.ServerID = "srv"
+	cfg.Compat = coreconfig.CompatConfig{CoordinatorProtocol: 2, LegacyGroupID: "grp", LegacyMemberID: "mem", LegacyHostID: "host", LegacyHostToken: "ht"}
+	cfg.Relay.PublicHost = "121.40.101.224"
+	cfg.Relay.Enabled = true
+	return cfg
 }

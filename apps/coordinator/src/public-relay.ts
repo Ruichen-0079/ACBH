@@ -13,6 +13,7 @@ export interface PublicRelayOptions {
 }
 
 const defaultBufferSize = 32 * 1024;
+const tunnelAttachTimeoutMs = 15_000;
 
 export function selectPublicRelayGroup(
   groups: PublicGroupState[],
@@ -62,7 +63,7 @@ export class PublicRelayIngress {
 
     this.server = net.createServer((socket) => {
       this.handleIncoming(socket).catch((err) => {
-        this.opts.logger?.("Public relay ingress connection handler error", { err: String(err) });
+        this.opts.logger?.("Public relay ingress connection handler error", { err: String(err), event: "error reason" });
         try { socket.destroy(); } catch {}
       });
     });
@@ -83,43 +84,73 @@ export class PublicRelayIngress {
     }
   }
 
+  private log(event: string, meta: Record<string, unknown> = {}): void {
+    this.opts.logger?.(event, { event, ...meta });
+  }
+
   private async handleIncoming(tcpConn: net.Socket): Promise<void> {
+    const remoteAddress = `${tcpConn.remoteAddress ?? "unknown"}:${tcpConn.remotePort ?? 0}`;
+    this.log("public connection accepted", { remotePlayerAddress: remoteAddress });
+
     const groups = this.opts.store.listGroups();
     if (groups.length === 0) {
+      this.log("no active tunnel", { reason: "no groups configured", remotePlayerAddress: remoteAddress });
       tcpConn.end("No groups configured\n");
       return;
     }
 
     const group = selectPublicRelayGroup(groups, new Date(), this.opts.store.heartbeatTimeoutMs);
     if (group === null) {
+      this.log("no active tunnel", { reason: "no current host available", remotePlayerAddress: remoteAddress });
       tcpConn.end("No current host available for relay\n");
       return;
     }
     const groupId = group.groupId;
+    const currentHost = group.currentHostId === null
+      ? undefined
+      : group.hosts.find((host) => host.hostId === group.currentHostId);
 
-    // Create player session (unauthenticated creation is supported)
+    this.log("selected relay group", {
+      groupId,
+      instanceId: groupId,
+      deviceId: currentHost?.hostId,
+      remotePlayerAddress: remoteAddress,
+    });
+
+    if (currentHost?.hostId && !this.opts.relay.hasHostClient(groupId, currentHost.hostId)) {
+      this.log("waiting for relay client", {
+        groupId,
+        deviceId: currentHost.hostId,
+        remotePlayerAddress: remoteAddress,
+      });
+    }
+
     let playerSess: any;
     try {
       playerSess = this.opts.store.createPlayerSession({ groupId, displayName: "public-mc-player" });
     } catch (e) {
-      this.opts.logger?.("Failed to create player session", { err: String(e) });
+      this.log("error reason", { stage: "create player session", err: String(e), remotePlayerAddress: remoteAddress });
       tcpConn.destroy();
       return;
     }
 
-    // Create tunnel session (will be for current host)
     let tun: any;
     try {
       tun = this.opts.store.createTunnelSession({ groupId, playerId: playerSess.playerId });
     } catch (e) {
-      this.opts.logger?.("Failed to create tunnel session for public relay", { err: String(e) });
+      this.log("error reason", { stage: "create tunnel session", err: String(e), remotePlayerAddress: remoteAddress });
       tcpConn.destroy();
       return;
     }
 
     const sessionId = tun.sessionId;
+    this.log("tunnel session created", {
+      groupId,
+      sessionId,
+      deviceId: tun.hostId,
+      remotePlayerAddress: remoteAddress,
+    });
 
-    // Connect as the player side (this will trigger the WS route handler and registerPlayer)
     const wsURL = this.buildWSURL(groupId, sessionId);
     const headers: Record<string, string> = {};
     headers["X-ACBH-Player-ID"] = playerSess.playerId;
@@ -129,53 +160,65 @@ export class PublicRelayIngress {
     try {
       ws = new WebSocket(wsURL, { headers });
       await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("player WS open timeout")), 10000);
+        const t = setTimeout(() => reject(new Error("player WS open timeout")), tunnelAttachTimeoutMs);
         ws.once("open", () => { clearTimeout(t); resolve(); });
         ws.once("error", (e) => { clearTimeout(t); reject(e); });
         ws.once("close", () => { clearTimeout(t); reject(new Error("closed before open")); });
       });
     } catch (e) {
-      this.opts.logger?.("Public relay player WS connect failed", { err: String(e), sessionId });
+      this.log("timeout waiting for tunnel", {
+        sessionId,
+        err: String(e),
+        remotePlayerAddress: remoteAddress,
+      });
       tcpConn.destroy();
       return;
     }
 
-    // Bidirectional forward (same as playerproxy logic)
+    if (currentHost?.hostId && this.opts.relay.hasHostClient(groupId, currentHost.hostId)) {
+      this.log("relay client attached", { groupId, sessionId, deviceId: currentHost.hostId });
+    } else {
+      this.log("no active tunnel", {
+        reason: "relay client not connected",
+        groupId,
+        sessionId,
+        deviceId: currentHost?.hostId,
+        remotePlayerAddress: remoteAddress,
+      });
+    }
+
+    this.log("forwarding started", { groupId, sessionId, remotePlayerAddress: remoteAddress });
+
     const bufSize = defaultBufferSize;
     let closed = false;
-    const closeAll = () => {
+    const closeAll = (reason: string) => {
       if (closed) return;
       closed = true;
+      this.log("forwarding closed", { groupId, sessionId, reason, remotePlayerAddress: remoteAddress });
       try { tcpConn.destroy(); } catch {}
       try { if (ws.readyState === WebSocket.OPEN) ws.close(1000, "public relay close"); } catch {}
     };
 
-    // tcp -> ws
     tcpConn.on("data", (chunk: Buffer) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(chunk);
       }
     });
-    tcpConn.on("close", closeAll);
-    tcpConn.on("error", closeAll);
+    tcpConn.on("close", () => closeAll("player tcp closed"));
+    tcpConn.on("error", () => closeAll("player tcp error"));
 
-    // ws -> tcp
     ws.on("message", (data: Buffer) => {
       if (!tcpConn.destroyed) {
         tcpConn.write(data);
       }
     });
-    ws.on("close", closeAll);
-    ws.on("error", closeAll);
-
-    // context cancel not needed for now
+    ws.on("close", () => closeAll("player websocket closed"));
+    ws.on("error", () => closeAll("player websocket error"));
   }
 
   private buildWSURL(groupId: string, sessionId: string): string {
-    // Convert http(s) to ws(s) and point to localhost for internal connect
     let base = this.opts.coordinatorBaseURL || "http://127.0.0.1:6121";
     base = base.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
-    // ensure no trailing slash issues
     if (base.endsWith("/")) base = base.slice(0, -1);
     return `${base}/v1/groups/${groupId}/relay/tunnel-sessions/${sessionId}/player`;
   }

@@ -801,6 +801,57 @@ export async function registerRoutes(
   });
 
   app.get(
+    "/v1/groups/:groupId/relay/clients/host",
+    { websocket: true },
+    (socket, request) => {
+      const params = parseWSParams(groupStateParamsSchema, request, (code, reason) => {
+        try { socket.socket.close(code, reason); } catch { socket.destroy(); }
+      });
+      if (!params) return;
+
+      const hostId = singleHeader(request.headers["x-acbh-host-id"]);
+      const hostToken = singleHeader(request.headers["x-acbh-host-token"]);
+      const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
+
+      if (!hostId || !hostToken) {
+        socket.socket.close(4001, "Host authentication headers are required (X-ACBH-Host-ID, X-ACBH-Host-Token)");
+        return;
+      }
+      if (hostGeneration === null || hostGeneration === undefined) {
+        socket.socket.close(4001, "Host generation header is required (X-ACBH-Host-Generation)");
+        return;
+      }
+
+      try {
+        store.verifyHost({ groupId: params.groupId, hostId, hostToken });
+        const groupState = store.getGroupState(params.groupId);
+        if (groupState.currentHostId !== hostId) {
+          throw new StoreError(403, "Host is not current host for relay client", "not_current_host");
+        }
+        if (groupState.currentHostGeneration !== hostGeneration) {
+          throw new StoreError(409, "Host generation mismatch for relay client", "host_generation_mismatch");
+        }
+      } catch (error) {
+        if (error instanceof StoreError) {
+          socket.socket.close(4000 + error.statusCode, error.message);
+        } else {
+          socket.socket.close(4000, "Internal error");
+        }
+        return;
+      }
+
+      request.log.info({
+        event: "relay client attached",
+        groupId: params.groupId,
+        hostId,
+        hostGeneration,
+        remoteAddress: request.socket.remoteAddress,
+      });
+      relay.registerHostClient(params.groupId, hostId, socket.socket);
+    },
+  );
+
+  app.get(
     "/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/host",
     { websocket: true },
     (socket, request) => {

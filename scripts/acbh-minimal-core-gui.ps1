@@ -1139,13 +1139,10 @@ function Test-RelayStatus {
         $status = Invoke-BodyJson -Method "GET" -Path "/v1/relay/status"
         Set-RelayFields $status.relay
         if ($status.relay.active) {
-            Set-Status $txtRelayCheckStatus "running" "relay"
             Set-Status $txtRelayProbeStatus "running" "relay"
         } elseif ($status.relay.configured) {
-            Set-Status $txtRelayCheckStatus "configured" "relay"
-            Set-Status $txtRelayProbeStatus "configured" "relay"
+            Set-Status $txtRelayProbeStatus "failed" "relay"
         } else {
-            Set-Status $txtRelayCheckStatus "not_configured" "relay"
             Set-Status $txtRelayProbeStatus "not_configured" "relay"
         }
     } catch {
@@ -1300,14 +1297,84 @@ function Set-RelayConfigureDiagnostics {
     return $safe
 }
 
+function Format-RelayBoolStatus {
+    param([object]$Value, [string]$RunningLabel = "运行中", [string]$StoppedLabel = "停止")
+    if ($null -eq $Value) { return "未知" }
+    if ($Value -is [bool]) {
+        if ($Value) { return $RunningLabel }
+        return $StoppedLabel
+    }
+    $text = [string]$Value
+    if ($text -eq "True" -or $text -eq "true") { return $RunningLabel }
+    if ($text -eq "False" -or $text -eq "false") { return $StoppedLabel }
+    return (Normalize-GuiStatusValue $text "relay")
+}
+
 function Set-RelayFields {
     param([object]$Relay)
     Set-ControlText $txtPublicEndpoint $Relay.publicEndpoint
     Set-ControlText $txtLocalEndpoint $Relay.localEndpoint
-    Set-ControlText $txtRelayState "configured=$($Relay.configured) active=$($Relay.active) currentDevice=$($Relay.currentDevice) lastHeartbeatAt=$($Relay.lastHeartbeatAt)"
+    $stateParts = @(
+        "configured=$($Relay.configured)",
+        "active=$($Relay.active)",
+        "currentHost=$($Relay.currentHost)",
+        "currentDevice=$($Relay.currentDevice)",
+        "heartbeatRunning=$($Relay.heartbeatRunning)",
+        "heartbeatOk=$($Relay.heartbeatOk)",
+        "leaseRenewRunning=$($Relay.leaseRenewRunning)",
+        "leaseActive=$($Relay.leaseActive)",
+        "tunnelConnected=$($Relay.tunnelConnected)",
+        "sessionPumpRunning=$($Relay.sessionPumpRunning)",
+        "publicListenerReady=$($Relay.publicListenerReady)",
+        "localMinecraftReachable=$($Relay.localMinecraftReachable)",
+        "lastHeartbeatAt=$($Relay.lastHeartbeatAt)",
+        "leaseExpiresAt=$($Relay.leaseExpiresAt)",
+        "activeUntil=$($Relay.activeUntil)",
+        "lastDisconnectReason=$($Relay.lastDisconnectReason)"
+    )
+    Set-ControlText $txtRelayState ($stateParts -join " ")
+    if ($Relay.active) {
+        Set-Status $txtRelayCheckStatus "running" "relay"
+        if ($txtRelayEntryStatus) { Set-Status $txtRelayEntryStatus "running" "relay" }
+        $lblState.Text = "状态：公网入口可用（数据面已连通）"
+    } elseif ($Relay.configured) {
+        Set-Status $txtRelayCheckStatus "failed" "relay"
+        if ($txtRelayEntryStatus) { Set-Status $txtRelayEntryStatus "failed" "relay" }
+        $reason = if ($Relay.lastDisconnectReason) { $Relay.lastDisconnectReason } else { "relay_not_active" }
+        $lblState.Text = "状态：中转未就绪（$reason）"
+    } else {
+        Set-Status $txtRelayCheckStatus "not_configured" "relay"
+        if ($txtRelayEntryStatus) { Set-Status $txtRelayEntryStatus "not_configured" "relay" }
+    }
+    if ($txtHeartbeatStatus) {
+        Set-ControlText $txtHeartbeatStatus (Format-RelayBoolStatus $Relay.heartbeatRunning "运行中" "停止")
+    }
+    if ($txtLeaseStatus) {
+        Set-ControlText $txtLeaseStatus (Format-RelayBoolStatus $Relay.leaseActive "有效" "过期")
+    }
+    if ($txtTunnelStatus) {
+        Set-ControlText $txtTunnelStatus (Format-RelayBoolStatus $Relay.tunnelConnected "已连接" "未连接")
+    }
+    if ($txtSessionPumpStatus) {
+        Set-ControlText $txtSessionPumpStatus (Format-RelayBoolStatus $Relay.sessionPumpRunning "运行中" "停止")
+    }
+    if ($txtPublicListenerStatus) {
+        Set-ControlText $txtPublicListenerStatus (Format-RelayBoolStatus $Relay.publicListenerReady "已监听" "未监听")
+    }
+    if ($txtLocalMinecraftStatus) {
+        Set-ControlText $txtLocalMinecraftStatus (Format-RelayBoolStatus $Relay.localMinecraftReachable "已监听" "未监听")
+    }
     Set-ControlText $txtRelayError ""
+    if ($Relay.lastTunnelError) {
+        Set-ControlText $txtRelayError ("lastTunnelError=" + (Redact-Secrets ([string]$Relay.lastTunnelError)))
+    }
     if ($Relay.errors) {
-        Set-ControlText $txtRelayError (($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + (Redact-Secrets ([string]$_.details.responseBody)) }) -join "; ")
+        $errText = ($Relay.errors | ForEach-Object { $_.errorCode + " httpStatus=" + $_.details.httpStatus + " body=" + (Redact-Secrets ([string]$_.details.responseBody)) }) -join "; "
+        if ($Relay.lastTunnelError) { $errText = (Get-TrimmedTextSafe $txtRelayError) + "; " + $errText }
+        Set-ControlText $txtRelayError $errText
+    }
+    if (-not $Relay.active -and $Relay.lastDisconnectReason) {
+        Set-Diagnostics ("中转未激活：" + $Relay.lastDisconnectReason)
     }
 }
 
@@ -1323,7 +1390,9 @@ function Configure-Relay {
         Set-ControlText $txtOperation ($op | ConvertTo-Json -Depth 12)
         if ($op.state -eq "success") {
             Set-RelayFields $op.result.relay
-            Set-Status $txtRelayCheckStatus "configured" "relay"
+            if (-not $op.result.relay.active) {
+                Set-RelayConfigureDiagnostics $op.result.relay ("配置已提交，但公网入口尚未可用。原因：" + $op.result.relay.lastDisconnectReason)
+            }
             Update-StepStatus
             Add-Log "VPS 中转已配置。"
         } elseif ($op.error) {
@@ -1572,10 +1641,11 @@ function Update-StepStatus {
     $coordinatorStatus = Get-TrimmedTextSafe $txtCoordinatorCheckStatus "未配置"
     if ($coordinatorStatus -in @("已连接", "不可达", "失败", "返回错误", "版本不匹配")) { $step4 = "已完成" }
     $step5 = "未完成"
-    $relayStatus = Get-TrimmedTextSafe $txtRelayCheckStatus "未配置"
-    if ($relayStatus -in @("已配置", "运行中")) { $step5 = "已完成" }
+    $relayEntryStatus = if ($txtRelayEntryStatus) { Get-TrimmedTextSafe $txtRelayEntryStatus "未配置" } else { Get-TrimmedTextSafe $txtRelayCheckStatus "未配置" }
+    if ($relayEntryStatus -eq "运行中") { $step5 = "已完成" }
+    elseif ($relayEntryStatus -eq "失败") { $step5 = "已配置但未激活" }
     $step6 = "未完成"
-    if (-not [string]::IsNullOrWhiteSpace((Get-TrimmedTextSafe $txtPublicEndpoint))) { $step6 = "已完成" }
+    if ($relayEntryStatus -eq "运行中") { $step6 = "可连接" }
     Set-StepLabel $lblStep1 "步骤 1：填写 VPS 地址和访问令牌" $step1
     Set-StepLabel $lblStep2 "步骤 2：选择 Minecraft 服务端目录" $step2
     Set-StepLabel $lblStep3 "步骤 3：点击「一键初始化本机」" $step3
@@ -1707,7 +1777,7 @@ Add-Button "配置 VPS 中转" 504 32 { Configure-Relay; Update-StepStatus } $gr
 Add-Button "刷新状态" 676 32 { Refresh-Health; Load-Config; Refresh-Identity; Refresh-RelayStatus; Update-StepStatus } $grpActions 140 32 | Out-Null
 
 
-$grpStatus = Add-GroupBox "状态" 24 816 1210 146
+$grpStatus = Add-GroupBox "状态" 24 816 1210 186
 Add-Label "本地 Body API" 18 34 $grpStatus 120 | Out-Null
 $txtLocalBodyStatus = Add-TextBox 150 32 160 $true $grpStatus
 Set-Status $txtLocalBodyStatus "unreachable" "body"
@@ -1720,12 +1790,33 @@ Set-Status $txtBootstrapStatus "not_configured" "bootstrap"
 Add-Label "中转接口" 800 34 $grpStatus 90 | Out-Null
 $txtRelayProbeStatus = Add-TextBox 890 32 120 $true $grpStatus
 Set-Status $txtRelayProbeStatus "not_configured" "relay"
-Add-Label "协议版本" 1020 34 $grpStatus 90 | Out-Null
-$txtProtocol = Add-TextBox 1110 32 70 $true $grpStatus
-Add-Label "Coordinator 版本" 18 114 $grpStatus 120 | Out-Null
-$txtCoordinatorVersion = Add-TextBox 150 112 220 $true $grpStatus
-Add-Label "诊断提示" 18 74 $grpStatus 120 | Out-Null
-$txtErrorDetails = Add-TextBox 150 72 1030 $true $grpStatus $false 54 $true
+Add-Label "Heartbeat" 18 74 $grpStatus 120 | Out-Null
+$txtHeartbeatStatus = Add-TextBox 150 72 120 $true $grpStatus
+Set-ControlText $txtHeartbeatStatus "未知"
+Add-Label "Lease" 290 74 $grpStatus 60 | Out-Null
+$txtLeaseStatus = Add-TextBox 350 72 120 $true $grpStatus
+Set-ControlText $txtLeaseStatus "未知"
+Add-Label "Tunnel" 490 74 $grpStatus 60 | Out-Null
+$txtTunnelStatus = Add-TextBox 550 72 120 $true $grpStatus
+Set-ControlText $txtTunnelStatus "未知"
+Add-Label "Session Pump" 690 74 $grpStatus 100 | Out-Null
+$txtSessionPumpStatus = Add-TextBox 790 72 120 $true $grpStatus
+Set-ControlText $txtSessionPumpStatus "未知"
+Add-Label "VPS 25565" 930 74 $grpStatus 80 | Out-Null
+$txtPublicListenerStatus = Add-TextBox 1010 72 120 $true $grpStatus
+Set-ControlText $txtPublicListenerStatus "未知"
+Add-Label "本地 MC" 18 114 $grpStatus 70 | Out-Null
+$txtLocalMinecraftStatus = Add-TextBox 150 112 120 $true $grpStatus
+Set-ControlText $txtLocalMinecraftStatus "未知"
+Add-Label "公网入口" 290 114 $grpStatus 60 | Out-Null
+$txtRelayEntryStatus = Add-TextBox 350 112 120 $true $grpStatus
+Set-Status $txtRelayEntryStatus "not_configured" "relay"
+Add-Label "协议版本" 490 114 $grpStatus 90 | Out-Null
+$txtProtocol = Add-TextBox 580 112 70 $true $grpStatus
+Add-Label "Coordinator 版本" 670 114 $grpStatus 120 | Out-Null
+$txtCoordinatorVersion = Add-TextBox 790 112 410 $true $grpStatus
+Add-Label "诊断提示" 18 154 $grpStatus 120 | Out-Null
+$txtErrorDetails = Add-TextBox 150 152 1030 $true $grpStatus $false 24 $true
 
 $txtLog = New-Object System.Windows.Forms.TextBox
 $txtLog.Location = New-Object System.Drawing.Point(24, 976)

@@ -675,6 +675,25 @@ function hostHeaders(host: HostInfo, generation: number): Record<string, string>
   return { "x-acbh-host-id": host.hostId, "x-acbh-host-token": host.hostToken, "x-acbh-host-generation": String(generation) };
 }
 
+test("relay host client websocket registers and stays open", async () => {
+  const ctx = await setupRelayTest();
+  try {
+    const { store, port } = ctx;
+    const host = makeHost(store, "host");
+    heartbeat(store, host, "standby");
+    completeTakeover(store, host);
+
+    const url = `ws://127.0.0.1:${port}/v1/groups/${host.groupId}/relay/clients/host`;
+    const ws = new WebSocket(url, { headers: hostHeaders(host, 1) });
+    await waitForOpen(ws);
+    await sleep(100);
+    ws.close();
+    await waitForClose(ws);
+  } finally {
+    await ctx.close();
+  }
+});
+
 function connectRelayWS(port: number, groupId: string, sessionId: string, side: string, headers: Record<string, string>): WebSocket {
   const url = `ws://127.0.0.1:${port}/v1/groups/${groupId}/relay/tunnel-sessions/${sessionId}/${side}`;
   return new WebSocket(url, { headers });

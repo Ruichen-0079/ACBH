@@ -11,12 +11,60 @@ export interface RelayPair {
   closedAt?: string;
 }
 
+export interface RelayHostClient {
+  groupId: string;
+  hostId: string;
+  connectedAt: string;
+  ws: WebSocket;
+}
+
 export class RelayManager {
   private readonly pairs = new Map<string, RelayPair>();
+  private readonly hostClients = new Map<string, RelayHostClient>();
   private readonly store: InMemoryCoordinatorStore;
 
   constructor(store: InMemoryCoordinatorStore) {
     this.store = store;
+  }
+
+  registerHostClient(groupId: string, hostId: string, ws: WebSocket): void {
+    const key = `${groupId}:${hostId}`;
+    const existing = this.hostClients.get(key);
+    if (existing && existing.ws.readyState === WebSocket.OPEN) {
+      try { existing.ws.close(4000, "Replaced by newer relay client"); } catch {}
+    }
+    const client: RelayHostClient = {
+      groupId,
+      hostId,
+      connectedAt: new Date().toISOString(),
+      ws,
+    };
+    this.hostClients.set(key, client);
+    ws.on("close", () => {
+      const current = this.hostClients.get(key);
+      if (current?.ws === ws) {
+        this.hostClients.delete(key);
+      }
+    });
+    ws.on("error", () => {
+      const current = this.hostClients.get(key);
+      if (current?.ws === ws) {
+        this.hostClients.delete(key);
+      }
+    });
+  }
+
+  hasHostClient(groupId: string, hostId: string): boolean {
+    const client = this.hostClients.get(`${groupId}:${hostId}`);
+    return client !== undefined && client.ws.readyState === WebSocket.OPEN;
+  }
+
+  getHostClient(groupId: string, hostId: string): RelayHostClient | undefined {
+    const client = this.hostClients.get(`${groupId}:${hostId}`);
+    if (client && client.ws.readyState === WebSocket.OPEN) {
+      return client;
+    }
+    return undefined;
   }
 
   registerHost(sessionId: string, groupId: string, ws: WebSocket): void {

@@ -3,11 +3,10 @@ package relay
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
@@ -20,23 +19,13 @@ type Client interface {
 	EnsureActiveLease(ctx context.Context, groupID string, hostID string, hostToken string) (coordinatorclient.EnsureActiveLeaseResponse, *coreerrors.Error)
 	SendHeartbeat(ctx context.Context, req coordinatorclient.HeartbeatRequest) (coordinatorclient.HeartbeatResponse, *coreerrors.Error)
 	GetLeaseStatus(ctx context.Context, groupID string, hostID string, hostToken string) (coordinatorclient.HostLeaseStatus, *coreerrors.Error)
+	ListTunnelSessions(ctx context.Context, groupID string) ([]coordinatorclient.TunnelSession, *coreerrors.Error)
 }
 
 type ConfigureRequest struct {
 	LocalMinecraftHost  string `json:"localMinecraftHost,omitempty"`
 	LocalMinecraftPort  int    `json:"localMinecraftPort,omitempty"`
 	PublicMinecraftPort int    `json:"publicMinecraftPort,omitempty"`
-}
-
-type State struct {
-	Configured      bool                `json:"configured"`
-	Active          bool                `json:"active"`
-	PublicEndpoint  string              `json:"publicEndpoint"`
-	LocalEndpoint   string              `json:"localEndpoint"`
-	CurrentHost     bool                `json:"currentHost"`
-	CurrentDevice   bool                `json:"currentDevice"`
-	LastHeartbeatAt string              `json:"lastHeartbeatAt,omitempty"`
-	Errors          []*coreerrors.Error `json:"errors"`
 }
 
 type ConfigureResult struct {
@@ -47,9 +36,21 @@ type ConfigureResult struct {
 type Service struct {
 	Client     Client
 	HTTPClient *http.Client
+
+	mu      sync.Mutex
+	runtime *Runtime
 }
 
-func (s Service) Configure(ctx context.Context, cfg coreconfig.Config, req ConfigureRequest) (ConfigureResult, *coreerrors.Error) {
+func (s *Service) runtimeOrCreate() *Runtime {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runtime == nil {
+		s.runtime = NewRuntime(s.Client, s.HTTPClient)
+	}
+	return s.runtime
+}
+
+func (s *Service) Configure(ctx context.Context, cfg coreconfig.Config, req ConfigureRequest) (ConfigureResult, *coreerrors.Error) {
 	if err := validate(cfg); err != nil {
 		return ConfigureResult{}, err
 	}
@@ -58,13 +59,9 @@ func (s Service) Configure(ctx context.Context, cfg coreconfig.Config, req Confi
 		return ConfigureResult{}, identityErr
 	}
 	req = applyRequestDefaults(cfg, req)
-	client := s.Client
+	client := s.clientOrCreate(cfg)
 	if client == nil {
-		created, err := coordinatorclient.NewWithHTTPClient(cfg.CoordinatorURL, s.HTTPClient)
-		if err != nil {
-			return ConfigureResult{}, err
-		}
-		client = created
+		return ConfigureResult{}, coreerrors.New(coreerrors.CoordinatorUnreachable, "coordinator client unavailable", coreerrors.Details{CoordinatorURL: cfg.CoordinatorURL}, "")
 	}
 	if _, bootstrapErr := client.Bootstrap(ctx, coordIdentity.OwnerToken, coordinatorclient.BootstrapRequest{
 		InstanceID:   cfg.Instance.InstanceID,
@@ -94,13 +91,21 @@ func (s Service) Configure(ctx context.Context, cfg coreconfig.Config, req Confi
 	if hbErr != nil {
 		return ConfigureResult{}, hbErr
 	}
-	state := stateFromLease(cfg, req, lease.Lease)
+
+	cfg.Relay.Enabled = true
+	cfg.Listener.LocalHost = req.LocalMinecraftHost
+	cfg.Listener.LocalPort = req.LocalMinecraftPort
+	cfg.Relay.MinecraftPort = req.PublicMinecraftPort
+
+	rt := s.runtimeOrCreate()
+	rt.Start(ctx, cfg, req, coordIdentity, lease.Lease.Generation)
+
+	state := rt.Snapshot(cfg, lease.Lease)
 	state.Configured = true
-	state.Active = true
 	return ConfigureResult{OK: true, Relay: state}, nil
 }
 
-func (s Service) Status(ctx context.Context, cfg coreconfig.Config) (State, *coreerrors.Error) {
+func (s *Service) Status(ctx context.Context, cfg coreconfig.Config) (State, *coreerrors.Error) {
 	if err := validate(cfg); err != nil {
 		return State{}, err
 	}
@@ -108,35 +113,45 @@ func (s Service) Status(ctx context.Context, cfg coreconfig.Config) (State, *cor
 	if identityErr != nil {
 		return State{}, identityErr
 	}
-	req := applyRequestDefaults(cfg, ConfigureRequest{})
-	client := s.Client
+	client := s.clientOrCreate(cfg)
 	if client == nil {
-		created, err := coordinatorclient.NewWithHTTPClient(cfg.CoordinatorURL, s.HTTPClient)
-		if err != nil {
-			return State{}, err
-		}
-		client = created
+		state := baseStateFromConfig(cfg, ConfigureRequest{})
+		state.Errors = append(state.Errors, coreerrors.New(coreerrors.CoordinatorUnreachable, "coordinator client unavailable", coreerrors.Details{CoordinatorURL: cfg.CoordinatorURL}, ""))
+		return finalizeState(state), nil
 	}
 	lease, leaseErr := client.GetLeaseStatus(ctx, coordIdentity.GroupID, coordIdentity.HostID, coordIdentity.HostToken)
 	if leaseErr != nil {
-		state := stateFromLease(cfg, req, coordinatorclient.HostLeaseStatus{})
+		state := baseStateFromConfig(cfg, ConfigureRequest{})
 		state.Errors = append(state.Errors, leaseErr)
-		return state, nil
+		rt := s.runtimeOrCreate()
+		if rt.IsRunning() {
+			return rt.Snapshot(cfg, coordinatorclient.HostLeaseStatus{}), nil
+		}
+		return finalizeState(state), nil
 	}
-	return stateFromLease(cfg, req, lease), nil
+
+	rt := s.runtimeOrCreate()
+	if !rt.IsRunning() && cfg.Relay.Enabled {
+		req := applyRequestDefaults(cfg, ConfigureRequest{})
+		rt.Start(ctx, cfg, req, coordIdentity, lease.Generation)
+	}
+	return rt.Snapshot(cfg, lease), nil
 }
 
 func stateFromLease(cfg coreconfig.Config, req ConfigureRequest, lease coordinatorclient.HostLeaseStatus) State {
 	current := lease.CurrentHostIDMatches || (lease.CurrentHostID != "" && lease.CurrentHostID == cfg.Compat.LegacyHostID)
-	return State{
-		Configured:      cfg.Relay.Enabled,
-		Active:          cfg.Relay.Enabled && current && lease.LeaseValid,
-		PublicEndpoint:  net.JoinHostPort(publicHost(cfg), strconv.Itoa(req.PublicMinecraftPort)),
-		LocalEndpoint:   net.JoinHostPort(req.LocalMinecraftHost, strconv.Itoa(req.LocalMinecraftPort)),
-		CurrentHost:     current,
-		CurrentDevice:   current,
-		LastHeartbeatAt: lease.ServerTime,
+	state := State{
+		Configured:              cfg.Relay.Enabled,
+		PublicEndpoint:          netJoinHostPort(publicHost(cfg), req.PublicMinecraftPort),
+		LocalEndpoint:           netJoinHostPort(req.LocalMinecraftHost, req.LocalMinecraftPort),
+		CurrentHost:             current,
+		CurrentDevice:           current,
+		LastHeartbeatAt:         lease.ServerTime,
+		HeartbeatIntervalSeconds: defaultHeartbeatIntervalSeconds,
+		LeaseActive:             lease.LeaseValid,
 	}
+	applyLeaseTiming(&state, lease.LeaseExpiresAt, lease.ServerTime)
+	return finalizeState(state)
 }
 
 func applyRequestDefaults(cfg coreconfig.Config, req ConfigureRequest) ConfigureRequest {
@@ -173,4 +188,15 @@ func publicHost(cfg coreconfig.Config) string {
 		return parsed.Hostname()
 	}
 	return ""
+}
+
+func (s *Service) clientOrCreate(cfg coreconfig.Config) Client {
+	if s.Client != nil {
+		return s.Client
+	}
+	created, err := coordinatorclient.NewWithHTTPClient(cfg.CoordinatorURL, s.HTTPClient)
+	if err != nil {
+		return nil
+	}
+	return created
 }

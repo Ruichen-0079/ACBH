@@ -34,7 +34,7 @@ type Server struct {
 	Operations  *operations.Store
 	HTTPClient  *http.Client
 	Listener    minilistener.Service
-	Relay       minirelay.Service
+	Relay       *minirelay.Service
 	Backup      minibackup.Service
 	httpServer  *http.Server
 }
@@ -257,6 +257,20 @@ func (s *Server) handleRelayConfigure(w http.ResponseWriter, r *http.Request) {
 	result, err := service.Configure(r.Context(), cfg, req)
 	if err != nil {
 		writeJSON(w, statusForCoreError(err), s.Operations.Fail(op, err))
+		return
+	}
+	cfg.Relay.Enabled = true
+	if req.LocalMinecraftHost != "" {
+		cfg.Listener.LocalHost = req.LocalMinecraftHost
+	}
+	if req.LocalMinecraftPort > 0 {
+		cfg.Listener.LocalPort = req.LocalMinecraftPort
+	}
+	if req.PublicMinecraftPort > 0 {
+		cfg.Relay.MinecraftPort = req.PublicMinecraftPort
+	}
+	if saveErr := s.ConfigStore.Save(cfg); saveErr != nil {
+		writeJSON(w, statusForCoreError(saveErr), s.Operations.Fail(op, saveErr))
 		return
 	}
 	writeJSON(w, http.StatusOK, s.Operations.Complete(op, result, "relay configured"))
@@ -806,12 +820,13 @@ func (s *Server) listenerStatus(ctx context.Context) (minilistener.Status, *core
 	return service.Status(ctx, cfg)
 }
 
-func (s *Server) relayService() minirelay.Service {
-	service := s.Relay
-	if service.HTTPClient == nil {
-		service.HTTPClient = s.HTTPClient
+func (s *Server) relayService() *minirelay.Service {
+	if s.Relay == nil {
+		s.Relay = &minirelay.Service{HTTPClient: s.HTTPClient}
+	} else if s.Relay.HTTPClient == nil {
+		s.Relay.HTTPClient = s.HTTPClient
 	}
-	return service
+	return s.Relay
 }
 
 func (s *Server) backupService() minibackup.Service {

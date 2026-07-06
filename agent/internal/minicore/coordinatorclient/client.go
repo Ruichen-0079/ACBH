@@ -85,6 +85,18 @@ type EnsureActiveLeaseResponse struct {
 	Message string          `json:"message"`
 }
 
+type TunnelSession struct {
+	SessionID             string `json:"sessionId"`
+	GroupID               string `json:"groupId"`
+	HostID                string `json:"hostId"`
+	PlayerID              string `json:"playerId"`
+	Mode                  string `json:"mode"`
+	Status                string `json:"status"`
+	CurrentHostGeneration int    `json:"currentHostGeneration"`
+	CreatedAt             string `json:"createdAt"`
+	ExpiresAt             string `json:"expiresAt"`
+}
+
 type BootstrapRequest struct {
 	InstanceID   string `json:"instanceId"`
 	InstanceName string `json:"instanceName"`
@@ -282,6 +294,12 @@ func (c *Client) EnsureActiveLeaseWithGeneration(ctx context.Context, groupID st
 func (c *Client) SendHeartbeat(ctx context.Context, req HeartbeatRequest) (HeartbeatResponse, *coreerrors.Error) {
 	var out HeartbeatResponse
 	err := c.doJSON(ctx, http.MethodPost, "/v1/hosts/heartbeat", req, nil, &out)
+	return out, err
+}
+
+func (c *Client) ListTunnelSessions(ctx context.Context, groupID string) ([]TunnelSession, *coreerrors.Error) {
+	var out []TunnelSession
+	err := c.doJSON(ctx, http.MethodGet, "/v1/groups/"+url.PathEscape(groupID)+"/tunnel-sessions", nil, nil, &out)
 	return out, err
 }
 
