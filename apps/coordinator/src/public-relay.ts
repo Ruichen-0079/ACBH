@@ -144,7 +144,7 @@ export class PublicRelayIngress {
     }
 
     const sessionId = tun.sessionId;
-    this.opts.relay.setRemotePlayerAddress(sessionId, remoteAddress);
+    this.opts.relay.setRemotePlayerAddress(sessionId, remoteAddress, groupId);
     this.log("tunnel session created", {
       groupId,
       sessionId,
@@ -212,6 +212,15 @@ export class PublicRelayIngress {
       try { if (ws.readyState === WebSocket.OPEN) ws.close(1000, "public relay close"); } catch {}
     };
 
+    ws.on("message", (data: Buffer) => {
+      if (closed || tcpConn.destroyed) return;
+      const chunk = Buffer.from(data);
+      tcpConn.write(chunk);
+      bytesLocalToPlayer += chunk.length;
+    });
+    ws.on("close", () => closeAll("player websocket closed"));
+    ws.on("error", (e) => closeAll("player websocket error", String(e)));
+
     tcpConn.on("data", (chunk: Buffer) => {
       if (closed) return;
       if (!upstreamCopyStarted) {
@@ -263,15 +272,6 @@ export class PublicRelayIngress {
       }
     }
     pendingTcpChunks.length = 0;
-
-    ws.on("message", (data: Buffer) => {
-      if (closed || tcpConn.destroyed) return;
-      const chunk = Buffer.from(data);
-      tcpConn.write(chunk);
-      bytesLocalToPlayer += chunk.length;
-    });
-    ws.on("close", () => closeAll("player websocket closed"));
-    ws.on("error", (e) => closeAll("player websocket error", String(e)));
   }
 
   private buildWSURL(groupId: string, sessionId: string): string {

@@ -362,22 +362,22 @@ test("health and capabilities expose alpha6 protocol compatibility", async (t) =
     const health = await app.inject({ method: "GET", url: "/health" });
     assert.equal(health.statusCode, 200, health.body);
     const healthBody = health.json<{ version: string; coordinatorVersion: string; buildCommit: string; protocolVersion: number }>();
-    assert.equal(healthBody.version, "v0.5.1-public-relay-hotfix");
-    assert.equal(healthBody.coordinatorVersion, "v0.5.1-public-relay-hotfix");
+    assert.equal(healthBody.version, "v0.5.1-public-relay-hotfix4");
+    assert.equal(healthBody.coordinatorVersion, "v0.5.1-public-relay-hotfix4");
     assert.equal(healthBody.buildCommit, "dev");
     assert.equal(healthBody.protocolVersion, 2);
 
     const version = await app.inject({ method: "GET", url: "/version" });
     assert.equal(version.statusCode, 200, version.body);
     const versionBody = version.json<{ version: string; buildCommit: string; protocolVersion: number }>();
-    assert.equal(versionBody.version, "v0.5.1-public-relay-hotfix");
+    assert.equal(versionBody.version, "v0.5.1-public-relay-hotfix4");
     assert.equal(versionBody.buildCommit, "dev");
     assert.equal(versionBody.protocolVersion, 2);
 
     const capabilities = await app.inject({ method: "GET", url: "/v1/capabilities" });
     assert.equal(capabilities.statusCode, 200, capabilities.body);
     const body = capabilities.json<{ capabilities: string[]; coordinatorVersion: string; buildCommit: string; protocolVersion: number }>();
-    assert.equal(body.coordinatorVersion, "v0.5.1-public-relay-hotfix");
+    assert.equal(body.coordinatorVersion, "v0.5.1-public-relay-hotfix4");
     assert.equal(body.buildCommit, "dev");
     assert.equal(body.protocolVersion, 2);
     assert.ok(body.capabilities.includes("lease_renew_v1"));

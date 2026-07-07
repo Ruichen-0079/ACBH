@@ -418,6 +418,82 @@ function Test-GuiStaticChecks {
     }
 }
 
+function Test-GuiVisibleTextFits {
+    param([object]$Root)
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+    Add-Type -AssemblyName System.Drawing | Out-Null
+
+    $failures = New-Object System.Collections.Generic.List[string]
+
+    function Measure-GuiTextWidth {
+        param([object]$Control)
+        $font = $Control.Font
+        if ($null -eq $font) { $font = $script:form.Font }
+        return [System.Windows.Forms.TextRenderer]::MeasureText([string]$Control.Text, $font).Width
+    }
+
+    function Test-GuiControlText {
+        param([object]$Control)
+        if ($null -eq $Control -or [string]::IsNullOrWhiteSpace([string]$Control.Text)) { return }
+        $type = $Control.GetType().FullName
+        $width = [int]$Control.Width
+        if ($width -le 0) { return }
+        $textWidth = Measure-GuiTextWidth $Control
+        $required = $textWidth
+        if ($type -eq "System.Windows.Forms.Button") { $required += 18 }
+        elseif ($type -eq "System.Windows.Forms.CheckBox") { $required += 28 }
+        elseif ($type -eq "System.Windows.Forms.GroupBox") { $required += 24 }
+        elseif ($type -ne "System.Windows.Forms.Label") { return }
+        if ($required -gt ($width + 2)) {
+            $failures.Add(("{0} text too wide: '{1}' requires {2}px, has {3}px" -f $type, $Control.Text, $required, $width))
+        }
+    }
+
+    function Walk-GuiControls {
+        param([object]$Control)
+        Test-GuiControlText $Control
+        foreach ($child in $Control.Controls) {
+            Walk-GuiControls $child
+        }
+    }
+
+    function Test-GuiSiblingOverlap {
+        param([object]$Parent)
+        function Get-GuiLayoutRect {
+            param([object]$Control)
+            if ($Control.GetType().FullName -eq "System.Windows.Forms.Label") {
+                $width = [Math]::Min([int]$Control.Width, (Measure-GuiTextWidth $Control) + 2)
+                $height = [Math]::Min([int]$Control.Height, [System.Windows.Forms.TextRenderer]::MeasureText([string]$Control.Text, $Control.Font).Height)
+                return New-Object System.Drawing.Rectangle ([int]$Control.Left), ([int]$Control.Top), $width, $height
+            }
+            return $Control.Bounds
+        }
+
+        $children = @($Parent.Controls | Where-Object {
+            $null -ne $_ -and [int]$_.Width -gt 0 -and [int]$_.Height -gt 0
+        })
+        for ($i = 0; $i -lt $children.Count; $i++) {
+            for ($j = $i + 1; $j -lt $children.Count; $j++) {
+                $a = $children[$i]
+                $b = $children[$j]
+                $intersection = [System.Drawing.Rectangle]::Intersect((Get-GuiLayoutRect $a), (Get-GuiLayoutRect $b))
+                if ($intersection.Width -gt 0 -and $intersection.Height -gt 0) {
+                    $failures.Add(("overlap in {0}: '{1}' ({2}) intersects '{3}' ({4})" -f $Parent.GetType().FullName, $a.Text, $a.GetType().FullName, $b.Text, $b.GetType().FullName))
+                }
+            }
+        }
+        foreach ($child in $Parent.Controls) {
+            Test-GuiSiblingOverlap $child
+        }
+    }
+
+    Walk-GuiControls $Root
+    Test-GuiSiblingOverlap $Root
+    if ($failures.Count -gt 0) {
+        throw ("GUI self-test failed: visible text clipped or overlapping" + [Environment]::NewLine + ($failures -join [Environment]::NewLine))
+    }
+}
+
 function New-MockTextControl {
     param([string]$Text = "")
     return [pscustomobject]@{ Text = $Text }
@@ -1670,7 +1746,7 @@ function Update-StepStatus {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "ACBH v0.5 Minimal Core"
 $form.StartPosition = "CenterScreen"
-$form.Size = New-Object System.Drawing.Size(1280, 980)
+$form.Size = New-Object System.Drawing.Size(1280, 1020)
 $form.MinimumSize = New-Object System.Drawing.Size(1100, 800)
 $form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
 $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
@@ -1693,15 +1769,15 @@ $lblState.Location = New-Object System.Drawing.Point(400, 24)
 $lblState.Size = New-Object System.Drawing.Size(760, 24)
 $form.Controls.Add($lblState)
 
-$grpSteps = Add-GroupBox "首次使用步骤" 24 58 1210 92
+$grpSteps = Add-GroupBox "首次使用步骤" 24 58 1210 126
 $lblStep1 = Add-Label "步骤 1：填写 VPS 地址和访问令牌：需要处理" 18 26 $grpSteps 540
 $lblStep2 = Add-Label "步骤 2：选择 Minecraft 服务端目录：需要处理" 18 56 $grpSteps 540
-$lblStep3 = Add-Label "步骤 3：点击「一键初始化本机」：未完成" 600 26 $grpSteps 560
-$lblStep4 = Add-Label "步骤 4：点击「测试连接」：未完成" 600 56 $grpSteps 300
-$lblStep5 = Add-Label "步骤 5：点击「配置 VPS 中转」：未完成" 900 56 $grpSteps 280
-$lblStep6 = Add-Label "步骤 6：启动服务端并让玩家连接公网地址：未完成" 900 26 $grpSteps 300
+$lblStep3 = Add-Label "步骤 3：点击「一键初始化本机」：未完成" 18 86 $grpSteps 540
+$lblStep4 = Add-Label "步骤 4：点击「测试连接」：未完成" 600 26 $grpSteps 580
+$lblStep5 = Add-Label "步骤 5：点击「配置 VPS 中转」：未完成" 600 56 $grpSteps 580
+$lblStep6 = Add-Label "步骤 6：启动服务端并让玩家连接公网地址：未完成" 600 86 $grpSteps 580
 
-$grpConnection = Add-GroupBox "连接 VPS Coordinator" 24 160 1210 126
+$grpConnection = Add-GroupBox "连接 VPS Coordinator" 24 194 1210 126
 Add-Label "VPS 地址" 18 34 $grpConnection 120 | Out-Null
 $txtCoordinator = Add-TextBox 150 32 540 $false $grpConnection
 $toolTip.SetToolTip($txtCoordinator, "填写 Coordinator API 地址，例如 http://你的VPS_IP:6121。这里不是 Minecraft 进服端口 25565。")
@@ -1716,7 +1792,7 @@ Add-Label "VPS 状态" 990 76 $grpConnection 90 | Out-Null
 $txtCoordinatorCheckStatus = Add-TextBox 1080 74 110 $true $grpConnection
 Set-Status $txtCoordinatorCheckStatus "not_configured" "coordinator"
 
-$grpIdentity = Add-GroupBox "本机身份" 24 296 1210 82
+$grpIdentity = Add-GroupBox "本机身份" 24 330 1210 82
 Add-Label "私人实例名称" 18 36 $grpIdentity 120 | Out-Null
 $txtInstanceName = Add-TextBox 150 34 390 $false $grpIdentity
 Set-ControlText $txtInstanceName "私人 ACBH 实例"
@@ -1724,7 +1800,7 @@ Add-Label "当前设备名称" 620 36 $grpIdentity 120 | Out-Null
 $txtDeviceName = Add-TextBox 750 34 390 $false $grpIdentity
 Set-ControlText $txtDeviceName $env:COMPUTERNAME
 
-$grpServer = Add-GroupBox "Minecraft 服务端" 24 388 1210 102
+$grpServer = Add-GroupBox "Minecraft 服务端" 24 422 1210 102
 Add-Label "服务器名称" 18 34 $grpServer 120 | Out-Null
 $txtServerName = Add-TextBox 150 32 390 $false $grpServer
 Set-ControlText $txtServerName "Minecraft 服务端"
@@ -1732,7 +1808,7 @@ Add-Label "服务器目录" 18 70 $grpServer 120 | Out-Null
 $txtServerDir = Add-TextBox 150 68 820 $false $grpServer
 Add-Button "选择目录" 990 65 { Choose-ServerDir } $grpServer 150 30 | Out-Null
 
-$grpListenerRelay = Add-GroupBox "监听 / VPS 中转" 24 500 1210 214
+$grpListenerRelay = Add-GroupBox "监听 / VPS 中转" 24 534 1210 214
 
 function Add-GroupLabel {
     param([string]$Text, [int]$X, [int]$Y, [int]$W = 120)
@@ -1753,13 +1829,12 @@ Add-GroupLabel "本地监听" 18 26 200 | Out-Null
 Add-GroupLabel "本地地址" 18 56 | Out-Null
 $txtListenerHost = Add-GroupTextBox 150 54 260
 Set-ControlText $txtListenerHost "127.0.0.1"
-Add-GroupLabel "本地端口" 390 56 | Out-Null
+Add-GroupLabel "本地端口" 430 56 | Out-Null
 $txtListenerPort = Add-GroupTextBox 520 54 180
 Set-ControlText $txtListenerPort "25565"
-Add-GroupLabel "公网中转" 18 98 200 | Out-Null
 Add-GroupLabel "公网地址" 18 98 | Out-Null
 $txtPublicHost = Add-GroupTextBox 150 96 260
-Add-GroupLabel "公网端口" 390 98 | Out-Null
+Add-GroupLabel "公网端口" 430 98 | Out-Null
 $txtPublicPort = Add-GroupTextBox 520 96 180
 Set-ControlText $txtPublicPort "25565"
 Add-GroupLabel "监听状态" 740 56 | Out-Null
@@ -1782,7 +1857,7 @@ Set-Status $txtRelayCheckStatus "not_configured" "relay"
 Add-GroupLabel "警告" 740 174 | Out-Null
 $txtListenerWarnings = Add-GroupTextBox 850 172 330 $true
 
-$grpActions = Add-GroupBox "操作" 24 724 1210 82
+$grpActions = Add-GroupBox "操作" 24 758 1210 82
 Add-Button "一键初始化本机" 18 32 { Run-LocalInit } $grpActions 170 32 | Out-Null
 Add-Button "保存配置" 200 32 { Save-Config; Update-StepStatus } $grpActions 140 32 | Out-Null
 Add-Button "测试连接" 352 32 { Test-Coordinator; Update-StepStatus } $grpActions 140 32 | Out-Null
@@ -1790,7 +1865,7 @@ Add-Button "配置 VPS 中转" 504 32 { Configure-Relay; Update-StepStatus } $gr
 Add-Button "刷新状态" 676 32 { Refresh-Health; Load-Config; Refresh-Identity; Refresh-RelayStatus; Update-StepStatus } $grpActions 140 32 | Out-Null
 
 
-$grpStatus = Add-GroupBox "状态" 24 816 1210 186
+$grpStatus = Add-GroupBox "状态" 24 850 1210 186
 Add-Label "本地 Body API" 18 34 $grpStatus 120 | Out-Null
 $txtLocalBodyStatus = Add-TextBox 150 32 160 $true $grpStatus
 Set-Status $txtLocalBodyStatus "unreachable" "body"
@@ -1832,7 +1907,7 @@ Add-Label "诊断提示" 18 154 $grpStatus 120 | Out-Null
 $txtErrorDetails = Add-TextBox 150 152 1030 $true $grpStatus $false 24 $true
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(24, 976)
+$txtLog.Location = New-Object System.Drawing.Point(24, 1050)
 $txtLog.Size = New-Object System.Drawing.Size(1210, 72)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
@@ -1840,9 +1915,9 @@ $txtLog.ReadOnly = $true
 $txtLog.Font = New-Object System.Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtLog)
 
-$btnToggleAdvanced = Add-Button "显示高级诊断" 24 1062 { Toggle-AdvancedDiagnostics } $form 170 32
+$btnToggleAdvanced = Add-Button "显示高级诊断" 24 1136 { Toggle-AdvancedDiagnostics } $form 170 32
 
-$grpAdvanced = Add-GroupBox "高级诊断" 24 1106 1210 360
+$grpAdvanced = Add-GroupBox "高级诊断" 24 1180 1210 360
 Register-AdvancedControl $grpAdvanced
 
 Add-Label "Body API 地址" 18 34 $grpAdvanced 120 | Out-Null
@@ -1883,14 +1958,14 @@ $txtRelayState = Add-TextBox 150 312 460 $true $grpAdvanced
 Add-Label "中转错误" 640 314 $grpAdvanced 90 | Out-Null
 $txtRelayError = Add-TextBox 730 312 450 $true $grpAdvanced
 
-$txtAdvancedDiagnostics = Add-TextBox 24 1480 1210 $true $form $false 46 $true
+$txtAdvancedDiagnostics = Add-TextBox 24 1554 1210 $true $form $false 46 $true
 Register-AdvancedControl $txtAdvancedDiagnostics
 
-$txtOperation = Add-TextBox 24 1540 1210 $true $form $false 86 $true
+$txtOperation = Add-TextBox 24 1614 1210 $true $form $false 86 $true
 $txtOperation.Font = New-Object System.Drawing.Font("Consolas", 9)
 Register-AdvancedControl $txtOperation
 
-$grpBackup = Add-GroupBox "备份 / 快照" 24 1640 1210 220
+$grpBackup = Add-GroupBox "备份 / 快照" 24 1714 1210 220
 Register-AdvancedControl $grpBackup
 
 function Add-BackupLabel {
@@ -1956,6 +2031,7 @@ $form.Add_FormClosed({
 if ($SelfTest) {
     Test-GuiStaticChecks
     Test-GuiNullSafeBehavior
+    Test-GuiVisibleTextFits $form
     if ($script:BodyProcess -and -not $script:BodyProcess.HasExited) {
         try { $script:BodyProcess.Kill() } catch {}
     }

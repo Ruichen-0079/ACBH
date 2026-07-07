@@ -23,62 +23,62 @@ const (
 
 // DisconnectReason values written to lastDisconnectReason.
 const (
-	DisconnectHeartbeatStopped    = "relay_heartbeat_stopped"
-	DisconnectLeaseExpired        = "relay_lease_expired"
-	DisconnectTTLExpired          = "relay_ttl_expired"
-	DisconnectTunnelNotConnected  = "relay_tunnel_not_connected"
-	DisconnectTunnelExited        = "relay_tunnel_exited"
-	DisconnectSessionPumpExited   = "relay_session_pump_exited"
-	DisconnectLocalMCUnreachable  = "local_minecraft_unreachable"
-	DisconnectCoordinatorLost     = "coordinator_connection_lost"
-	DisconnectAuthFailed          = "auth_failed"
-	DisconnectPublicListenerDown  = "public_listener_not_ready"
+	DisconnectHeartbeatStopped   = "relay_heartbeat_stopped"
+	DisconnectLeaseExpired       = "relay_lease_expired"
+	DisconnectTTLExpired         = "relay_ttl_expired"
+	DisconnectTunnelNotConnected = "relay_tunnel_not_connected"
+	DisconnectTunnelExited       = "relay_tunnel_exited"
+	DisconnectSessionPumpExited  = "relay_session_pump_exited"
+	DisconnectLocalMCUnreachable = "local_minecraft_unreachable"
+	DisconnectCoordinatorLost    = "coordinator_connection_lost"
+	DisconnectAuthFailed         = "auth_failed"
+	DisconnectPublicListenerDown = "public_listener_not_ready"
 )
 
 type SessionDiagnostic struct {
-	SessionID             string `json:"sessionId"`
-	StartedAt             string `json:"startedAt,omitempty"`
-	ClosedAt              string `json:"closedAt,omitempty"`
-	RemotePlayerAddress   string `json:"remotePlayerAddress,omitempty"`
-	LocalConnected        bool   `json:"localConnected"`
-	ForwardingStarted     bool   `json:"forwardingStarted"`
-	BytesPlayerToLocal    int64  `json:"bytesPlayerToLocal"`
-	BytesLocalToPlayer    int64  `json:"bytesLocalToPlayer"`
-	UpstreamClosed        bool   `json:"upstreamClosed"`
-	DownstreamClosed      bool   `json:"downstreamClosed"`
-	CloseReason           string `json:"closeReason,omitempty"`
-	Error                 string `json:"error,omitempty"`
+	SessionID           string `json:"sessionId"`
+	StartedAt           string `json:"startedAt,omitempty"`
+	ClosedAt            string `json:"closedAt,omitempty"`
+	RemotePlayerAddress string `json:"remotePlayerAddress,omitempty"`
+	LocalConnected      bool   `json:"localConnected"`
+	ForwardingStarted   bool   `json:"forwardingStarted"`
+	BytesPlayerToLocal  int64  `json:"bytesPlayerToLocal"`
+	BytesLocalToPlayer  int64  `json:"bytesLocalToPlayer"`
+	UpstreamClosed      bool   `json:"upstreamClosed"`
+	DownstreamClosed    bool   `json:"downstreamClosed"`
+	CloseReason         string `json:"closeReason,omitempty"`
+	Error               string `json:"error,omitempty"`
 }
 
 type State struct {
-	Configured                bool                `json:"configured"`
-	CurrentHost               bool                `json:"currentHost"`
-	CurrentDevice             bool                `json:"currentDevice"`
-	Active                    bool                `json:"active"`
-	PublicEndpoint            string              `json:"publicEndpoint"`
-	LocalEndpoint             string              `json:"localEndpoint"`
-	HeartbeatRunning          bool                `json:"heartbeatRunning"`
-	HeartbeatOK               bool                `json:"heartbeatOk"`
-	HeartbeatIntervalSeconds  int                 `json:"heartbeatIntervalSeconds"`
-	LastHeartbeatAt           string              `json:"lastHeartbeatAt,omitempty"`
-	LeaseRenewRunning         bool                `json:"leaseRenewRunning"`
-	LeaseActive               bool                `json:"leaseActive"`
-	LeaseExpiresAt            string              `json:"leaseExpiresAt,omitempty"`
-	ActiveTTLSeconds          int                 `json:"activeTtlSeconds"`
-	ActiveUntil               string              `json:"activeUntil,omitempty"`
-	TunnelConnected           bool                `json:"tunnelConnected"`
-	TunnelConnectedAt         string              `json:"tunnelConnectedAt,omitempty"`
-	TunnelLastSeenAt          string              `json:"tunnelLastSeenAt,omitempty"`
-	SessionPumpRunning        bool                `json:"sessionPumpRunning"`
-	PublicListenerReady       bool                `json:"publicListenerReady"`
-	LocalMinecraftReachable   bool                `json:"localMinecraftReachable"`
-	PublicMinecraftPingOk     bool                `json:"publicMinecraftPingOk"`
-	RecentPublicPingOk        bool                `json:"recentPublicPingOk"`
-	LastPublicPingAt          string              `json:"lastPublicPingAt,omitempty"`
-	RecentSessions            []SessionDiagnostic `json:"recentSessions"`
-	LastTunnelError           string              `json:"lastTunnelError,omitempty"`
-	LastDisconnectReason      string              `json:"lastDisconnectReason,omitempty"`
-	Errors                    []*coreerrors.Error `json:"errors"`
+	Configured               bool                `json:"configured"`
+	CurrentHost              bool                `json:"currentHost"`
+	CurrentDevice            bool                `json:"currentDevice"`
+	Active                   bool                `json:"active"`
+	PublicEndpoint           string              `json:"publicEndpoint"`
+	LocalEndpoint            string              `json:"localEndpoint"`
+	HeartbeatRunning         bool                `json:"heartbeatRunning"`
+	HeartbeatOK              bool                `json:"heartbeatOk"`
+	HeartbeatIntervalSeconds int                 `json:"heartbeatIntervalSeconds"`
+	LastHeartbeatAt          string              `json:"lastHeartbeatAt,omitempty"`
+	LeaseRenewRunning        bool                `json:"leaseRenewRunning"`
+	LeaseActive              bool                `json:"leaseActive"`
+	LeaseExpiresAt           string              `json:"leaseExpiresAt,omitempty"`
+	ActiveTTLSeconds         int                 `json:"activeTtlSeconds"`
+	ActiveUntil              string              `json:"activeUntil,omitempty"`
+	TunnelConnected          bool                `json:"tunnelConnected"`
+	TunnelConnectedAt        string              `json:"tunnelConnectedAt,omitempty"`
+	TunnelLastSeenAt         string              `json:"tunnelLastSeenAt,omitempty"`
+	SessionPumpRunning       bool                `json:"sessionPumpRunning"`
+	PublicListenerReady      bool                `json:"publicListenerReady"`
+	LocalMinecraftReachable  bool                `json:"localMinecraftReachable"`
+	PublicMinecraftPingOk    bool                `json:"publicMinecraftPingOk"`
+	RecentPublicPingOk       bool                `json:"recentPublicPingOk"`
+	LastPublicPingAt         string              `json:"lastPublicPingAt,omitempty"`
+	RecentSessions           []SessionDiagnostic `json:"recentSessions"`
+	LastTunnelError          string              `json:"lastTunnelError,omitempty"`
+	LastDisconnectReason     string              `json:"lastDisconnectReason,omitempty"`
+	Errors                   []*coreerrors.Error `json:"errors"`
 }
 
 func computeActive(s State) bool {
@@ -92,7 +92,8 @@ func computeActive(s State) bool {
 		s.TunnelConnected &&
 		s.SessionPumpRunning &&
 		s.PublicListenerReady &&
-		s.LocalMinecraftReachable
+		s.LocalMinecraftReachable &&
+		(s.PublicMinecraftPingOk || s.RecentPublicPingOk)
 }
 
 func finalizeState(s State) State {
@@ -122,6 +123,8 @@ func inferDisconnectReason(s State) string {
 	case !s.LocalMinecraftReachable:
 		return DisconnectLocalMCUnreachable
 	case !s.PublicListenerReady:
+		return DisconnectPublicListenerDown
+	case !s.PublicMinecraftPingOk && !s.RecentPublicPingOk:
 		return DisconnectPublicListenerDown
 	default:
 		return ""

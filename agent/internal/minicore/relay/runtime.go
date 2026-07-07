@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	hostrelay "github.com/Ruichen-0079/ACBH/agent/internal/relay"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreconfig"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/identity"
+	hostrelay "github.com/Ruichen-0079/ACBH/agent/internal/relay"
 )
 
 type TCPProber func(ctx context.Context, address string, timeout time.Duration) bool
@@ -118,11 +118,11 @@ func (r *Runtime) Start(ctx context.Context, cfg coreconfig.Config, req Configur
 
 	r.sendHeartbeat(loopCtx)
 	r.renewLease(loopCtx)
-	r.checkHealth(loopCtx)
 
 	go r.heartbeatLoop(loopCtx)
 	go r.leaseRenewLoop(loopCtx)
 	go r.sessionConsumerLoop(loopCtx)
+	r.checkHealth(loopCtx)
 	go r.healthCheckLoop(loopCtx)
 }
 
@@ -347,6 +347,7 @@ func (r *Runtime) renewLease(ctx context.Context) {
 func (r *Runtime) sessionConsumerLoop(ctx context.Context) {
 	ticker := time.NewTicker(defaultSessionPollInterval)
 	defer ticker.Stop()
+	r.pollSessions(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -450,18 +451,18 @@ func (r *Runtime) runSessionPump(ctx context.Context, cfg coreconfig.Config, coo
 
 func (r *Runtime) recordSessionDiagnostic(sessionID string, stats hostrelay.SessionStats) {
 	diag := SessionDiagnostic{
-		SessionID:          sessionID,
-		StartedAt:          stats.StartedAt.UTC().Format(time.RFC3339),
-		ClosedAt:           stats.ClosedAt.UTC().Format(time.RFC3339),
+		SessionID:           sessionID,
+		StartedAt:           stats.StartedAt.UTC().Format(time.RFC3339),
+		ClosedAt:            stats.ClosedAt.UTC().Format(time.RFC3339),
 		RemotePlayerAddress: stats.RemotePlayerAddress,
-		LocalConnected:     stats.LocalConnected,
-		ForwardingStarted:  stats.ForwardingStarted,
-		BytesPlayerToLocal: stats.BytesPlayerToLocal,
-		BytesLocalToPlayer: stats.BytesLocalToPlayer,
-		UpstreamClosed:     stats.UpstreamClosed,
-		DownstreamClosed:   stats.DownstreamClosed,
-		CloseReason:        stats.CloseReason,
-		Error:              stats.Error,
+		LocalConnected:      stats.LocalConnected,
+		ForwardingStarted:   stats.ForwardingStarted,
+		BytesPlayerToLocal:  stats.BytesPlayerToLocal,
+		BytesLocalToPlayer:  stats.BytesLocalToPlayer,
+		UpstreamClosed:      stats.UpstreamClosed,
+		DownstreamClosed:    stats.DownstreamClosed,
+		CloseReason:         stats.CloseReason,
+		Error:               stats.Error,
 	}
 	r.mu.Lock()
 	r.recentSessions = append(r.recentSessions, diag)
@@ -504,7 +505,7 @@ func (r *Runtime) checkHealth(ctx context.Context) {
 
 	publicPingOK := false
 	if publicTCP && r.pingStatus != nil {
-		publicPingOK, _ = r.pingStatus(ctx, publicAddr, 4*time.Second)
+		publicPingOK, _ = r.pingStatus(ctx, publicAddr, 8*time.Second)
 	}
 
 	r.mu.Lock()
@@ -520,6 +521,9 @@ func (r *Runtime) checkHealth(ctx context.Context) {
 	if !publicTCP && r.lastDisconnectReason == "" {
 		r.lastDisconnectReason = DisconnectPublicListenerDown
 	}
+	if publicTCP && !publicPingOK && r.lastDisconnectReason == "" {
+		r.lastDisconnectReason = DisconnectPublicListenerDown
+	}
 	r.mu.Unlock()
 
 	if !localOK {
@@ -527,6 +531,8 @@ func (r *Runtime) checkHealth(ctx context.Context) {
 	}
 	if !publicTCP {
 		r.recordError(coreerrors.PublicListenerNotReady, fmt.Sprintf("public listener %s unreachable", publicAddr))
+	} else if !publicPingOK {
+		r.recordError(coreerrors.PublicListenerNotReady, fmt.Sprintf("public minecraft status ping %s failed", publicAddr))
 	}
 }
 

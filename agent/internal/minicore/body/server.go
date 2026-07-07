@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	Version     = "v0.5.1-public-relay-hotfix2"
+	Version     = "v0.5.1-public-relay-hotfix4"
 	DefaultAddr = "127.0.0.1:6120"
 	ServiceName = "acbh-body"
 )

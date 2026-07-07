@@ -14,6 +14,7 @@ import type { ArtifactMetadata, InMemoryCoordinatorStore, GcBackend } from "./st
 import { GcBlockedError, StoreError } from "./store.js";
 import type { TunnelSession, PlayerSession } from "./network.js";
 import type { RelayManager } from "./relay.js";
+import { coordinatorVersion as packageCoordinatorVersion } from "./version.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
@@ -322,7 +323,7 @@ const bootstrapIdentitySchema = z.object({
   serverName: z.string().trim().min(1).max(120),
 });
 
-const coordinatorVersion = process.env.ACBH_VERSION ?? "v0.5.1-public-relay-hotfix";
+const coordinatorVersion = process.env.ACBH_VERSION ?? packageCoordinatorVersion();
 const buildCommit = process.env.ACBH_BUILD_COMMIT ?? "dev";
 const protocolVersion = Number.parseInt(process.env.ACBH_PROTOCOL_VERSION ?? "2", 10);
 const minimumClientProtocol = 2;

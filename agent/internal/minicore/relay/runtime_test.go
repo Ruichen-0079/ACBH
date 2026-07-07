@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	hostrelay "github.com/Ruichen-0079/ACBH/agent/internal/relay"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coordinatorclient"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/coreerrors"
 	"github.com/Ruichen-0079/ACBH/agent/internal/minicore/identity"
+	hostrelay "github.com/Ruichen-0079/ACBH/agent/internal/relay"
 )
 
 func (f *fakeClient) ListTunnelSessions(ctx context.Context, groupID string) ([]coordinatorclient.TunnelSession, *coreerrors.Error) {
@@ -102,6 +102,7 @@ func startTestRuntime(t *testing.T, client *fakeClient, prober TCPProber) *Runti
 	cfg.Relay.Enabled = true
 	rt := NewRuntime(client, nil)
 	rt.prober = prober
+	rt.pingStatus = func(context.Context, string, time.Duration) (bool, error) { return true, nil }
 	rt.runPump = func(ctx context.Context, opts hostrelay.HostRelayOptions) error {
 		<-ctx.Done()
 		return ctx.Err()
@@ -133,6 +134,7 @@ func TestActiveStability60s(t *testing.T) {
 	client := &fakeClient{lease: testLease()}
 	rt := NewRuntime(client, coord.server.Client())
 	rt.prober = alwaysReachable
+	rt.pingStatus = func(context.Context, string, time.Duration) (bool, error) { return true, nil }
 	rt.runPump = func(ctx context.Context, opts hostrelay.HostRelayOptions) error {
 		<-ctx.Done()
 		return ctx.Err()
@@ -202,6 +204,7 @@ func TestTunnelLoopExitMarksInactive(t *testing.T) {
 	client := &fakeClient{lease: testLease()}
 	rt := NewRuntime(client, nil)
 	rt.prober = alwaysReachable
+	rt.pingStatus = func(context.Context, string, time.Duration) (bool, error) { return true, nil }
 	rt.runPump = func(ctx context.Context, opts hostrelay.HostRelayOptions) error {
 		return errors.New("forced tunnel exit")
 	}
@@ -287,6 +290,7 @@ func TestComputeActiveRequiresAllFields(t *testing.T) {
 		LeaseRenewRunning: true, LeaseActive: true,
 		TunnelConnected: true, SessionPumpRunning: true,
 		PublicListenerReady: true, LocalMinecraftReachable: true,
+		PublicMinecraftPingOk: true,
 	}
 	if !computeActive(base) {
 		t.Fatal("expected active")
@@ -294,6 +298,23 @@ func TestComputeActiveRequiresAllFields(t *testing.T) {
 	base.TunnelConnected = false
 	if computeActive(base) {
 		t.Fatal("expected inactive without tunnel")
+	}
+}
+
+func TestComputeActiveRequiresPublicMinecraftPing(t *testing.T) {
+	base := State{
+		Configured: true, CurrentHost: true, CurrentDevice: true,
+		HeartbeatRunning: true, HeartbeatOK: true,
+		LeaseRenewRunning: true, LeaseActive: true,
+		TunnelConnected: true, SessionPumpRunning: true,
+		PublicListenerReady: true, LocalMinecraftReachable: true,
+	}
+	if computeActive(base) {
+		t.Fatal("expected inactive until public minecraft status ping succeeds")
+	}
+	base.RecentPublicPingOk = true
+	if !computeActive(base) {
+		t.Fatal("expected recent public minecraft status ping to keep relay active")
 	}
 }
 

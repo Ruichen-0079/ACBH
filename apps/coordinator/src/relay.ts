@@ -115,8 +115,8 @@ export class RelayManager {
     return undefined;
   }
 
-  setRemotePlayerAddress(sessionId: string, remotePlayerAddress: string): void {
-    const pair = this.ensurePair(sessionId, "");
+  setRemotePlayerAddress(sessionId: string, remotePlayerAddress: string, groupId = ""): void {
+    const pair = this.ensurePair(sessionId, groupId);
     pair.remotePlayerAddress = remotePlayerAddress;
   }
 
@@ -130,6 +130,8 @@ export class RelayManager {
     if (!pair) {
       pair = this.createPair(sessionId, groupId);
       this.pairs.set(sessionId, pair);
+    } else if (!pair.groupId && groupId) {
+      pair.groupId = groupId;
     }
 
     const attachedAt = new Date().toISOString();
@@ -155,6 +157,8 @@ export class RelayManager {
     if (!pair) {
       pair = this.createPair(sessionId, groupId);
       this.pairs.set(sessionId, pair);
+    } else if (!pair.groupId && groupId) {
+      pair.groupId = groupId;
     }
 
     const attachedAt = new Date().toISOString();
@@ -244,6 +248,8 @@ export class RelayManager {
     if (!pair) {
       pair = this.createPair(sessionId, groupId);
       this.pairs.set(sessionId, pair);
+    } else if (!pair.groupId && groupId) {
+      pair.groupId = groupId;
     }
     return pair;
   }
