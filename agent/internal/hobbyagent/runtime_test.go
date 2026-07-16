@@ -299,6 +299,10 @@ func TestMinecraftRestartCanBeDisabled(t *testing.T) {
 	waitForCondition(t, time.Second, func() bool {
 		return runtime.states.Components().Minecraft.ReasonCode == "restart_limit_reached"
 	})
+	status := runtime.Status()
+	if status.Minecraft.State != componentstate.Error || status.Minecraft.ReasonCode != "restart_limit_reached" {
+		t.Fatalf("restart limit is not visible in runtime status: %+v", status.Minecraft)
+	}
 	minecraftStarts, _ := minecraft.counts()
 	if minecraftStarts != 1 {
 		t.Fatalf("disabled policy restarted Minecraft %d time(s)", minecraftStarts-1)
@@ -318,6 +322,10 @@ func TestMinecraftRestartStopsAtConfiguredLimit(t *testing.T) {
 	waitForCondition(t, time.Second, func() bool {
 		return runtime.states.Components().Minecraft.ReasonCode == "restart_limit_reached"
 	})
+	status := runtime.Status()
+	if status.Minecraft.State != componentstate.Error || status.Minecraft.ReasonCode != "restart_limit_reached" {
+		t.Fatalf("restart limit is not visible in runtime status: %+v", status.Minecraft)
+	}
 	minecraftStarts, _ := minecraft.counts()
 	if minecraftStarts != 3 {
 		t.Fatalf("expected initial start plus two retries, got %d starts", minecraftStarts)

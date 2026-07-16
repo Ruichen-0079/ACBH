@@ -706,8 +706,16 @@ func (r *Runtime) statusLocked() RuntimeStatus {
 	minecraft := r.minecraft.Status(context.Background(), port)
 	relay := r.relay.Status()
 	components := r.states.Components()
-	components.Minecraft = minecraft.Snapshot
-	components.Relay = relay.Snapshot
+	if components.Minecraft.State == componentstate.Error && minecraft.State != componentstate.Ready {
+		minecraft.Snapshot = components.Minecraft
+	} else {
+		components.Minecraft = minecraft.Snapshot
+	}
+	if components.Relay.State == componentstate.Error && relay.State != componentstate.Online {
+		relay.Snapshot = components.Relay
+	} else {
+		components.Relay = relay.Snapshot
+	}
 	overall := componentstate.DeriveOverall(components, r.now(), r.relayTTL)
 	return RuntimeStatus{
 		Overall: overall, OverallState: overall.State, PublicEndpoint: r.publicEndpoint,

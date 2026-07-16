@@ -244,6 +244,26 @@ func TestPortConflictDoesNotCreateRestartStorm(t *testing.T) {
 	}
 }
 
+func TestRunningFRPCPortConflictBecomesTerminalImmediately(t *testing.T) {
+	process := newBlockingProcess(204)
+	launcher := &fakeLauncher{start: func(int, LaunchRequest) (Process, error) { return process, nil }}
+	manager := NewManager(Dependencies{Launcher: launcher, Prober: fakeProber{}, Inspector: fakeInspector(false)})
+	if err := manager.Start(context.Background(), testConfig(t)); err != nil {
+		t.Fatal(err)
+	}
+	process.lines <- OutputLine{Stream: "stdout", Line: "login to server success", Time: time.Now().UTC()}
+	process.lines <- OutputLine{Stream: "stdout", Line: "[acbh-minecraft] start error: proxy [acbh-minecraft] already exists", Time: time.Now().UTC()}
+	waitFor(t, time.Second, func() bool { return manager.Status().Terminal })
+	time.Sleep(20 * time.Millisecond)
+	status := manager.Status()
+	if status.ReasonCode != "PUBLIC_PORT_IN_USE" {
+		t.Fatalf("unexpected terminal status: %+v", status)
+	}
+	if launcher.count.Load() != 1 {
+		t.Fatalf("running port conflict launched %d processes", launcher.count.Load())
+	}
+}
+
 func TestGeneratedConfigAndProbesUseConfiguredPorts(t *testing.T) {
 	config := testConfig(t)
 	config.LocalPort = 25566

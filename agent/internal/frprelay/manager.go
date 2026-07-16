@@ -285,7 +285,8 @@ func (m *Manager) monitorProcess(ctx context.Context, config Config, process Pro
 				m.mu.Unlock()
 			}
 			if reason, terminal := classifyLine(clean); terminal {
-				lastTerminalReason = reason
+				_ = process.Kill()
+				return errors.New(clean), reason, false
 			}
 		case err := <-process.Wait():
 			stable := connectedAt != nil && m.deps.Clock.Now().Sub(*connectedAt) >= config.StableResetTime
@@ -411,8 +412,8 @@ func classifyLine(line string) (string, bool) {
 			return "AUTH_FAILED", true
 		}
 	}
-	for _, marker := range []string{"port already used", "remote port", "already in use", "port conflict"} {
-		if strings.Contains(normalized, marker) && (strings.Contains(normalized, "used") || strings.Contains(normalized, "in use") || strings.Contains(normalized, "conflict")) {
+	for _, marker := range []string{"port already used", "remote port", "already in use", "port conflict", "proxy [acbh-minecraft] already exists"} {
+		if strings.Contains(normalized, marker) && (strings.Contains(normalized, "used") || strings.Contains(normalized, "in use") || strings.Contains(normalized, "conflict") || strings.Contains(normalized, "already exists")) {
 			return "PUBLIC_PORT_IN_USE", true
 		}
 	}
