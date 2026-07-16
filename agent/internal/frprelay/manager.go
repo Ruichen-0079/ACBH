@@ -319,7 +319,11 @@ func (m *Manager) probe(ctx context.Context, config Config, connectedAt *time.Ti
 	} else if publicErr != nil {
 		reason, technical = "public_probe_failed", publicErr.Error()
 	}
-	m.transitionLocked(componentstate.Connecting, reason, "正在验证公网中转", technical, false)
+	state := componentstate.Connecting
+	if m.status.State == componentstate.Online || m.status.State == componentstate.Reconnecting {
+		state = componentstate.Reconnecting
+	}
+	m.transitionLocked(state, reason, "正在验证公网中转", technical, false)
 }
 
 func (m *Manager) handleFailure(ctx context.Context, config Config, failures int, err error, terminalReason string) bool {

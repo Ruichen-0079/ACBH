@@ -69,6 +69,27 @@ func (p recordingProber) Probe(_ context.Context, address string) error {
 	return nil
 }
 
+type switchableProber struct {
+	mu         sync.RWMutex
+	publicAddr string
+	failPublic bool
+}
+
+func (p *switchableProber) Probe(_ context.Context, address string) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.failPublic && address == p.publicAddr {
+		return errors.New("public endpoint unavailable")
+	}
+	return nil
+}
+
+func (p *switchableProber) setPublicFailure(value bool) {
+	p.mu.Lock()
+	p.failPublic = value
+	p.mu.Unlock()
+}
+
 type recordingSleeper struct {
 	durations chan time.Duration
 }
@@ -277,6 +298,27 @@ func TestOnlineRequiresConnectionAndBothProbes(t *testing.T) {
 	status := manager.Status()
 	if !status.FRPSConnected || !status.LocalReachable || !status.PublicReachable || status.LastOKAt == nil {
 		t.Fatalf("incomplete online evidence: %+v", status)
+	}
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOnlineRelayBecomesReconnectingWhenPublicProbeIsLost(t *testing.T) {
+	config := testConfig(t)
+	process := newBlockingProcess(303)
+	launcher := &fakeLauncher{start: func(int, LaunchRequest) (Process, error) { return process, nil }}
+	prober := &switchableProber{publicAddr: config.PublicAddress()}
+	manager := NewManager(Dependencies{Launcher: launcher, Prober: prober, Inspector: fakeInspector(false)})
+	if err := manager.Start(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	process.lines <- OutputLine{Stream: "stdout", Line: "login to server success", Time: time.Now().UTC()}
+	waitFor(t, time.Second, func() bool { return manager.Status().State == componentstate.Online })
+	prober.setPublicFailure(true)
+	waitFor(t, time.Second, func() bool { return manager.Status().State == componentstate.Reconnecting })
+	if manager.Status().ReasonCode != "public_probe_failed" {
+		t.Fatalf("unexpected reconnect reason: %+v", manager.Status())
 	}
 	if err := manager.Stop(context.Background()); err != nil {
 		t.Fatal(err)
