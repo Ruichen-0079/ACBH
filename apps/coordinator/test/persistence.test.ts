@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { loadState, saveState } from "../src/persistence.js";
 import {
@@ -13,7 +14,7 @@ import {
 } from "../src/store.js";
 
 function testDir() {
-  return path.join(path.dirname(new URL(import.meta.url).pathname), ".tmp-persistence");
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), ".tmp-persistence");
 }
 
 function stateFilePath(dir: string) {
