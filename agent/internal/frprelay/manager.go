@@ -353,7 +353,7 @@ func (m *Manager) transitionLocked(state componentstate.State, reason, userMessa
 	m.status.UserMessage = userMessage
 	m.status.TechnicalMessage = redact(technical, m.config.AccessToken)
 	m.status.Terminal = terminal
-	m.emitLocked(Event{Event: "relay_state", State: string(state), ReasonCode: reason, Message: userMessage, Time: now})
+	m.emitLocked(Event{Event: "relay_transition", State: string(state), ReasonCode: reason, Message: userMessage, Time: now})
 }
 
 func (m *Manager) emit(event Event) {
