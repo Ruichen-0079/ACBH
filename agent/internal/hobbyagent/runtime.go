@@ -88,43 +88,49 @@ type RuntimeStatus struct {
 }
 
 type RuntimeOptions struct {
-	Store            FileStore
-	Minecraft        Minecraft
-	Relay            Relay
-	Coordinator      Coordinator
-	FRPCPath         string
-	RuntimeDir       string
-	AgentVersion     string
-	RelayTTL         time.Duration
-	ComponentTimeout time.Duration
-	PollInterval     time.Duration
-	Now              func() time.Time
-	Preflight        func(string) (PreflightResult, error)
-	MonitorInterval  time.Duration
-	NodeID           string
-	NodeName         string
-	Logger           agentlog.Writer
+	Store                 FileStore
+	Minecraft             Minecraft
+	Relay                 Relay
+	Coordinator           Coordinator
+	FRPCPath              string
+	RuntimeDir            string
+	AgentVersion          string
+	RelayTTL              time.Duration
+	ComponentTimeout      time.Duration
+	PollInterval          time.Duration
+	Now                   func() time.Time
+	Preflight             func(string) (PreflightResult, error)
+	MonitorInterval       time.Duration
+	NodeID                string
+	NodeName              string
+	Logger                agentlog.Writer
+	AutoRestartMinecraft  bool
+	MaxMinecraftRestarts  int
+	MinecraftRestartDelay time.Duration
 }
 
 type Runtime struct {
-	store       FileStore
-	minecraft   Minecraft
-	relay       Relay
-	coordinator Coordinator
-	states      *componentstate.Store
-	frpcPath    string
-	runtimeDir  string
-	version     string
-	relayTTL    time.Duration
-	timeout     time.Duration
-	poll        time.Duration
-	now         func() time.Time
-	preflight   func(string) (PreflightResult, error)
-	monitor     time.Duration
-	nodeID      string
-	nodeName    string
-	logger      agentlog.Writer
-	startedAt   time.Time
+	store                 FileStore
+	minecraft             Minecraft
+	relay                 Relay
+	coordinator           Coordinator
+	states                *componentstate.Store
+	frpcPath              string
+	runtimeDir            string
+	version               string
+	relayTTL              time.Duration
+	timeout               time.Duration
+	poll                  time.Duration
+	now                   func() time.Time
+	preflight             func(string) (PreflightResult, error)
+	monitor               time.Duration
+	nodeID                string
+	nodeName              string
+	logger                agentlog.Writer
+	autoRestartMinecraft  bool
+	maxMinecraftRestarts  int
+	minecraftRestartDelay time.Duration
+	startedAt             time.Time
 
 	mu              sync.RWMutex
 	operations      map[string]Operation
@@ -170,6 +176,15 @@ func NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	if options.Logger == nil {
 		options.Logger = agentlog.DiscardWriter{}
 	}
+	if options.MaxMinecraftRestarts < 0 {
+		return nil, errors.New("maximum Minecraft restarts cannot be negative")
+	}
+	if options.MaxMinecraftRestarts == 0 {
+		options.MaxMinecraftRestarts = 3
+	}
+	if options.MinecraftRestartDelay <= 0 {
+		options.MinecraftRestartDelay = time.Second
+	}
 	if options.NodeID == "" {
 		options.NodeID = "local-agent"
 	}
@@ -181,8 +196,11 @@ func NewRuntime(options RuntimeOptions) (*Runtime, error) {
 		relayTTL: options.RelayTTL, timeout: options.ComponentTimeout, poll: options.PollInterval,
 		preflight: options.Preflight, monitor: options.MonitorInterval,
 		nodeID: options.NodeID, nodeName: options.NodeName,
-		logger: options.Logger,
-		now:    options.Now, startedAt: now, operations: make(map[string]Operation), logs: make([]string, 0, 500),
+		logger:                options.Logger,
+		autoRestartMinecraft:  options.AutoRestartMinecraft,
+		maxMinecraftRestarts:  options.MaxMinecraftRestarts,
+		minecraftRestartDelay: options.MinecraftRestartDelay,
+		now:                   options.Now, startedAt: now, operations: make(map[string]Operation), logs: make([]string, 0, 500),
 	}, nil
 }
 
@@ -342,12 +360,7 @@ func (r *Runtime) runStart(ctx context.Context, operationID string) {
 	}
 	r.setState("coordinator", componentstate.Online, "info_ok", "Coordinator 在线", "", operationID)
 
-	relayConfig := frprelay.Config{
-		FRPCPath: r.frpcPath, RuntimeDir: r.runtimeDir, ServerHost: config.CoordinatorHost,
-		ServerPort: info.FRPServerPort, AccessToken: config.AccessToken,
-		LocalHost: "127.0.0.1", LocalPort: 25565, RemotePort: info.PublicMinecraftPort,
-		PublicHost: config.CoordinatorHost, ProbeTTL: r.relayTTL,
-	}
+	relayConfig := r.relayConfig(config, info)
 	r.setState("relay", componentstate.Connecting, "start_requested", "正在连接公网中转", "", operationID)
 	if err := r.step(operationID, "正在连接 VPS", func() error { return r.relay.Start(ctx, relayConfig) }); err != nil {
 		_ = r.minecraft.Stop(context.Background())
@@ -372,7 +385,7 @@ func (r *Runtime) runStart(ctx context.Context, operationID string) {
 	r.mu.Unlock()
 	r.succeed(operationID, "公网服务已上线")
 	go r.runHeartbeat(heartbeatContext, config, info)
-	go r.monitorMinecraft(heartbeatContext, operationID)
+	go r.monitorMinecraft(heartbeatContext, operationID, imported, relayConfig)
 }
 
 func (r *Runtime) runStop(ctx context.Context, operationID string) {
@@ -466,9 +479,10 @@ func (r *Runtime) waitRelayOnline(ctx context.Context, operationID string) error
 	}
 }
 
-func (r *Runtime) monitorMinecraft(ctx context.Context, operationID string) {
+func (r *Runtime) monitorMinecraft(ctx context.Context, operationID string, imported ImportedServer, relayConfig frprelay.Config) {
 	ticker := time.NewTicker(r.monitor)
 	defer ticker.Stop()
+	restarts := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -482,7 +496,53 @@ func (r *Runtime) monitorMinecraft(ctx context.Context, operationID string) {
 		}
 		_ = r.relay.Stop(context.Background())
 		r.setState("relay", componentstate.Error, "minecraft_not_ready", "Minecraft 已停止，公网中转不可用", "", operationID)
-		return
+		if !r.autoRestartMinecraft || restarts >= r.maxMinecraftRestarts {
+			r.setState("minecraft", componentstate.Error, "restart_limit_reached", "Minecraft 自动恢复次数已用尽", status.TechnicalMessage, operationID)
+			return
+		}
+		restarts++
+		r.setState("minecraft", componentstate.Starting, "automatic_restart", "正在自动重启 Minecraft", fmt.Sprintf("attempt %d of %d", restarts, r.maxMinecraftRestarts), operationID)
+		if !waitContext(ctx, r.minecraftRestartDelay) {
+			return
+		}
+		if err := r.minecraft.Start(ctx, imported); err != nil {
+			r.setState("minecraft", componentstate.Error, "automatic_restart_failed", "Minecraft 自动重启失败", err.Error(), operationID)
+			continue
+		}
+		if err := r.waitMinecraftReady(ctx, operationID); err != nil {
+			r.setState("minecraft", componentstate.Error, "automatic_restart_failed", "Minecraft 自动重启失败", err.Error(), operationID)
+			continue
+		}
+		r.setState("relay", componentstate.Reconnecting, "minecraft_recovered", "Minecraft 已恢复，正在重连公网中转", "", operationID)
+		if err := r.relay.Start(ctx, relayConfig); err != nil {
+			r.setState("relay", componentstate.Error, "restart_failed", "公网中转恢复失败", err.Error(), operationID)
+			continue
+		}
+		if err := r.waitRelayOnline(ctx, operationID); err != nil {
+			_ = r.relay.Stop(context.Background())
+			r.setState("relay", componentstate.Error, "restart_failed", "公网中转恢复失败", err.Error(), operationID)
+			continue
+		}
+	}
+}
+
+func (r *Runtime) relayConfig(config Config, info CoordinatorInfo) frprelay.Config {
+	return frprelay.Config{
+		FRPCPath: r.frpcPath, RuntimeDir: r.runtimeDir, ServerHost: config.CoordinatorHost,
+		ServerPort: info.FRPServerPort, AccessToken: config.AccessToken,
+		LocalHost: "127.0.0.1", LocalPort: 25565, RemotePort: info.PublicMinecraftPort,
+		PublicHost: config.CoordinatorHost, ProbeTTL: r.relayTTL,
+	}
+}
+
+func waitContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

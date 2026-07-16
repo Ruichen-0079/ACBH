@@ -18,8 +18,10 @@ import (
 )
 
 type hobbyServeOptions struct {
-	address  string
-	frpcPath string
+	address              string
+	frpcPath             string
+	autoRestartMinecraft bool
+	maxMinecraftRestarts int
 }
 
 func newHobbyCmd() *cobra.Command {
@@ -42,6 +44,8 @@ func newHobbyServeCmd() *cobra.Command {
 	}
 	command.Flags().StringVar(&options.address, "address", "127.0.0.1:6130", "Loopback API and UI address")
 	command.Flags().StringVar(&options.frpcPath, "frpc", "frpc", "Path to the frpc executable")
+	command.Flags().BoolVar(&options.autoRestartMinecraft, "minecraft-auto-restart", true, "Restart Minecraft after an unexpected exit")
+	command.Flags().IntVar(&options.maxMinecraftRestarts, "minecraft-max-restarts", 3, "Maximum Minecraft restarts per hosting operation")
 	return command
 }
 
@@ -76,7 +80,8 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 		Store: store, Minecraft: minecraft, Relay: relay,
 		Coordinator: hobbyagent.CoordinatorClient{}, FRPCPath: options.frpcPath,
 		RuntimeDir: filepath.Join(runtimeDir, "relay"), AgentVersion: "0.4.0-hobby",
-		Logger: logWriter,
+		Logger: logWriter, AutoRestartMinecraft: options.autoRestartMinecraft,
+		MaxMinecraftRestarts: options.maxMinecraftRestarts,
 	})
 	if err != nil {
 		return err

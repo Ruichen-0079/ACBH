@@ -15,16 +15,20 @@ import (
 )
 
 type fakeMinecraft struct {
-	mu         sync.RWMutex
-	state      componentstate.State
-	startCount int
-	stopCount  int
+	mu           sync.RWMutex
+	state        componentstate.State
+	startCount   int
+	stopCount    int
+	readyOnStart bool
 }
 
 func (m *fakeMinecraft) Start(context.Context, ImportedServer) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.startCount++
+	if m.readyOnStart {
+		m.state = componentstate.Ready
+	}
 	return nil
 }
 
@@ -153,7 +157,8 @@ func newTestRuntime(t *testing.T, minecraft *fakeMinecraft, relay *fakeRelay, co
 		Preflight: func(serverDir string) (PreflightResult, error) {
 			return PreflightResult{ServerDir: serverDir, JavaPath: "java", JarPath: filepath.Join(serverDir, "server.jar"), EULAAccepted: true}, nil
 		},
-		NodeID: "test-node",
+		NodeID:               "test-node",
+		AutoRestartMinecraft: true, MaxMinecraftRestarts: 3, MinecraftRestartDelay: time.Millisecond,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +200,8 @@ func TestDuplicateStartDoesNotCreateTwoProcesses(t *testing.T) {
 	if minecraftStarts != 1 || relayStarts != 1 {
 		t.Fatalf("expected one Minecraft and relay start, got %d and %d", minecraftStarts, relayStarts)
 	}
-	_ = runtime.Stop()
+	stop := runtime.Stop()
+	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
 }
 
 func TestMinecraftCrashInvalidatesRelay(t *testing.T) {
@@ -209,6 +215,60 @@ func TestMinecraftCrashInvalidatesRelay(t *testing.T) {
 	if runtime.Status().OverallState == componentstate.Online {
 		t.Fatal("overall status remained ONLINE after Minecraft crash")
 	}
+}
+
+func TestMinecraftCrashRestartsWithinLimitAndRestoresRelay(t *testing.T) {
+	minecraft := &fakeMinecraft{state: componentstate.Ready, readyOnStart: true}
+	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
+	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
+	operation := runtime.Start()
+	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
+	minecraft.setState(componentstate.Error)
+	waitForCondition(t, time.Second, func() bool {
+		minecraftStarts, _ := minecraft.counts()
+		relayStarts, _ := relay.counts()
+		return minecraftStarts == 2 && relayStarts == 2 && runtime.Status().OverallState == componentstate.Online
+	})
+	stop := runtime.Stop()
+	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
+}
+
+func TestMinecraftRestartCanBeDisabled(t *testing.T) {
+	minecraft := &fakeMinecraft{state: componentstate.Ready}
+	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
+	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
+	runtime.autoRestartMinecraft = false
+	operation := runtime.Start()
+	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
+	minecraft.setState(componentstate.Error)
+	waitForCondition(t, time.Second, func() bool {
+		return runtime.states.Components().Minecraft.ReasonCode == "restart_limit_reached"
+	})
+	minecraftStarts, _ := minecraft.counts()
+	if minecraftStarts != 1 {
+		t.Fatalf("disabled policy restarted Minecraft %d time(s)", minecraftStarts-1)
+	}
+	stop := runtime.Stop()
+	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
+}
+
+func TestMinecraftRestartStopsAtConfiguredLimit(t *testing.T) {
+	minecraft := &fakeMinecraft{state: componentstate.Ready}
+	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
+	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
+	runtime.maxMinecraftRestarts = 2
+	operation := runtime.Start()
+	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
+	minecraft.setState(componentstate.Error)
+	waitForCondition(t, time.Second, func() bool {
+		return runtime.states.Components().Minecraft.ReasonCode == "restart_limit_reached"
+	})
+	minecraftStarts, _ := minecraft.counts()
+	if minecraftStarts != 3 {
+		t.Fatalf("expected initial start plus two retries, got %d starts", minecraftStarts)
+	}
+	stop := runtime.Stop()
+	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
 }
 
 func TestCoordinatorDegradedDoesNotOverrideHealthyDataPlane(t *testing.T) {
@@ -238,7 +298,8 @@ func TestCoordinatorDegradedDoesNotOverrideHealthyDataPlane(t *testing.T) {
 			t.Fatalf("diagnostics are missing %s: %s", required, diagnostics)
 		}
 	}
-	_ = runtime.Stop()
+	stop := runtime.Stop()
+	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
 }
 
 func TestStopIsIdempotent(t *testing.T) {
@@ -277,7 +338,8 @@ func TestResumeRestoresPersistedDesiredState(t *testing.T) {
 	if minecraftStarts != 1 || relayStarts != 1 {
 		t.Fatalf("resume did not safely rebuild components: Minecraft=%d Relay=%d", minecraftStarts, relayStarts)
 	}
-	_ = runtime.Stop()
+	stop := runtime.Stop()
+	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
 }
 
 func waitOperation(t *testing.T, runtime *Runtime, id, expected string) Operation {
