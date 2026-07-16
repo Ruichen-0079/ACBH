@@ -159,6 +159,9 @@ const hobbyHeartbeatSchema = z.object({
   minecraft: z.object({ state: z.string().min(1) }).passthrough(),
   relay: z.object({ state: z.string().min(1) }).passthrough(),
   overall: z.object({ state: z.string().min(1) }).passthrough(),
+	minecraft_local_port: z.number().int().min(1024).max(65535),
+	public_minecraft_port: z.number().int().min(1024).max(65535),
+	public_endpoint: z.string().trim().min(1).max(320),
 });
 
 type HobbyNode = z.infer<typeof hobbyHeartbeatSchema> & {

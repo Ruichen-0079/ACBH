@@ -13,6 +13,9 @@ function heartbeat(protocolVersion = 1) {
     minecraft: { state: "READY" },
     relay: { state: "ONLINE" },
     overall: { state: "ONLINE" },
+	minecraft_local_port: 25566,
+	public_minecraft_port: 25575,
+	public_endpoint: "vps.example.test:25575",
   };
 }
 
@@ -62,6 +65,9 @@ test("Hobby heartbeat authenticates and upserts a node", async (t) => {
   assert.equal(nodes.statusCode, 200);
   assert.equal(nodes.json().nodes.length, 1);
   assert.equal(nodes.json().nodes[0].node_id, "node-1");
+	assert.equal(nodes.json().nodes[0].minecraft_local_port, 25566);
+	assert.equal(nodes.json().nodes[0].public_minecraft_port, 25575);
+	assert.equal(nodes.json().nodes[0].public_endpoint, "vps.example.test:25575");
   assert.equal(nodes.body.includes(accessToken), false);
 });
 
