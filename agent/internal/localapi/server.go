@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Ruichen-0079/ACBH/agent/internal/componentstate"
 	"github.com/Ruichen-0079/ACBH/agent/internal/hobbyagent"
 )
 
@@ -25,28 +26,16 @@ type Runtime interface {
 	Stop() hobbyagent.Operation
 	Operation(string) (hobbyagent.Operation, bool)
 	Status() hobbyagent.RuntimeStatus
-	Events(int) []componentEvent
+	Events(int) []componentstate.Event
 	Logs(int) []string
 	Diagnostics(context.Context) map[string]any
 }
 
-// componentEvent is an alias-shaped interface boundary that lets the HTTP
-// server serialize the concrete state event slice without changing its schema.
-type componentEvent = struct {
-	Event       string    `json:"event"`
-	Component   string    `json:"component"`
-	From        string    `json:"from"`
-	To          string    `json:"to"`
-	Reason      string    `json:"reason"`
-	OperationID string    `json:"operation_id,omitempty"`
-	Time        time.Time `json:"time"`
-}
-
 type Server struct {
-	runtime *hobbyagent.Runtime
+	runtime Runtime
 }
 
-func New(runtime *hobbyagent.Runtime) *Server { return &Server{runtime: runtime} }
+func New(runtime Runtime) *Server { return &Server{runtime: runtime} }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()

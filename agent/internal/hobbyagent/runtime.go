@@ -361,7 +361,7 @@ func (r *Runtime) runStart(ctx context.Context, operationID string) {
 	r.mu.Unlock()
 	r.succeed(operationID, "公网服务已上线")
 	go r.runHeartbeat(heartbeatContext, config, info)
-	go r.monitorMinecraft(operationID)
+	go r.monitorMinecraft(heartbeatContext, operationID)
 }
 
 func (r *Runtime) runStop(ctx context.Context, operationID string) {
@@ -451,10 +451,15 @@ func (r *Runtime) waitRelayOnline(ctx context.Context, operationID string) error
 	}
 }
 
-func (r *Runtime) monitorMinecraft(operationID string) {
+func (r *Runtime) monitorMinecraft(ctx context.Context, operationID string) {
 	ticker := time.NewTicker(r.monitor)
 	defer ticker.Stop()
-	for range ticker.C {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
 		status := r.minecraft.Status(context.Background())
 		r.states.Set("minecraft", status.Snapshot, operationID)
 		if status.State == componentstate.Ready {
