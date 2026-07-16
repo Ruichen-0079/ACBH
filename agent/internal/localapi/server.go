@@ -2,6 +2,7 @@ package localapi
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,15 @@ import (
 )
 
 const maxJSONBody = 1024 * 1024
+
+//go:embed web/index.html
+var indexHTML []byte
+
+//go:embed web/app.css
+var appCSS []byte
+
+//go:embed web/app.js
+var appJS []byte
 
 type Runtime interface {
 	Config() (hobbyagent.PublicConfig, error)
@@ -39,6 +49,9 @@ func New(runtime Runtime) *Server { return &Server{runtime: runtime} }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /", static(indexHTML, "text/html; charset=utf-8"))
+	mux.HandleFunc("GET /app.css", static(appCSS, "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /app.js", static(appJS, "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /local/v1/status", s.status)
 	mux.HandleFunc("GET /local/v1/config", s.getConfig)
 	mux.HandleFunc("PUT /local/v1/config", s.putConfig)
@@ -50,6 +63,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /local/v1/diagnostics", s.diagnostics)
 	mux.HandleFunc("GET /local/v1/logs", s.logs)
 	return securityHeaders(mux)
+}
+
+func static(content []byte, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(content)
+	}
 }
 
 func (s *Server) status(w http.ResponseWriter, _ *http.Request) {

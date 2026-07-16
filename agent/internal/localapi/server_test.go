@@ -106,3 +106,35 @@ func TestListenRejectsNonLoopbackAddress(t *testing.T) {
 		t.Fatalf("expected loopback binding error, got %v", err)
 	}
 }
+
+func TestEmbeddedUIIsMinimalAndAutomaticallyRefreshes(t *testing.T) {
+	runtime := &fakeRuntime{}
+	handler := New(runtime).Handler()
+	pageRequest := httptest.NewRequest(http.MethodGet, "/", nil)
+	pageResponse := httptest.NewRecorder()
+	handler.ServeHTTP(pageResponse, pageRequest)
+	if pageResponse.Code != http.StatusOK {
+		t.Fatalf("expected UI 200, got %d", pageResponse.Code)
+	}
+	page := pageResponse.Body.String()
+	for _, required := range []string{"开始托管", "公网服务器在线", "停止托管", "设置", "诊断"} {
+		if !strings.Contains(page, required) {
+			t.Fatalf("UI is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"session_id", "heartbeat", "epoch", "capability", "PID"} {
+		if strings.Contains(page, forbidden) {
+			t.Fatalf("main UI exposes internal field %q", forbidden)
+		}
+	}
+	if pageResponse.Header().Get("Content-Security-Policy") == "" {
+		t.Fatal("UI response is missing Content-Security-Policy")
+	}
+
+	scriptRequest := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	scriptResponse := httptest.NewRecorder()
+	handler.ServeHTTP(scriptResponse, scriptRequest)
+	if !strings.Contains(scriptResponse.Body.String(), "setInterval(refresh, 2000)") {
+		t.Fatal("UI does not automatically refresh status")
+	}
+}
