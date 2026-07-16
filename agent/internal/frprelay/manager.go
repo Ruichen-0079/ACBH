@@ -331,7 +331,13 @@ func (m *Manager) finishTerminal(reason string, err error) {
 	defer m.mu.Unlock()
 	m.desired = false
 	m.status.Terminal = true
-	m.transitionLocked(componentstate.Error, reason, "公网中转配置需要检查", errorString(err), true)
+	userMessage := "公网中转配置需要检查"
+	if reason == "PUBLIC_PORT_IN_USE" {
+		userMessage = "VPS公网端口已被占用"
+	} else if reason == "AUTH_FAILED" {
+		userMessage = "Access Token 无效"
+	}
+	m.transitionLocked(componentstate.Error, reason, userMessage, errorString(err), true)
 	m.metadata.Desired = false
 	m.metadata.PID = 0
 	m.metadata.UpdatedAt = m.deps.Clock.Now()
@@ -382,12 +388,12 @@ func classifyLine(line string) (string, bool) {
 	normalized := strings.ToLower(line)
 	for _, marker := range []string{"token in login doesn't match", "authentication failed", "authorization failed", "invalid token"} {
 		if strings.Contains(normalized, marker) {
-			return "authentication_failed", true
+			return "AUTH_FAILED", true
 		}
 	}
 	for _, marker := range []string{"port already used", "remote port", "already in use", "port conflict"} {
 		if strings.Contains(normalized, marker) && (strings.Contains(normalized, "used") || strings.Contains(normalized, "in use") || strings.Contains(normalized, "conflict")) {
-			return "remote_port_conflict", true
+			return "PUBLIC_PORT_IN_USE", true
 		}
 	}
 	for _, marker := range []string{"parse config error", "invalid configuration", "failed to parse"} {

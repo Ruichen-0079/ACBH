@@ -73,7 +73,6 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 		Executable: executable,
 		RuntimeDir: filepath.Join(runtimeDir, "minecraft"),
 		LogDir:     filepath.Join(configDir, "logs", "minecraft"),
-		Port:       25565,
 		Timeout:    30 * time.Second,
 	}
 	runtimeService, err := hobbyagent.NewRuntime(hobbyagent.RuntimeOptions{

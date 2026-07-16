@@ -37,6 +37,7 @@ function render(status) {
   if (status.overall === "ONLINE") {
     show("online");
     byId("endpoint").textContent = status.public_endpoint || "正在获取地址";
+	byId("local-endpoint").textContent = status.local_endpoint || "127.0.0.1:25565";
     byId("minecraft-state").textContent = stateLabel(status.minecraft?.state, ["READY"]);
     byId("relay-state").textContent = stateLabel(status.relay?.state, ["ONLINE"]);
     byId("uptime").textContent = formatDuration(status.uptime_seconds || 0);
@@ -67,6 +68,8 @@ byId("open-settings").addEventListener("click", async () => {
     const config = await api("/local/v1/config");
     byId("coordinator-host").value = config.coordinator_host || "";
     byId("coordinator-port").value = config.coordinator_port || 6121;
+	byId("minecraft-local-port").value = config.minecraft_local_port || 25565;
+	byId("public-minecraft-port").value = config.public_minecraft_port || 25565;
   } catch {}
   byId("access-token").value = "";
   byId("settings-dialog").showModal();
@@ -83,6 +86,8 @@ byId("settings-form").addEventListener("submit", async (event) => {
       coordinator_host: byId("coordinator-host").value,
       coordinator_port: Number(byId("coordinator-port").value || 6121),
       access_token: token,
+	  minecraft_local_port: Number(byId("minecraft-local-port").value || 25565),
+	  public_minecraft_port: Number(byId("public-minecraft-port").value || 25565),
     }) });
     byId("settings-result").textContent = "设置已保存。";
   } catch (error) { byId("settings-result").textContent = error.message; }

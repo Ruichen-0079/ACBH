@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -60,6 +61,13 @@ func (p *fakeProcess) Kill() error {
 type fakeProber struct{ err error }
 
 func (p fakeProber) Probe(context.Context, string) error { return p.err }
+
+type recordingProber struct{ addresses chan string }
+
+func (p recordingProber) Probe(_ context.Context, address string) error {
+	p.addresses <- address
+	return nil
+}
 
 type recordingSleeper struct {
 	durations chan time.Duration
@@ -184,8 +192,50 @@ func TestPortConflictDoesNotCreateRestartStorm(t *testing.T) {
 	if launcher.count.Load() != 1 {
 		t.Fatalf("port conflict launched %d processes", launcher.count.Load())
 	}
-	if manager.Status().ReasonCode != "remote_port_conflict" {
+	if manager.Status().ReasonCode != "PUBLIC_PORT_IN_USE" {
 		t.Fatalf("unexpected reason %q", manager.Status().ReasonCode)
+	}
+}
+
+func TestGeneratedConfigAndProbesUseConfiguredPorts(t *testing.T) {
+	config := testConfig(t)
+	config.LocalPort = 25566
+	config.RemotePort = 25575
+	path, err := writeTemporaryConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "localPort = 25566") || !strings.Contains(string(contents), "remotePort = 25575") {
+		t.Fatalf("generated config has wrong ports: %s", contents)
+	}
+
+	process := newBlockingProcess(302)
+	launcher := &fakeLauncher{start: func(int, LaunchRequest) (Process, error) { return process, nil }}
+	addresses := make(chan string, 4)
+	manager := NewManager(Dependencies{Launcher: launcher, Prober: recordingProber{addresses: addresses}, Inspector: fakeInspector(false)})
+	if err := manager.Start(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	process.lines <- OutputLine{Stream: "stdout", Line: "login to server success", Time: time.Now().UTC()}
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case address := <-addresses:
+			seen[address] = true
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for configured probes: %+v", seen)
+		}
+	}
+	if !seen["127.0.0.1:25566"] || !seen["vps.example.test:25575"] {
+		t.Fatalf("unexpected probe addresses: %+v", seen)
+	}
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

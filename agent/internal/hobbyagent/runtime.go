@@ -35,13 +35,16 @@ type Coordinator interface {
 }
 
 type Heartbeat struct {
-	ProtocolVersion int                     `json:"protocol_version"`
-	NodeID          string                  `json:"node_id"`
-	NodeName        string                  `json:"node_name,omitempty"`
-	AgentVersion    string                  `json:"agent_version"`
-	Minecraft       componentstate.Snapshot `json:"minecraft"`
-	Relay           componentstate.Snapshot `json:"relay"`
-	Overall         componentstate.Snapshot `json:"overall"`
+	ProtocolVersion     int                     `json:"protocol_version"`
+	NodeID              string                  `json:"node_id"`
+	NodeName            string                  `json:"node_name,omitempty"`
+	AgentVersion        string                  `json:"agent_version"`
+	Minecraft           componentstate.Snapshot `json:"minecraft"`
+	Relay               componentstate.Snapshot `json:"relay"`
+	Overall             componentstate.Snapshot `json:"overall"`
+	MinecraftLocalPort  int                     `json:"minecraft_local_port"`
+	PublicMinecraftPort int                     `json:"public_minecraft_port"`
+	PublicEndpoint      string                  `json:"public_endpoint"`
 }
 
 type MinecraftStatus struct {
@@ -52,10 +55,10 @@ type MinecraftStatus struct {
 }
 
 type Minecraft interface {
-	Start(context.Context, ImportedServer) error
+	Start(context.Context, ImportedServer, int) error
 	Stop(context.Context) error
-	Status(context.Context) MinecraftStatus
-	Diagnose(context.Context) any
+	Status(context.Context, int) MinecraftStatus
+	Diagnose(context.Context, int) any
 }
 
 type Relay interface {
@@ -71,6 +74,7 @@ type Operation struct {
 	Status      string     `json:"status"`
 	CurrentStep string     `json:"current_step,omitempty"`
 	Error       string     `json:"error,omitempty"`
+	ErrorCode   string     `json:"error_code,omitempty"`
 	StartedAt   time.Time  `json:"started_at"`
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`
 }
@@ -79,6 +83,7 @@ type RuntimeStatus struct {
 	Overall        componentstate.Snapshot `json:"overall_detail"`
 	OverallState   componentstate.State    `json:"overall"`
 	PublicEndpoint string                  `json:"public_endpoint,omitempty"`
+	LocalEndpoint  string                  `json:"local_endpoint"`
 	UptimeSeconds  int64                   `json:"uptime_seconds"`
 	Minecraft      MinecraftStatus         `json:"minecraft"`
 	Relay          frprelay.Status         `json:"relay"`
@@ -213,10 +218,28 @@ func (r *Runtime) Config() (PublicConfig, error) {
 }
 
 func (r *Runtime) UpdateConfig(config Config) (PublicConfig, error) {
+	config = config.normalized()
+	current, loadErr := r.store.LoadConfig()
+	portsChanged := loadErr == nil && (current.MinecraftLocalPort != config.MinecraftLocalPort || current.PublicMinecraftPort != config.PublicMinecraftPort)
+	if portsChanged && r.hostingActive(current.MinecraftLocalPort) {
+		return PublicConfig{}, &CodedError{Code: CodeConfigLockedWhileRunning, Message: "请先停止托管，再修改端口。"}
+	}
 	if err := r.store.SaveConfig(config); err != nil {
 		return PublicConfig{}, err
 	}
 	return config.Public(), nil
+}
+
+func (r *Runtime) hostingActive(port int) bool {
+	r.mu.RLock()
+	operationActive := r.activeID != ""
+	r.mu.RUnlock()
+	if operationActive {
+		return true
+	}
+	minecraft := r.minecraft.Status(context.Background(), port)
+	relay := r.relay.Status()
+	return minecraft.State != componentstate.Stopped || relay.State != componentstate.Offline
 }
 
 func (r *Runtime) Import(serverDir string) (PreflightResult, error) {
@@ -326,19 +349,24 @@ func (r *Runtime) runStart(ctx context.Context, operationID string) {
 		return
 	}
 	imported, _ := r.store.LoadImportedServer()
+	config, _ := r.store.LoadConfig()
 	r.setState("minecraft", componentstate.Starting, "start_requested", "正在启动 Minecraft", "", operationID)
-	if err := r.step(operationID, "正在启动 Minecraft", func() error { return r.minecraft.Start(ctx, imported) }); err != nil {
-		r.setState("minecraft", componentstate.Error, "start_failed", "Minecraft 启动失败", err.Error(), operationID)
+	if err := r.step(operationID, "正在启动 Minecraft", func() error { return r.minecraft.Start(ctx, imported, config.MinecraftLocalPort) }); err != nil {
+		reason, message := "start_failed", "Minecraft 启动失败"
+		if errorCode(err) == CodeLocalPortInUse {
+			reason, message = CodeLocalPortInUse, err.Error()
+		}
+		r.setState("minecraft", componentstate.Error, reason, message, err.Error(), operationID)
 		r.fail(operationID, err)
 		return
 	}
-	if err := r.step(operationID, "正在等待本地端口", func() error { return r.waitMinecraftReady(ctx, operationID) }); err != nil {
+	if err := r.step(operationID, "正在等待本地端口", func() error { return r.waitMinecraftReady(ctx, operationID, config.MinecraftLocalPort) }); err != nil {
+		r.setState("minecraft", componentstate.Error, CodeLocalMCNotListening, err.Error(), err.Error(), operationID)
 		_ = r.minecraft.Stop(context.Background())
 		r.fail(operationID, err)
 		return
 	}
 
-	config, _ := r.store.LoadConfig()
 	r.setState("coordinator", componentstate.Connecting, "info_requested", "正在连接 Coordinator", "", operationID)
 	var info CoordinatorInfo
 	if err := r.step(operationID, "正在连接 VPS", func() error {
@@ -375,7 +403,7 @@ func (r *Runtime) runStart(ctx context.Context, operationID string) {
 	}
 
 	r.mu.Lock()
-	r.publicEndpoint = fmt.Sprintf("%s:%d", config.CoordinatorHost, info.PublicMinecraftPort)
+	r.publicEndpoint = fmt.Sprintf("%s:%d", config.CoordinatorHost, config.PublicMinecraftPort)
 	r.coordinatorInfo = &info
 	heartbeatContext, cancelHeartbeat := context.WithCancel(context.Background())
 	if r.hostingCancel != nil {
@@ -431,13 +459,13 @@ func (r *Runtime) validateStartInputs() error {
 	return err
 }
 
-func (r *Runtime) waitMinecraftReady(ctx context.Context, operationID string) error {
+func (r *Runtime) waitMinecraftReady(ctx context.Context, operationID string, port int) error {
 	deadline := time.NewTimer(r.timeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(r.poll)
 	defer ticker.Stop()
 	for {
-		status := r.minecraft.Status(ctx)
+		status := r.minecraft.Status(ctx, port)
 		r.states.Set("minecraft", status.Snapshot, operationID)
 		if status.State == componentstate.Ready {
 			return nil
@@ -449,7 +477,7 @@ func (r *Runtime) waitMinecraftReady(ctx context.Context, operationID string) er
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return errors.New("Minecraft did not become READY before timeout")
+			return &CodedError{Code: CodeLocalMCNotListening, Message: "Minecraft没有监听填写的本地端口，请检查端口设置是否一致。"}
 		case <-ticker.C:
 		}
 	}
@@ -467,6 +495,9 @@ func (r *Runtime) waitRelayOnline(ctx context.Context, operationID string) error
 			return nil
 		}
 		if status.Terminal || status.State == componentstate.Error {
+			if status.ReasonCode == CodePublicPortInUse {
+				return &CodedError{Code: CodePublicPortInUse, Message: "VPS公网端口已被占用", Cause: errors.New(status.TechnicalMessage)}
+			}
 			return fmt.Errorf("relay failed: %s", status.ReasonCode)
 		}
 		select {
@@ -489,7 +520,7 @@ func (r *Runtime) monitorMinecraft(ctx context.Context, operationID string, impo
 			return
 		case <-ticker.C:
 		}
-		status := r.minecraft.Status(context.Background())
+		status := r.minecraft.Status(context.Background(), relayConfig.LocalPort)
 		r.states.Set("minecraft", status.Snapshot, operationID)
 		if status.State == componentstate.Ready {
 			continue
@@ -505,11 +536,11 @@ func (r *Runtime) monitorMinecraft(ctx context.Context, operationID string, impo
 		if !waitContext(ctx, r.minecraftRestartDelay) {
 			return
 		}
-		if err := r.minecraft.Start(ctx, imported); err != nil {
+		if err := r.minecraft.Start(ctx, imported, relayConfig.LocalPort); err != nil {
 			r.setState("minecraft", componentstate.Error, "automatic_restart_failed", "Minecraft 自动重启失败", err.Error(), operationID)
 			continue
 		}
-		if err := r.waitMinecraftReady(ctx, operationID); err != nil {
+		if err := r.waitMinecraftReady(ctx, operationID, relayConfig.LocalPort); err != nil {
 			r.setState("minecraft", componentstate.Error, "automatic_restart_failed", "Minecraft 自动重启失败", err.Error(), operationID)
 			continue
 		}
@@ -530,7 +561,7 @@ func (r *Runtime) relayConfig(config Config, info CoordinatorInfo) frprelay.Conf
 	return frprelay.Config{
 		FRPCPath: r.frpcPath, RuntimeDir: r.runtimeDir, ServerHost: config.CoordinatorHost,
 		ServerPort: info.FRPServerPort, AccessToken: config.AccessToken,
-		LocalHost: "127.0.0.1", LocalPort: 25565, RemotePort: info.PublicMinecraftPort,
+		LocalHost: "127.0.0.1", LocalPort: config.MinecraftLocalPort, RemotePort: config.PublicMinecraftPort,
 		PublicHost: config.CoordinatorHost, ProbeTTL: r.relayTTL,
 	}
 }
@@ -556,13 +587,16 @@ func (r *Runtime) runHeartbeat(ctx context.Context, config Config, info Coordina
 	for {
 		status := r.Status()
 		response, err := r.coordinator.Heartbeat(ctx, config, Heartbeat{
-			ProtocolVersion: ProtocolVersion,
-			NodeID:          r.nodeID,
-			NodeName:        r.nodeName,
-			AgentVersion:    r.version,
-			Minecraft:       status.Minecraft.Snapshot,
-			Relay:           status.Relay.Snapshot,
-			Overall:         status.Overall,
+			ProtocolVersion:     ProtocolVersion,
+			NodeID:              r.nodeID,
+			NodeName:            r.nodeName,
+			AgentVersion:        r.version,
+			Minecraft:           status.Minecraft.Snapshot,
+			Relay:               status.Relay.Snapshot,
+			Overall:             status.Overall,
+			MinecraftLocalPort:  config.MinecraftLocalPort,
+			PublicMinecraftPort: config.PublicMinecraftPort,
+			PublicEndpoint:      fmt.Sprintf("%s:%d", config.CoordinatorHost, config.PublicMinecraftPort),
 		})
 		if err != nil {
 			state, reason, message := componentstate.Degraded, "heartbeat_failed", "Coordinator 暂时不可用"
@@ -647,6 +681,7 @@ func (r *Runtime) fail(id string, err error) {
 	operation := r.operations[id]
 	operation.Status = "FAILED"
 	operation.Error = redact(err.Error(), r.accessTokenLocked())
+	operation.ErrorCode = errorCode(err)
 	operation.FinishedAt = &now
 	r.operations[id] = operation
 	if r.activeID == id {
@@ -663,7 +698,12 @@ func (r *Runtime) newOperationLocked(kind string) Operation {
 }
 
 func (r *Runtime) statusLocked() RuntimeStatus {
-	minecraft := r.minecraft.Status(context.Background())
+	config, _ := r.store.LoadConfig()
+	port := config.MinecraftLocalPort
+	if port == 0 {
+		port = 25565
+	}
+	minecraft := r.minecraft.Status(context.Background(), port)
 	relay := r.relay.Status()
 	components := r.states.Components()
 	components.Minecraft = minecraft.Snapshot
@@ -671,6 +711,7 @@ func (r *Runtime) statusLocked() RuntimeStatus {
 	overall := componentstate.DeriveOverall(components, r.now(), r.relayTTL)
 	return RuntimeStatus{
 		Overall: overall, OverallState: overall.State, PublicEndpoint: r.publicEndpoint,
+		LocalEndpoint: fmt.Sprintf("127.0.0.1:%d", port),
 		UptimeSeconds: int64(r.now().Sub(r.startedAt).Seconds()), Minecraft: minecraft,
 		Relay: relay, Coordinator: components.Coordinator, CurrentStep: r.currentStep,
 		UserMessage: overall.UserMessage,

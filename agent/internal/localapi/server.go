@@ -94,6 +94,10 @@ func (s *Server) putConfig(w http.ResponseWriter, request *http.Request) {
 	}
 	config, err := s.runtime.UpdateConfig(input)
 	if err != nil {
+		if hobbyagent.ErrorCode(err) == hobbyagent.CodeConfigLockedWhileRunning {
+			writeError(w, http.StatusConflict, hobbyagent.CodeConfigLockedWhileRunning, err)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid_config", err)
 		return
 	}

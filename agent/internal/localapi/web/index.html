@@ -22,7 +22,8 @@
       <p class="label">玩家地址</p>
       <div class="endpoint"><strong id="endpoint">—</strong><button id="copy-address" class="ghost">复制</button></div>
       <div class="components">
-        <div><span>本地服务器</span><b id="minecraft-state">● 正常</b></div>
+        <div><span>本地服务器</span><b id="local-endpoint">127.0.0.1:25565</b></div>
+        <div><span>服务器状态</span><b id="minecraft-state">● 正常</b></div>
         <div><span>公网中转</span><b id="relay-state">● 正常</b></div>
         <div><span>已持续运行</span><b id="uptime">—</b></div>
       </div>
@@ -47,6 +48,9 @@
       <label>VPS / Coordinator 地址<input id="coordinator-host" required placeholder="vps.example.com"></label>
       <label>Coordinator 端口<input id="coordinator-port" required type="number" min="1" max="65535" value="6121"></label>
       <label>Access Token<input id="access-token" type="password" placeholder="已保存的 Token 不会显示"></label>
+      <label>本地 MC 端口<input id="minecraft-local-port" required type="number" min="1024" max="65535" step="1" value="25565"></label>
+      <label>VPS 公网端口<input id="public-minecraft-port" required type="number" min="1024" max="65535" step="1" value="25565"></label>
+      <p class="hint">玩家通过 VPS 公网端口连接，中转到本地 MC 端口。</p>
       <button id="save-settings" value="default" class="primary">保存设置</button>
       <hr>
       <label>Minecraft 服务端目录<input id="server-dir" placeholder="C:\minecraft-server 或 /srv/minecraft"></label>

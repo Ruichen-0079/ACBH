@@ -19,11 +19,15 @@ type fakeRuntime struct {
 	updateCount int
 	start       hobbyagent.Operation
 	stop        hobbyagent.Operation
+	updateErr   error
 }
 
 func (f *fakeRuntime) Config() (hobbyagent.PublicConfig, error) { return f.config.Public(), nil }
 func (f *fakeRuntime) UpdateConfig(config hobbyagent.Config) (hobbyagent.PublicConfig, error) {
 	f.updateCount++
+	if f.updateErr != nil {
+		return hobbyagent.PublicConfig{}, f.updateErr
+	}
 	f.config = config
 	if err := config.Validate(); err != nil {
 		return hobbyagent.PublicConfig{}, err
@@ -51,7 +55,7 @@ func (f *fakeRuntime) Diagnostics(context.Context) map[string]any {
 func TestConfigEndpointRejectsRuntimeStateFields(t *testing.T) {
 	for _, field := range []string{
 		"session_id", "relay_state", "heartbeat", "public_endpoint", "current_host",
-		"lease", "tunnel_state", "current_step",
+		"lease", "tunnel_state", "current_step", "PID", "process_state", "reconnect_count",
 	} {
 		t.Run(field, func(t *testing.T) {
 			runtime := &fakeRuntime{}
@@ -71,7 +75,7 @@ func TestConfigEndpointRejectsRuntimeStateFields(t *testing.T) {
 
 func TestConfigResponseNeverReturnsAccessToken(t *testing.T) {
 	runtime := &fakeRuntime{}
-	body := []byte(`{"coordinator_host":"vps.example.test","coordinator_port":6121,"access_token":"top-secret"}`)
+	body := []byte(`{"coordinator_host":"vps.example.test","coordinator_port":6121,"access_token":"top-secret","minecraft_local_port":25566,"public_minecraft_port":25575}`)
 	request := httptest.NewRequest(http.MethodPut, "/local/v1/config", bytes.NewReader(body))
 	response := httptest.NewRecorder()
 	New(runtime).Handler().ServeHTTP(response, request)
@@ -85,8 +89,31 @@ func TestConfigResponseNeverReturnsAccessToken(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &public); err != nil {
 		t.Fatal(err)
 	}
-	if !public.HasAccessToken {
+	if !public.AccessTokenConfigured {
 		t.Fatal("response did not indicate that a token is configured")
+	}
+}
+
+func TestConfigEndpointRejectsNonIntegerPorts(t *testing.T) {
+	for name, value := range map[string]string{"string": `"25566"`, "fraction": `25566.5`, "negative": `-25566`} {
+		t.Run(name, func(t *testing.T) {
+			body := `{"coordinator_host":"vps","coordinator_port":6121,"access_token":"secret","minecraft_local_port":` + value + `,"public_minecraft_port":25575}`
+			response := httptest.NewRecorder()
+			New(&fakeRuntime{}).Handler().ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/local/v1/config", strings.NewReader(body)))
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestConfigLockedWhileRunningUsesStableError(t *testing.T) {
+	runtime := &fakeRuntime{updateErr: &hobbyagent.CodedError{Code: hobbyagent.CodeConfigLockedWhileRunning, Message: "请先停止托管，再修改端口。"}}
+	body := `{"coordinator_host":"vps","coordinator_port":6121,"access_token":"secret","minecraft_local_port":25566,"public_minecraft_port":25575}`
+	response := httptest.NewRecorder()
+	New(runtime).Handler().ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/local/v1/config", strings.NewReader(body)))
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), hobbyagent.CodeConfigLockedWhileRunning) {
+		t.Fatalf("unexpected locked response: %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -117,7 +144,7 @@ func TestEmbeddedUIIsMinimalAndAutomaticallyRefreshes(t *testing.T) {
 		t.Fatalf("expected UI 200, got %d", pageResponse.Code)
 	}
 	page := pageResponse.Body.String()
-	for _, required := range []string{"开始托管", "公网服务器在线", "停止托管", "设置", "诊断"} {
+	for _, required := range []string{"开始托管", "公网服务器在线", "停止托管", "设置", "诊断", "本地 MC 端口", "VPS 公网端口", "local-endpoint"} {
 		if !strings.Contains(page, required) {
 			t.Fatalf("UI is missing %q", required)
 		}

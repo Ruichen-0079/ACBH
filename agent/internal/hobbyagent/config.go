@@ -10,18 +10,23 @@ import (
 )
 
 type Config struct {
-	CoordinatorHost string `json:"coordinator_host"`
-	CoordinatorPort int    `json:"coordinator_port"`
-	AccessToken     string `json:"access_token"`
+	CoordinatorHost     string `json:"coordinator_host"`
+	CoordinatorPort     int    `json:"coordinator_port"`
+	AccessToken         string `json:"access_token"`
+	MinecraftLocalPort  int    `json:"minecraft_local_port"`
+	PublicMinecraftPort int    `json:"public_minecraft_port"`
 }
 
 type PublicConfig struct {
-	CoordinatorHost string `json:"coordinator_host"`
-	CoordinatorPort int    `json:"coordinator_port"`
-	HasAccessToken  bool   `json:"has_access_token"`
+	CoordinatorHost       string `json:"coordinator_host"`
+	CoordinatorPort       int    `json:"coordinator_port"`
+	MinecraftLocalPort    int    `json:"minecraft_local_port"`
+	PublicMinecraftPort   int    `json:"public_minecraft_port"`
+	AccessTokenConfigured bool   `json:"access_token_configured"`
 }
 
 func (c Config) Validate() error {
+	c = c.normalized()
 	if strings.TrimSpace(c.CoordinatorHost) == "" {
 		return errors.New("coordinator_host is required")
 	}
@@ -30,6 +35,12 @@ func (c Config) Validate() error {
 	}
 	if c.CoordinatorPort < 1 || c.CoordinatorPort > 65535 {
 		return errors.New("coordinator_port must be between 1 and 65535")
+	}
+	if c.MinecraftLocalPort < 1024 || c.MinecraftLocalPort > 65535 {
+		return errors.New("minecraft_local_port must be between 1024 and 65535")
+	}
+	if c.PublicMinecraftPort < 1024 || c.PublicMinecraftPort > 65535 {
+		return errors.New("public_minecraft_port must be between 1024 and 65535")
 	}
 	if strings.TrimSpace(c.AccessToken) == "" {
 		return errors.New("access_token is required")
@@ -42,15 +53,23 @@ func (c Config) normalized() Config {
 	if c.CoordinatorPort == 0 {
 		c.CoordinatorPort = 6121
 	}
+	if c.MinecraftLocalPort == 0 {
+		c.MinecraftLocalPort = 25565
+	}
+	if c.PublicMinecraftPort == 0 {
+		c.PublicMinecraftPort = 25565
+	}
 	return c
 }
 
 func (c Config) Public() PublicConfig {
 	c = c.normalized()
 	return PublicConfig{
-		CoordinatorHost: c.CoordinatorHost,
-		CoordinatorPort: c.CoordinatorPort,
-		HasAccessToken:  c.AccessToken != "",
+		CoordinatorHost:       c.CoordinatorHost,
+		CoordinatorPort:       c.CoordinatorPort,
+		MinecraftLocalPort:    c.MinecraftLocalPort,
+		PublicMinecraftPort:   c.PublicMinecraftPort,
+		AccessTokenConfigured: c.AccessToken != "",
 	}
 }
 

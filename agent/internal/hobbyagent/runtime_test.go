@@ -20,12 +20,14 @@ type fakeMinecraft struct {
 	startCount   int
 	stopCount    int
 	readyOnStart bool
+	lastPort     int
 }
 
-func (m *fakeMinecraft) Start(context.Context, ImportedServer) error {
+func (m *fakeMinecraft) Start(_ context.Context, _ ImportedServer, port int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.startCount++
+	m.lastPort = port
 	if m.readyOnStart {
 		m.state = componentstate.Ready
 	}
@@ -40,9 +42,9 @@ func (m *fakeMinecraft) Stop(context.Context) error {
 	return nil
 }
 
-func (m *fakeMinecraft) Status(context.Context) MinecraftStatus {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+func (m *fakeMinecraft) Status(_ context.Context, port int) MinecraftStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	now := time.Now().UTC()
 	snapshot := componentstate.NewSnapshot(m.state, now, "fake", "fake")
 	if m.state == componentstate.Ready {
@@ -51,10 +53,11 @@ func (m *fakeMinecraft) Status(context.Context) MinecraftStatus {
 	if m.state == componentstate.Error {
 		snapshot.TechnicalMessage = "minecraft exited"
 	}
+	m.lastPort = port
 	return MinecraftStatus{Snapshot: snapshot, PID: 123}
 }
 
-func (m *fakeMinecraft) Diagnose(context.Context) any { return m.Status(context.Background()) }
+func (m *fakeMinecraft) Diagnose(ctx context.Context, port int) any { return m.Status(ctx, port) }
 
 func (m *fakeMinecraft) setState(state componentstate.State) {
 	m.mu.Lock()
@@ -115,18 +118,20 @@ func (r *fakeRelay) counts() (int, int) {
 }
 
 type fakeCoordinator struct {
-	mu           sync.Mutex
-	info         CoordinatorInfo
-	heartbeatErr error
-	heartbeats   int
+	mu            sync.Mutex
+	info          CoordinatorInfo
+	heartbeatErr  error
+	heartbeats    int
+	lastHeartbeat Heartbeat
 }
 
 func (c *fakeCoordinator) Info(context.Context, Config) (CoordinatorInfo, error) { return c.info, nil }
 
-func (c *fakeCoordinator) Heartbeat(context.Context, Config, Heartbeat) (CoordinatorStatus, error) {
+func (c *fakeCoordinator) Heartbeat(_ context.Context, _ Config, heartbeat Heartbeat) (CoordinatorStatus, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.heartbeats++
+	c.lastHeartbeat = heartbeat
 	return CoordinatorStatus{State: "ONLINE"}, c.heartbeatErr
 }
 
@@ -136,6 +141,12 @@ func (c *fakeCoordinator) heartbeatCount() int {
 	return c.heartbeats
 }
 
+func (c *fakeCoordinator) latestHeartbeat() Heartbeat {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastHeartbeat
+}
+
 func newTestRuntime(t *testing.T, minecraft *fakeMinecraft, relay *fakeRelay, coordinator *fakeCoordinator) *Runtime {
 	t.Helper()
 	directory := t.TempDir()
@@ -143,7 +154,7 @@ func newTestRuntime(t *testing.T, minecraft *fakeMinecraft, relay *fakeRelay, co
 		ConfigPath: filepath.Join(directory, "config.json"),
 		ImportPath: filepath.Join(directory, "import.json"),
 	}
-	if err := store.SaveConfig(Config{CoordinatorHost: "vps.example.test", CoordinatorPort: 6121, AccessToken: "test-secret"}); err != nil {
+	if err := store.SaveConfig(Config{CoordinatorHost: "vps.example.test", CoordinatorPort: 6121, AccessToken: "test-secret", MinecraftLocalPort: 25566, PublicMinecraftPort: 25575}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveImportedServer(ImportedServer{ServerDir: directory, JavaPath: "java", JarPath: filepath.Join(directory, "server.jar")}); err != nil {
@@ -199,6 +210,50 @@ func TestDuplicateStartDoesNotCreateTwoProcesses(t *testing.T) {
 	relayStarts, _ := relay.counts()
 	if minecraftStarts != 1 || relayStarts != 1 {
 		t.Fatalf("expected one Minecraft and relay start, got %d and %d", minecraftStarts, relayStarts)
+	}
+	stop := runtime.Stop()
+	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
+}
+
+func TestConfiguredPortsDriveMinecraftRelayStatusAndHeartbeat(t *testing.T) {
+	minecraft := &fakeMinecraft{state: componentstate.Ready}
+	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
+	coordinator := defaultCoordinator()
+	runtime := newTestRuntime(t, minecraft, relay, coordinator)
+	operation := runtime.Start()
+	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
+	waitForCondition(t, time.Second, func() bool { return coordinator.heartbeatCount() > 0 })
+
+	minecraft.mu.RLock()
+	observedPort := minecraft.lastPort
+	minecraft.mu.RUnlock()
+	relay.mu.RLock()
+	relayConfig := relay.lastConfig
+	relay.mu.RUnlock()
+	status := runtime.Status()
+	heartbeat := coordinator.latestHeartbeat()
+	if observedPort != 25566 || relayConfig.LocalPort != 25566 || relayConfig.RemotePort != 25575 {
+		t.Fatalf("configured ports were not propagated: Minecraft=%d Relay=%+v", observedPort, relayConfig)
+	}
+	if status.PublicEndpoint != "vps.example.test:25575" || status.LocalEndpoint != "127.0.0.1:25566" {
+		t.Fatalf("configured endpoints missing from status: %+v", status)
+	}
+	if heartbeat.MinecraftLocalPort != 25566 || heartbeat.PublicMinecraftPort != 25575 || heartbeat.PublicEndpoint != "vps.example.test:25575" {
+		t.Fatalf("configured endpoints missing from heartbeat: %+v", heartbeat)
+	}
+	stop := runtime.Stop()
+	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
+}
+
+func TestPortConfigIsLockedWhileHosting(t *testing.T) {
+	minecraft := &fakeMinecraft{state: componentstate.Ready}
+	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
+	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
+	operation := runtime.Start()
+	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
+	_, err := runtime.UpdateConfig(Config{CoordinatorHost: "vps.example.test", CoordinatorPort: 6121, AccessToken: "secret", MinecraftLocalPort: 25567, PublicMinecraftPort: 25576})
+	if ErrorCode(err) != CodeConfigLockedWhileRunning {
+		t.Fatalf("expected %s, got %v", CodeConfigLockedWhileRunning, err)
 	}
 	stop := runtime.Stop()
 	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
@@ -292,7 +347,7 @@ func TestCoordinatorDegradedDoesNotOverrideHealthyDataPlane(t *testing.T) {
 	}
 	for _, required := range []string{
 		`"operating_system"`, `"coordinator"`, `"java"`, `"eula_accepted"`,
-		`"local_25565_probe"`, `"frpc"`, `"disk"`, `"recent_state_transitions"`,
+		`"local_minecraft_probe"`, `"minecraft_local_port":25566`, `"public_minecraft_port":25575`, `"frpc"`, `"disk"`, `"recent_state_transitions"`,
 	} {
 		if !strings.Contains(string(diagnostics), required) {
 			t.Fatalf("diagnostics are missing %s: %s", required, diagnostics)
