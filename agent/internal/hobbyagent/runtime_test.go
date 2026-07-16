@@ -230,6 +230,14 @@ func TestCoordinatorDegradedDoesNotOverrideHealthyDataPlane(t *testing.T) {
 	if strings.Contains(string(diagnostics), "test-secret") {
 		t.Fatal("access token leaked into diagnostics")
 	}
+	for _, required := range []string{
+		`"operating_system"`, `"coordinator"`, `"java"`, `"eula_accepted"`,
+		`"local_25565_probe"`, `"frpc"`, `"disk"`, `"recent_state_transitions"`,
+	} {
+		if !strings.Contains(string(diagnostics), required) {
+			t.Fatalf("diagnostics are missing %s: %s", required, diagnostics)
+		}
+	}
 	_ = runtime.Stop()
 }
 

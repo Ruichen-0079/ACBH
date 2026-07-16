@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Ruichen-0079/ACBH/agent/internal/agentconfig"
+	"github.com/Ruichen-0079/ACBH/agent/internal/agentlog"
 	"github.com/Ruichen-0079/ACBH/agent/internal/frprelay"
 	"github.com/Ruichen-0079/ACBH/agent/internal/hobbyagent"
 	"github.com/Ruichen-0079/ACBH/agent/internal/localapi"
@@ -58,6 +59,10 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 		ConfigPath: filepath.Join(configDir, "hobby-config.json"),
 		ImportPath: filepath.Join(configDir, "hobby-import.json"),
 	}
+	logWriter, err := agentlog.New(filepath.Join(configDir, "logs", "agent.jsonl"), agentlog.DefaultMaxBytes, agentlog.DefaultMaxFiles)
+	if err != nil {
+		return fmt.Errorf("initialize structured log: %w", err)
+	}
 	relay := frprelay.NewManager(frprelay.Dependencies{})
 	minecraft := hobbyagent.ManagedMinecraft{
 		Executable: executable,
@@ -70,6 +75,7 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 		Store: store, Minecraft: minecraft, Relay: relay,
 		Coordinator: hobbyagent.CoordinatorClient{}, FRPCPath: options.frpcPath,
 		RuntimeDir: filepath.Join(runtimeDir, "relay"), AgentVersion: "0.4.0-hobby",
+		Logger: logWriter,
 	})
 	if err != nil {
 		return err

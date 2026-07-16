@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Ruichen-0079/ACBH/agent/internal/agentlog"
 	"github.com/Ruichen-0079/ACBH/agent/internal/componentstate"
 	"github.com/Ruichen-0079/ACBH/agent/internal/frprelay"
 )
@@ -102,6 +103,7 @@ type RuntimeOptions struct {
 	MonitorInterval  time.Duration
 	NodeID           string
 	NodeName         string
+	Logger           agentlog.Writer
 }
 
 type Runtime struct {
@@ -121,19 +123,21 @@ type Runtime struct {
 	monitor     time.Duration
 	nodeID      string
 	nodeName    string
+	logger      agentlog.Writer
 	startedAt   time.Time
 
-	mu             sync.RWMutex
-	operations     map[string]Operation
-	activeKind     string
-	activeID       string
-	activeCancel   context.CancelFunc
-	lastStartID    string
-	lastStopID     string
-	currentStep    string
-	publicEndpoint string
-	logs           []string
-	hostingCancel  context.CancelFunc
+	mu              sync.RWMutex
+	operations      map[string]Operation
+	activeKind      string
+	activeID        string
+	activeCancel    context.CancelFunc
+	lastStartID     string
+	lastStopID      string
+	currentStep     string
+	publicEndpoint  string
+	coordinatorInfo *CoordinatorInfo
+	logs            []string
+	hostingCancel   context.CancelFunc
 }
 
 func NewRuntime(options RuntimeOptions) (*Runtime, error) {
@@ -163,6 +167,9 @@ func NewRuntime(options RuntimeOptions) (*Runtime, error) {
 		options.NodeID = hostname
 		options.NodeName = hostname
 	}
+	if options.Logger == nil {
+		options.Logger = agentlog.DiscardWriter{}
+	}
 	if options.NodeID == "" {
 		options.NodeID = "local-agent"
 	}
@@ -174,7 +181,8 @@ func NewRuntime(options RuntimeOptions) (*Runtime, error) {
 		relayTTL: options.RelayTTL, timeout: options.ComponentTimeout, poll: options.PollInterval,
 		preflight: options.Preflight, monitor: options.MonitorInterval,
 		nodeID: options.NodeID, nodeName: options.NodeName,
-		now: options.Now, startedAt: now, operations: make(map[string]Operation), logs: make([]string, 0, 500),
+		logger: options.Logger,
+		now:    options.Now, startedAt: now, operations: make(map[string]Operation), logs: make([]string, 0, 500),
 	}, nil
 }
 
@@ -278,18 +286,7 @@ func (r *Runtime) Logs(limit int) []string {
 }
 
 func (r *Runtime) Diagnostics(ctx context.Context) map[string]any {
-	config, _ := r.Config()
-	imported, _ := r.store.LoadImportedServer()
-	return map[string]any{
-		"agent_version":            r.version,
-		"config":                   config,
-		"server_dir":               imported.ServerDir,
-		"minecraft":                r.minecraft.Diagnose(ctx),
-		"relay":                    r.relay.Diagnose(ctx),
-		"status":                   r.Status(),
-		"recent_errors":            r.Logs(100),
-		"recent_state_transitions": r.Events(500),
-	}
+	return r.buildDiagnostics(ctx)
 }
 
 func (r *Runtime) runStart(ctx context.Context, operationID string) {
@@ -353,6 +350,7 @@ func (r *Runtime) runStart(ctx context.Context, operationID string) {
 
 	r.mu.Lock()
 	r.publicEndpoint = fmt.Sprintf("%s:%d", config.CoordinatorHost, info.PublicMinecraftPort)
+	r.coordinatorInfo = &info
 	heartbeatContext, cancelHeartbeat := context.WithCancel(context.Background())
 	if r.hostingCancel != nil {
 		r.hostingCancel()
@@ -525,9 +523,24 @@ func (r *Runtime) setCurrentStep(id, step string) {
 }
 
 func (r *Runtime) setState(component string, state componentstate.State, reason, user, technical, operationID string) {
+	before := r.states.Components()
+	from := componentstate.Unknown
+	switch component {
+	case "minecraft":
+		from = before.Minecraft.State
+	case "relay":
+		from = before.Relay.State
+	case "coordinator":
+		from = before.Coordinator.State
+	}
 	snapshot := componentstate.NewSnapshot(state, r.now(), reason, user)
 	snapshot.TechnicalMessage = redact(technical, r.accessToken())
 	r.states.Set(component, snapshot, operationID)
+	_ = r.logger.Write(agentlog.Record{
+		Time: snapshot.UpdatedAt, Level: "info", Event: "state_transition",
+		Component: component, OperationID: operationID, From: string(from), To: string(state),
+		Reason: reason, Message: snapshot.TechnicalMessage,
+	}, r.accessToken())
 }
 
 func (r *Runtime) succeed(id, finalStep string) {
@@ -589,6 +602,9 @@ func (r *Runtime) statusLocked() RuntimeStatus {
 
 func (r *Runtime) appendLogLocked(message string) {
 	message = redact(message, r.accessTokenLocked())
+	_ = r.logger.Write(agentlog.Record{
+		Time: r.now(), Level: "info", Event: "agent_operation", OperationID: r.activeID, Message: message,
+	}, r.accessTokenLocked())
 	if len(r.logs) == 500 {
 		copy(r.logs, r.logs[1:])
 		r.logs[len(r.logs)-1] = message
