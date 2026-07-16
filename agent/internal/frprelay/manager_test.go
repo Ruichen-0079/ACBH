@@ -88,7 +88,33 @@ func (c fixedClock) Now() time.Time { return c.now }
 
 type fakeInspector bool
 
-func (value fakeInspector) Alive(int) bool { return bool(value) }
+func (value fakeInspector) Alive(int) bool                   { return bool(value) }
+func (value fakeInspector) Fingerprint(int) (string, error)  { return "fake-owned", nil }
+func (value fakeInspector) TerminateOwned(int, string) error { return nil }
+
+type recoveryInspector struct {
+	mu          sync.Mutex
+	alive       bool
+	fingerprint string
+	terminated  int
+}
+
+func (i *recoveryInspector) Alive(int) bool { i.mu.Lock(); defer i.mu.Unlock(); return i.alive }
+func (i *recoveryInspector) Fingerprint(int) (string, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.fingerprint, nil
+}
+func (i *recoveryInspector) TerminateOwned(_ int, fingerprint string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if fingerprint == "" || fingerprint != i.fingerprint {
+		return errors.New("identity mismatch")
+	}
+	i.terminated++
+	i.alive = false
+	return nil
+}
 
 func testConfig(t *testing.T) Config {
 	t.Helper()
@@ -275,6 +301,48 @@ func TestRestartSafelyRebuildsDeadManagedRelay(t *testing.T) {
 	waitFor(t, time.Second, func() bool { return launcher.count.Load() == 1 })
 	if err := manager.Stop(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRestartReplacesOnlyVerifiedOwnedRelay(t *testing.T) {
+	config := testConfig(t)
+	old := metadata{Version: 1, Desired: true, PID: 777, Executable: config.FRPCPath, ConfigHash: configHash(config), ProcessFingerprint: "owned-fingerprint", UpdatedAt: time.Now()}
+	if err := saveMetadata(metadataPath(config.RuntimeDir), old); err != nil {
+		t.Fatal(err)
+	}
+	process := newBlockingProcess(778)
+	launcher := &fakeLauncher{start: func(int, LaunchRequest) (Process, error) { return process, nil }}
+	inspector := &recoveryInspector{alive: true, fingerprint: "owned-fingerprint"}
+	manager := NewManager(Dependencies{Launcher: launcher, Prober: fakeProber{}, Inspector: inspector})
+	if err := manager.Start(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, time.Second, func() bool { return launcher.count.Load() == 1 })
+	inspector.mu.Lock()
+	terminated := inspector.terminated
+	inspector.mu.Unlock()
+	if terminated != 1 {
+		t.Fatalf("expected one verified recovered termination, got %d", terminated)
+	}
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestartRefusesReusedPIDIdentity(t *testing.T) {
+	config := testConfig(t)
+	old := metadata{Version: 1, Desired: true, PID: 777, Executable: config.FRPCPath, ConfigHash: configHash(config), ProcessFingerprint: "original", UpdatedAt: time.Now()}
+	if err := saveMetadata(metadataPath(config.RuntimeDir), old); err != nil {
+		t.Fatal(err)
+	}
+	launcher := &fakeLauncher{start: func(int, LaunchRequest) (Process, error) { return newBlockingProcess(778), nil }}
+	inspector := &recoveryInspector{alive: true, fingerprint: "reused-pid"}
+	manager := NewManager(Dependencies{Launcher: launcher, Prober: fakeProber{}, Inspector: inspector})
+	if err := manager.Start(context.Background(), config); !errors.Is(err, ErrAlreadyManaged) {
+		t.Fatalf("expected safe ownership refusal, got %v", err)
+	}
+	if launcher.count.Load() != 0 || inspector.terminated != 0 {
+		t.Fatal("reused PID was started over or terminated")
 	}
 }
 

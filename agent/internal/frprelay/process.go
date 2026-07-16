@@ -3,6 +3,7 @@ package frprelay
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -99,4 +100,23 @@ type osProcessInspector struct{}
 
 func (osProcessInspector) Alive(pid int) bool {
 	return processAlive(pid)
+}
+
+func (osProcessInspector) Fingerprint(pid int) (string, error) {
+	return processFingerprint(pid)
+}
+
+func (osProcessInspector) TerminateOwned(pid int, fingerprint string) error {
+	current, err := processFingerprint(pid)
+	if err != nil {
+		return err
+	}
+	if fingerprint == "" || current != fingerprint {
+		return errors.New("managed frpc process identity no longer matches; refusing to terminate")
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	return process.Kill()
 }

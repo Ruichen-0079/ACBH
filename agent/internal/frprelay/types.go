@@ -117,6 +117,8 @@ type Clock interface {
 
 type ProcessInspector interface {
 	Alive(pid int) bool
+	Fingerprint(pid int) (string, error)
+	TerminateOwned(pid int, fingerprint string) error
 }
 
 type Dependencies struct {

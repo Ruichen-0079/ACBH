@@ -82,7 +82,20 @@ func (m *Manager) Start(_ context.Context, config Config) error {
 		return err
 	}
 	if loaded.PID > 0 && loaded.Desired && m.deps.Inspector.Alive(loaded.PID) {
-		return fmt.Errorf("%w with PID %d", ErrAlreadyManaged, loaded.PID)
+		fingerprint, fingerprintErr := m.deps.Inspector.Fingerprint(loaded.PID)
+		if fingerprintErr != nil || loaded.ProcessFingerprint == "" || fingerprint != loaded.ProcessFingerprint {
+			return fmt.Errorf("%w with PID %d; process identity could not be verified", ErrAlreadyManaged, loaded.PID)
+		}
+		if err := m.deps.Inspector.TerminateOwned(loaded.PID, loaded.ProcessFingerprint); err != nil {
+			return fmt.Errorf("stop verified recovered frpc PID %d: %w", loaded.PID, err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for m.deps.Inspector.Alive(loaded.PID) && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if m.deps.Inspector.Alive(loaded.PID) {
+			return fmt.Errorf("verified recovered frpc PID %d did not stop", loaded.PID)
+		}
 	}
 
 	m.config = config
@@ -221,6 +234,9 @@ func (m *Manager) run(ctx context.Context, done chan struct{}) {
 		m.process = process
 		m.status.PID = process.PID()
 		m.metadata.PID = process.PID()
+		if fingerprint, fingerprintErr := m.deps.Inspector.Fingerprint(process.PID()); fingerprintErr == nil {
+			m.metadata.ProcessFingerprint = fingerprint
+		}
 		m.metadata.UpdatedAt = m.deps.Clock.Now()
 		_ = saveMetadata(metadataPath(config.RuntimeDir), m.metadata)
 		m.mu.Unlock()

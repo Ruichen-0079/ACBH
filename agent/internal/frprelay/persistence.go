@@ -16,12 +16,13 @@ import (
 const metadataFileName = "managed-frpc.json"
 
 type metadata struct {
-	Version    int       `json:"version"`
-	Desired    bool      `json:"desired"`
-	PID        int       `json:"pid,omitempty"`
-	Executable string    `json:"executable,omitempty"`
-	ConfigHash string    `json:"config_hash,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	Version            int       `json:"version"`
+	Desired            bool      `json:"desired"`
+	PID                int       `json:"pid,omitempty"`
+	Executable         string    `json:"executable,omitempty"`
+	ConfigHash         string    `json:"config_hash,omitempty"`
+	ProcessFingerprint string    `json:"process_fingerprint,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 func metadataPath(runtimeDir string) string {
