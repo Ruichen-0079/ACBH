@@ -260,6 +260,26 @@ func TestStopIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestResumeRestoresPersistedDesiredState(t *testing.T) {
+	minecraft := &fakeMinecraft{state: componentstate.Ready}
+	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
+	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
+	if err := runtime.store.SaveDesired(true); err != nil {
+		t.Fatal(err)
+	}
+	operation, resumed := runtime.Resume()
+	if !resumed {
+		t.Fatal("persisted desired hosting state was not resumed")
+	}
+	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
+	minecraftStarts, _ := minecraft.counts()
+	relayStarts, _ := relay.counts()
+	if minecraftStarts != 1 || relayStarts != 1 {
+		t.Fatalf("resume did not safely rebuild components: Minecraft=%d Relay=%d", minecraftStarts, relayStarts)
+	}
+	_ = runtime.Stop()
+}
+
 func waitOperation(t *testing.T, runtime *Runtime, id, expected string) Operation {
 	t.Helper()
 	var result Operation

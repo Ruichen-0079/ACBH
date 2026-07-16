@@ -235,6 +235,14 @@ func (r *Runtime) Start() Operation {
 	return operation
 }
 
+func (r *Runtime) Resume() (Operation, bool) {
+	desired, err := r.store.LoadDesired()
+	if err != nil || !desired {
+		return Operation{}, false
+	}
+	return r.Start(), true
+}
+
 func (r *Runtime) Stop() Operation {
 	r.mu.Lock()
 	if r.activeKind == "stop" && r.activeID != "" {
@@ -290,7 +298,12 @@ func (r *Runtime) Diagnostics(ctx context.Context) map[string]any {
 }
 
 func (r *Runtime) runStart(ctx context.Context, operationID string) {
-	if err := r.step(operationID, "正在检查服务端", func() error { return r.validateStartInputs() }); err != nil {
+	if err := r.step(operationID, "正在检查服务端", func() error {
+		if err := r.validateStartInputs(); err != nil {
+			return err
+		}
+		return r.store.SaveDesired(true)
+	}); err != nil {
 		r.fail(operationID, err)
 		return
 	}
@@ -363,6 +376,10 @@ func (r *Runtime) runStart(ctx context.Context, operationID string) {
 }
 
 func (r *Runtime) runStop(ctx context.Context, operationID string) {
+	if err := r.store.SaveDesired(false); err != nil {
+		r.fail(operationID, err)
+		return
+	}
 	r.mu.Lock()
 	if r.hostingCancel != nil {
 		r.hostingCancel()

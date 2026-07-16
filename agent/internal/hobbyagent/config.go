@@ -61,8 +61,35 @@ type ImportedServer struct {
 }
 
 type FileStore struct {
-	ConfigPath string
-	ImportPath string
+	ConfigPath  string
+	ImportPath  string
+	DesiredPath string
+}
+
+func (s FileStore) LoadDesired() (bool, error) {
+	var value struct {
+		Desired bool `json:"desired"`
+	}
+	if err := readJSON(s.desiredPath(), &value); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return value.Desired, nil
+}
+
+func (s FileStore) SaveDesired(desired bool) error {
+	return atomicWriteJSON(s.desiredPath(), struct {
+		Desired bool `json:"desired"`
+	}{Desired: desired})
+}
+
+func (s FileStore) desiredPath() string {
+	if strings.TrimSpace(s.DesiredPath) != "" {
+		return s.DesiredPath
+	}
+	return s.ImportPath + ".desired"
 }
 
 func (s FileStore) LoadConfig() (Config, error) {

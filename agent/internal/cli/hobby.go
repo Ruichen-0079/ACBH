@@ -56,8 +56,9 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 	}
 	runtimeDir := filepath.Join(configDir, "hobby-runtime")
 	store := hobbyagent.FileStore{
-		ConfigPath: filepath.Join(configDir, "hobby-config.json"),
-		ImportPath: filepath.Join(configDir, "hobby-import.json"),
+		ConfigPath:  filepath.Join(configDir, "hobby-config.json"),
+		ImportPath:  filepath.Join(configDir, "hobby-import.json"),
+		DesiredPath: filepath.Join(runtimeDir, "desired.json"),
 	}
 	logWriter, err := agentlog.New(filepath.Join(configDir, "logs", "agent.jsonl"), agentlog.DefaultMaxBytes, agentlog.DefaultMaxFiles)
 	if err != nil {
@@ -79,6 +80,9 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 	})
 	if err != nil {
 		return err
+	}
+	if operation, resumed := runtimeService.Resume(); resumed {
+		fmt.Fprintf(command.OutOrStdout(), "Recovering desired hosting state with operation %s\n", operation.ID)
 	}
 
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
