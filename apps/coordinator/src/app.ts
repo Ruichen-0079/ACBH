@@ -13,6 +13,7 @@ export async function buildApp(options?: {
   storage?: CoordinatorStorage;
   logger?: boolean;
   maxObjectBytes?: number;
+  hobbyAccessToken?: string;
 }) {
   const app = Fastify({ logger: options?.logger ?? true });
 
@@ -77,6 +78,7 @@ export async function buildApp(options?: {
 
   await registerRoutes(app, store, storage, {
     maxObjectBytes: options?.maxObjectBytes,
+    hobbyAccessToken: options?.hobbyAccessToken,
   });
 
   return app;
