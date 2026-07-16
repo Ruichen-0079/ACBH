@@ -1,0 +1,18 @@
+[Unit]
+Description=ACBH v0.4 isolated VPS durability monitor
+After=network-online.target acbh-v04-test-server.service acbh-v04-test-frps.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/acbh-v04-test/durability/vps-monitor.sh run
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/log/acbh-v04-test/durability
+
+[Install]
+WantedBy=multi-user.target
