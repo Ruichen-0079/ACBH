@@ -11,6 +11,18 @@ import {
 import { getStatePath, loadState, saveState } from "./persistence.js";
 import { RelayManager } from "./relay.js";
 
+export function serializeCoordinatorRequest(request: {
+  method?: string;
+  url?: string;
+  hostname?: string;
+}) {
+  return {
+    method: request.method,
+    url: request.url,
+    hostname: request.hostname,
+  };
+}
+
 export async function buildApp(options?: {
   store?: InMemoryCoordinatorStore;
   storage?: CoordinatorStorage;
@@ -19,7 +31,12 @@ export async function buildApp(options?: {
   maxObjectBytes?: number;
   hobbyAccessToken?: string;
 }) {
-  const app = Fastify({ logger: options?.logger ?? true });
+  const loggerEnabled = options?.logger ?? true;
+  const app = Fastify({
+    logger: loggerEnabled
+      ? { serializers: { req: serializeCoordinatorRequest } }
+      : false,
+  });
 
   let store: InMemoryCoordinatorStore;
 
