@@ -67,6 +67,7 @@ func newRootCmd() *cobra.Command {
 		newRelayCmd(),
 		newControlCmd(),
 		newDesktopCmd(),
+		newHobbyCmd(),
 	)
 	return rootCmd
 }

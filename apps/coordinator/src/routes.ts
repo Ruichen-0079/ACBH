@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -325,14 +325,34 @@ const streamingUploadHeaderSchema = z.object({
   hostToken: z.string().min(1),
 });
 
+const hobbyHeartbeatSchema = z.object({
+  protocol_version: z.number().int(),
+  node_id: z.string().trim().min(1).max(160),
+  node_name: z.string().trim().min(1).max(160).optional(),
+  agent_version: z.string().trim().min(1).max(80),
+  minecraft: z.object({ state: z.string().min(1) }).passthrough(),
+  relay: z.object({ state: z.string().min(1) }).passthrough(),
+  overall: z.object({ state: z.string().min(1) }).passthrough(),
+	minecraft_local_port: z.number().int().min(1024).max(65535),
+	public_minecraft_port: z.number().int().min(1024).max(65535),
+	public_endpoint: z.string().trim().min(1).max(320),
+});
+
+type HobbyNode = z.infer<typeof hobbyHeartbeatSchema> & {
+  last_seen_at: string;
+  remote_address: string;
+};
+
 export async function registerRoutes(
   app: FastifyInstance,
   store: InMemoryCoordinatorStore,
   storage: CoordinatorStorage,
   relay: RelayManager,
-  options?: { maxObjectBytes?: number },
+  options?: { maxObjectBytes?: number; hobbyAccessToken?: string },
 ): Promise<void> {
   const maxObjectBytes = resolveMaxObjectBytes(options?.maxObjectBytes);
+  const hobbyNodes = new Map<string, HobbyNode>();
+  const hobbyAccessToken = options?.hobbyAccessToken ?? process.env.ACBH_ACCESS_TOKEN ?? "";
   app.get("/health", async () => {
     return {
       ok: true,
@@ -361,7 +381,61 @@ export async function registerRoutes(
       mode: "in-memory",
       v1NonGoal: "hot-migration",
       persistence: "none",
+      protocol_version: 1,
+      server_version: "0.4.0-rc1",
+      frp_server_port: parsePort(process.env.ACBH_FRP_SERVER_PORT, 7000),
+      public_minecraft_port: parsePort(process.env.ACBH_PUBLIC_MINECRAFT_PORT, 25565),
+      heartbeat_interval_seconds: 10,
     };
+  });
+
+  app.post("/v1/heartbeat", async (request, reply) => {
+    if (!verifyHobbyToken(request, hobbyAccessToken)) {
+      return reply.code(hobbyAccessToken === "" ? 503 : 401).send({
+        error: hobbyAccessToken === "" ? "Service Unavailable" : "Unauthorized",
+        code: hobbyAccessToken === "" ? "hobby_token_not_configured" : "invalid_access_token",
+        message: hobbyAccessToken === "" ? "ACBH_ACCESS_TOKEN is not configured" : "Access token is invalid",
+      });
+    }
+    const body = parseBody(hobbyHeartbeatSchema, request, reply);
+    if (!body) return reply;
+    if (body.protocol_version !== 1) {
+      return reply.code(409).send({
+        error: "Conflict",
+        code: "protocol_incompatible",
+        message: `Protocol ${body.protocol_version} is incompatible with protocol 1`,
+        protocol_version: 1,
+      });
+    }
+    const node: HobbyNode = {
+      ...body,
+      last_seen_at: new Date().toISOString(),
+      remote_address: request.ip,
+    };
+    hobbyNodes.set(body.node_id, node);
+    return {
+      state: "ONLINE",
+      protocol_version: 1,
+      heartbeat_interval_seconds: 10,
+      node_id: body.node_id,
+    };
+  });
+
+  app.get("/v1/status", async () => ({
+    state: "ONLINE",
+    protocol_version: 1,
+    node_count: hobbyNodes.size,
+    server_version: "0.4.0-rc1",
+  }));
+
+  app.get("/v1/nodes", async (request, reply) => {
+    if (!verifyHobbyToken(request, hobbyAccessToken)) {
+      return reply.code(hobbyAccessToken === "" ? 503 : 401).send({
+        error: hobbyAccessToken === "" ? "Service Unavailable" : "Unauthorized",
+        code: hobbyAccessToken === "" ? "hobby_token_not_configured" : "invalid_access_token",
+      });
+    }
+    return { nodes: [...hobbyNodes.values()] };
   });
 
   app.get("/v1/bootstrap/manifest", async (request) => {
@@ -1699,6 +1773,23 @@ function singleHeader(value: string | string[] | undefined): string | undefined 
   if (value === undefined) return undefined;
   if (Array.isArray(value)) return value[0];
   return value;
+}
+
+function verifyHobbyToken(request: FastifyRequest, expected: string): boolean {
+  if (expected === "") return false;
+  const authorization = singleHeader(request.headers.authorization);
+  const bearer = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+  const supplied = bearer ?? singleHeader(request.headers["x-acbh-access-token"]);
+  if (!supplied) return false;
+  const suppliedBytes = Buffer.from(supplied);
+  const expectedBytes = Buffer.from(expected);
+  return suppliedBytes.length === expectedBytes.length && timingSafeEqual(suppliedBytes, expectedBytes);
+}
+
+function parsePort(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 ? parsed : fallback;
 }
 
 function statusText(statusCode: number): string {

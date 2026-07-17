@@ -17,6 +17,7 @@ export async function buildApp(options?: {
   relay?: RelayManager;
   logger?: boolean;
   maxObjectBytes?: number;
+  hobbyAccessToken?: string;
 }) {
   const app = Fastify({ logger: options?.logger ?? true });
 
@@ -86,6 +87,7 @@ export async function buildApp(options?: {
   await registerDashboardRoutes(app);
   await registerRoutes(app, store, storage, relay, {
     maxObjectBytes: options?.maxObjectBytes,
+    hobbyAccessToken: options?.hobbyAccessToken,
   });
 
   // Expose for public relay ingress and tests (v0.3.2)

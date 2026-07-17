@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ACBH</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header><h1>ACBH</h1><span class="edition">Hobby Edition</span></header>
+
+    <section id="offline" class="card hero">
+      <div class="orb muted"></div>
+      <h2>当前没有托管服务器</h2>
+      <p>导入 Minecraft 服务端并连接你的 VPS。</p>
+      <button id="start" class="primary">开始托管</button>
+    </section>
+
+    <section id="online" class="card hidden">
+      <div class="headline"><span class="dot good"></span><h2>公网服务器在线</h2></div>
+      <p class="label">玩家地址</p>
+      <div class="endpoint"><strong id="endpoint">—</strong><button id="copy-address" class="ghost">复制</button></div>
+      <div class="components">
+        <div><span>本地服务器</span><b id="local-endpoint">127.0.0.1:25565</b></div>
+        <div><span>服务器状态</span><b id="minecraft-state">● 正常</b></div>
+        <div><span>公网中转</span><b id="relay-state">● 正常</b></div>
+        <div><span>已持续运行</span><b id="uptime">—</b></div>
+      </div>
+      <button id="stop" class="danger">停止托管</button>
+    </section>
+
+    <section id="progress" class="card hidden">
+      <div class="spinner"></div>
+      <h2 id="step">正在准备</h2>
+      <p id="progress-message">请稍候，浏览器可以安全关闭。</p>
+    </section>
+
+    <footer>
+      <button id="open-settings" class="link">设置</button>
+      <button id="open-diagnostics" class="link">诊断</button>
+    </footer>
+  </main>
+
+  <dialog id="settings-dialog">
+    <form id="settings-form" method="dialog">
+      <div class="dialog-title"><h2>设置</h2><button id="close-settings" type="button" class="close" aria-label="关闭">×</button></div>
+      <label>VPS / Coordinator 地址<input id="coordinator-host" required placeholder="vps.example.com"></label>
+      <label>Coordinator 端口<input id="coordinator-port" required type="number" min="1" max="65535" value="6121"></label>
+      <label>Access Token<input id="access-token" type="password" placeholder="已保存的 Token 不会显示"></label>
+      <label>本地 MC 端口<input id="minecraft-local-port" required type="number" min="1024" max="65535" step="1" value="25565"></label>
+      <label>VPS 公网端口<input id="public-minecraft-port" required type="number" min="1024" max="65535" step="1" value="25565"></label>
+      <p class="hint">玩家通过 VPS 公网端口连接，中转到本地 MC 端口。</p>
+      <button id="save-settings" value="default" class="primary">保存设置</button>
+      <hr>
+      <label>Minecraft 服务端目录<input id="server-dir" placeholder="C:\minecraft-server 或 /srv/minecraft"></label>
+      <button id="import-server" value="default" class="secondary">导入服务端</button>
+      <p id="settings-result" class="message"></p>
+    </form>
+  </dialog>
+
+  <dialog id="diagnostics-dialog">
+    <div class="dialog-title"><h2>诊断</h2><button id="close-diagnostics" class="close" aria-label="关闭">×</button></div>
+    <div class="diagnostic-actions">
+      <button id="copy-diagnostics" class="secondary">复制诊断信息</button>
+      <button id="download-diagnostics" class="secondary">下载 JSON</button>
+    </div>
+    <pre id="diagnostics">正在读取…</pre>
+  </dialog>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
