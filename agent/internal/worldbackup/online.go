@@ -158,6 +158,14 @@ func stageWorldFiles(ctx context.Context, serverDir, stagingDir string, worldRoo
 	if err := os.MkdirAll(stagingAbs, 0o700); err != nil {
 		return nil, fmt.Errorf("create staging directory: %w", err)
 	}
+	// Canonicalize the root after it exists. On Windows, EvalSymlinks(target)
+	// may expand an 8.3 component in the temporary-directory path; comparing
+	// that result with the unexpanded staging root makes a file inside staging
+	// look as though it escaped.
+	stagingAbs, err = filepath.EvalSymlinks(stagingAbs)
+	if err != nil {
+		return nil, fmt.Errorf("resolve staging symlinks: %w", err)
+	}
 
 	roots, err := ResolveWorldRoots(serverAbs, worldRoots)
 	if err != nil {
