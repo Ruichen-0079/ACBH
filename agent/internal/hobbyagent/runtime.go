@@ -15,7 +15,10 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/frprelay"
 )
 
-const ProtocolVersion = 1
+const (
+	ProtocolVersion              = 1
+	DefaultOperationHistoryLimit = 256
+)
 
 type CoordinatorInfo struct {
 	ProtocolVersion          int    `json:"protocol_version"`
@@ -112,6 +115,7 @@ type RuntimeOptions struct {
 	AutoRestartMinecraft  bool
 	MaxMinecraftRestarts  int
 	MinecraftRestartDelay time.Duration
+	OperationHistoryLimit int
 }
 
 type Runtime struct {
@@ -139,6 +143,8 @@ type Runtime struct {
 
 	mu              sync.RWMutex
 	operations      map[string]Operation
+	operationOrder  []string
+	operationLimit  int
 	activeKind      string
 	activeID        string
 	activeCancel    context.CancelFunc
@@ -190,6 +196,12 @@ func NewRuntime(options RuntimeOptions) (*Runtime, error) {
 	if options.MinecraftRestartDelay <= 0 {
 		options.MinecraftRestartDelay = time.Second
 	}
+	if options.OperationHistoryLimit < 0 {
+		return nil, errors.New("operation history limit cannot be negative")
+	}
+	if options.OperationHistoryLimit == 0 {
+		options.OperationHistoryLimit = DefaultOperationHistoryLimit
+	}
 	if options.NodeID == "" {
 		options.NodeID = "local-agent"
 	}
@@ -205,7 +217,11 @@ func NewRuntime(options RuntimeOptions) (*Runtime, error) {
 		autoRestartMinecraft:  options.AutoRestartMinecraft,
 		maxMinecraftRestarts:  options.MaxMinecraftRestarts,
 		minecraftRestartDelay: options.MinecraftRestartDelay,
-		now:                   options.Now, startedAt: now, operations: make(map[string]Operation), logs: make([]string, 0, 500),
+		now:                   options.Now, startedAt: now,
+		operations:     make(map[string]Operation, options.OperationHistoryLimit),
+		operationOrder: make([]string, 0, options.OperationHistoryLimit),
+		operationLimit: options.OperationHistoryLimit,
+		logs:           make([]string, 0, 500),
 	}, nil
 }
 
@@ -264,9 +280,11 @@ func (r *Runtime) Start() Operation {
 	}
 	status := r.statusLocked()
 	if status.OverallState == componentstate.Online && r.lastStartID != "" {
-		operation := r.operations[r.lastStartID]
-		r.mu.Unlock()
-		return operation
+		if operation, ok := r.operations[r.lastStartID]; ok {
+			r.mu.Unlock()
+			return operation
+		}
+		r.lastStartID = ""
 	}
 	operation := r.newOperationLocked("start")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -293,9 +311,11 @@ func (r *Runtime) Stop() Operation {
 	}
 	status := r.statusLocked()
 	if status.Minecraft.State == componentstate.Stopped && status.Relay.State == componentstate.Offline && r.lastStopID != "" {
-		operation := r.operations[r.lastStopID]
-		r.mu.Unlock()
-		return operation
+		if operation, ok := r.operations[r.lastStopID]; ok {
+			r.mu.Unlock()
+			return operation
+		}
+		r.lastStopID = ""
 	}
 	if r.activeCancel != nil {
 		r.activeCancel()
@@ -626,10 +646,15 @@ func (r *Runtime) step(id, name string, action func() error) error {
 func (r *Runtime) setCurrentStep(id, step string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	operation := r.operations[id]
+	operation, ok := r.operations[id]
+	if !ok {
+		return
+	}
 	operation.CurrentStep = step
 	r.operations[id] = operation
-	r.currentStep = step
+	if r.activeID == id {
+		r.currentStep = step
+	}
 	r.appendLogLocked(step)
 }
 
@@ -658,7 +683,10 @@ func (r *Runtime) succeed(id, finalStep string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
-	operation := r.operations[id]
+	operation, ok := r.operations[id]
+	if !ok {
+		return
+	}
 	operation.Status = "SUCCEEDED"
 	operation.CurrentStep = finalStep
 	operation.FinishedAt = &now
@@ -678,7 +706,10 @@ func (r *Runtime) fail(id string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
-	operation := r.operations[id]
+	operation, ok := r.operations[id]
+	if !ok {
+		return
+	}
 	operation.Status = "FAILED"
 	operation.Error = redact(err.Error(), r.accessTokenLocked())
 	operation.ErrorCode = errorCode(err)
@@ -692,6 +723,20 @@ func (r *Runtime) fail(id string, err error) {
 
 func (r *Runtime) newOperationLocked(kind string) Operation {
 	operation := Operation{ID: randomID(), Kind: kind, Status: "RUNNING", StartedAt: r.now()}
+	if len(r.operationOrder) == r.operationLimit {
+		evictedID := r.operationOrder[0]
+		delete(r.operations, evictedID)
+		copy(r.operationOrder, r.operationOrder[1:])
+		r.operationOrder[len(r.operationOrder)-1] = operation.ID
+		if r.lastStartID == evictedID {
+			r.lastStartID = ""
+		}
+		if r.lastStopID == evictedID {
+			r.lastStopID = ""
+		}
+	} else {
+		r.operationOrder = append(r.operationOrder, operation.ID)
+	}
 	r.operations[operation.ID] = operation
 	r.activeKind, r.activeID = kind, operation.ID
 	return operation
