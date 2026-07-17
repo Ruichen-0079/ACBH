@@ -1,0 +1,63 @@
+name: v0.4 Relay-First CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - rewrite/v0.4-relay-first-clean
+      - integration/v0.4-pr68
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v04-relay-first-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install Coordinator dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Coordinator
+        run: pnpm build:coordinator
+
+      - name: Test Coordinator
+        run: pnpm --filter @acbh/coordinator test
+
+      - name: Test Agent
+        working-directory: agent
+        run: go test ./...
+
+      - name: Vet Agent
+        working-directory: agent
+        run: go vet ./...
