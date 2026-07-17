@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -18,18 +19,19 @@ import (
 )
 
 type hobbyServeOptions struct {
-	address              string
-	frpcPath             string
-	autoRestartMinecraft bool
-	maxMinecraftRestarts int
+	address    string
+	frpcPath   string
+	appDataDir string
 }
+
+var Version = "0.4.0-dev"
 
 func newHobbyCmd() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "hobby",
 		Short: "Run the v0.4 relay-first Hobby Edition Agent",
 	}
-	command.AddCommand(newHobbyServeCmd())
+	command.AddCommand(newHobbyServeCmd(), newHobbyServiceCmd(), newHobbyInstallServiceCmd(), newHobbyRemoveServiceCmd())
 	return command
 }
 
@@ -42,26 +44,77 @@ func newHobbyServeCmd() *cobra.Command {
 			return runHobbyServe(command.Context(), command, options)
 		},
 	}
-	command.Flags().StringVar(&options.address, "address", "127.0.0.1:6130", "Loopback API and UI address")
-	command.Flags().StringVar(&options.frpcPath, "frpc", "frpc", "Path to the frpc executable")
-	command.Flags().BoolVar(&options.autoRestartMinecraft, "minecraft-auto-restart", true, "Restart Minecraft after an unexpected exit")
-	command.Flags().IntVar(&options.maxMinecraftRestarts, "minecraft-max-restarts", 3, "Maximum Minecraft restarts per hosting operation")
+	addHobbyServeFlags(command, &options)
 	return command
 }
 
-func runHobbyServe(parent context.Context, command *cobra.Command, options hobbyServeOptions) error {
-	configDir, err := agentconfig.DefaultDir()
-	if err != nil {
-		return err
+func newHobbyServiceCmd() *cobra.Command {
+	var options hobbyServeOptions
+	command := &cobra.Command{
+		Use:   "service",
+		Short: "Run the Hobby Agent under the Windows Service Control Manager",
+		RunE: func(command *cobra.Command, _ []string) error {
+			return runHobbyService(command, options)
+		},
 	}
+	addHobbyServeFlags(command, &options)
+	return command
+}
+
+func newHobbyInstallServiceCmd() *cobra.Command {
+	var options hobbyServeOptions
+	command := &cobra.Command{
+		Use:    "install-service",
+		Short:  "Install or update the Windows Hobby Agent service",
+		Hidden: true,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return installHobbyService(command.Context(), options)
+		},
+	}
+	addHobbyServeFlags(command, &options)
+	return command
+}
+
+func newHobbyRemoveServiceCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "remove-service",
+		Short:  "Remove the Windows Hobby Agent service",
+		Hidden: true,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return removeHobbyService(command.Context())
+		},
+	}
+}
+
+func addHobbyServeFlags(command *cobra.Command, options *hobbyServeOptions) {
+	command.Flags().StringVar(&options.address, "address", "127.0.0.1:6130", "Loopback API and UI address")
+	command.Flags().StringVar(&options.frpcPath, "frpc", "", "Path to the bundled frpc executable")
+	command.Flags().StringVar(&options.appDataDir, "app-data-dir", "", "Configuration, state, and log directory")
+}
+
+func runHobbyServe(parent context.Context, command *cobra.Command, options hobbyServeOptions) error {
 	executable, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolve Agent executable: %w", err)
 	}
+	configDir := options.appDataDir
+	if configDir == "" {
+		configDir, err = agentconfig.ResolveAppDataDir(executable)
+		if err != nil {
+			return err
+		}
+	}
+	frpcPath := options.frpcPath
+	if frpcPath == "" {
+		name := "frpc"
+		if runtime.GOOS == "windows" {
+			name = "frpc.exe"
+		}
+		frpcPath = filepath.Join(filepath.Dir(executable), name)
+	}
 	runtimeDir := filepath.Join(configDir, "hobby-runtime")
 	store := hobbyagent.FileStore{
 		ConfigPath:  filepath.Join(configDir, "hobby-config.json"),
-		ImportPath:  filepath.Join(configDir, "hobby-import.json"),
 		DesiredPath: filepath.Join(runtimeDir, "desired.json"),
 	}
 	logWriter, err := agentlog.New(filepath.Join(configDir, "logs", "agent.jsonl"), agentlog.DefaultMaxBytes, agentlog.DefaultMaxFiles)
@@ -69,18 +122,11 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 		return fmt.Errorf("initialize structured log: %w", err)
 	}
 	relay := frprelay.NewManager(frprelay.Dependencies{})
-	minecraft := hobbyagent.ManagedMinecraft{
-		Executable: executable,
-		RuntimeDir: filepath.Join(runtimeDir, "minecraft"),
-		LogDir:     filepath.Join(configDir, "logs", "minecraft"),
-		Timeout:    30 * time.Second,
-	}
 	runtimeService, err := hobbyagent.NewRuntime(hobbyagent.RuntimeOptions{
-		Store: store, Minecraft: minecraft, Relay: relay,
-		Coordinator: hobbyagent.CoordinatorClient{}, FRPCPath: options.frpcPath,
-		RuntimeDir: filepath.Join(runtimeDir, "relay"), AgentVersion: "0.4.0-rc1",
-		Logger: logWriter, AutoRestartMinecraft: options.autoRestartMinecraft,
-		MaxMinecraftRestarts: options.maxMinecraftRestarts,
+		Store: store, Probe: hobbyagent.TCPLocalProbe{Timeout: 500 * time.Millisecond}, Relay: relay,
+		Coordinator: hobbyagent.CoordinatorClient{}, FRPCPath: frpcPath,
+		RuntimeDir: filepath.Join(runtimeDir, "relay"), LogDir: filepath.Join(configDir, "logs"),
+		AgentVersion: Version, Logger: logWriter,
 	})
 	if err != nil {
 		return err
@@ -92,6 +138,13 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fmt.Fprintf(command.OutOrStdout(), "ACBH Hobby Edition Agent listening on http://%s\n", options.address)
-	fmt.Fprintln(command.OutOrStdout(), "Closing the browser does not stop Minecraft or the relay.")
-	return localapi.ListenAndServe(ctx, options.address, localapi.New(runtimeService).Handler())
+	fmt.Fprintln(command.OutOrStdout(), "Closing the browser does not stop the relay.")
+	serveErr := localapi.ListenAndServe(ctx, options.address, localapi.New(runtimeService).Handler())
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelShutdown()
+	shutdownErr := runtimeService.Shutdown(shutdownContext)
+	if serveErr != nil {
+		return serveErr
+	}
+	return shutdownErr
 }

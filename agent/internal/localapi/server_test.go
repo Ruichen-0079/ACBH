@@ -1,9 +1,11 @@
 package localapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,9 +36,6 @@ func (f *fakeRuntime) UpdateConfig(config hobbyagent.Config) (hobbyagent.PublicC
 	}
 	return config.Public(), nil
 }
-func (f *fakeRuntime) Import(string) (hobbyagent.PreflightResult, error) {
-	return hobbyagent.PreflightResult{}, nil
-}
 func (f *fakeRuntime) Start() hobbyagent.Operation { return f.start }
 func (f *fakeRuntime) Stop() hobbyagent.Operation  { return f.stop }
 func (f *fakeRuntime) Operation(id string) (hobbyagent.Operation, bool) {
@@ -51,6 +50,7 @@ func (f *fakeRuntime) Logs(int) []string                 { return nil }
 func (f *fakeRuntime) Diagnostics(context.Context) map[string]any {
 	return map[string]any{"ok": true}
 }
+func (f *fakeRuntime) LogDirectory() string { return "" }
 
 func TestConfigEndpointRejectsRuntimeStateFields(t *testing.T) {
 	for _, field := range []string{
@@ -134,6 +134,28 @@ func TestListenRejectsNonLoopbackAddress(t *testing.T) {
 	}
 }
 
+func TestLocalAPIMutationsRejectCrossOriginRequests(t *testing.T) {
+	runtime := &fakeRuntime{}
+	body := `{"coordinator_host":"vps","coordinator_port":6121,"access_token":"secret","minecraft_local_port":25566,"public_minecraft_port":25566}`
+	request := httptest.NewRequest(http.MethodPut, "/local/v1/config", strings.NewReader(body))
+	request.Host = "127.0.0.1:6130"
+	request.Header.Set("Origin", "https://attacker.example")
+	response := httptest.NewRecorder()
+	New(runtime).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || runtime.updateCount != 0 {
+		t.Fatalf("cross-origin mutation reached runtime: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestLocalAPIRejectsDNSRebindingHost(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "http://attacker.example:6130/local/v1/status", nil)
+	response := httptest.NewRecorder()
+	loopbackHostOnly(New(&fakeRuntime{}).Handler()).ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("non-loopback Host was accepted: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestEmbeddedUIIsMinimalAndAutomaticallyRefreshes(t *testing.T) {
 	runtime := &fakeRuntime{}
 	handler := New(runtime).Handler()
@@ -144,12 +166,12 @@ func TestEmbeddedUIIsMinimalAndAutomaticallyRefreshes(t *testing.T) {
 		t.Fatalf("expected UI 200, got %d", pageResponse.Code)
 	}
 	page := pageResponse.Body.String()
-	for _, required := range []string{"开始托管", "公网服务器在线", "停止托管", "设置", "诊断", "本地 MC 端口", "VPS 公网端口", "local-endpoint"} {
+	for _, required := range []string{"保存并启动", "停止中转", "复制公网地址", "公网 IP / 域名", "Access Token", "自定义端口", "查看详情", "打开日志目录", "导出脱敏诊断包"} {
 		if !strings.Contains(page, required) {
 			t.Fatalf("UI is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"session_id", "heartbeat", "epoch", "capability", "PID"} {
+	for _, forbidden := range []string{"session_id", "heartbeat", "epoch", "capability", "PID", "服务端目录", "server.jar", "Java/JVM", "侧边栏"} {
 		if strings.Contains(page, forbidden) {
 			t.Fatalf("main UI exposes internal field %q", forbidden)
 		}
@@ -163,5 +185,57 @@ func TestEmbeddedUIIsMinimalAndAutomaticallyRefreshes(t *testing.T) {
 	handler.ServeHTTP(scriptResponse, scriptRequest)
 	if !strings.Contains(scriptResponse.Body.String(), "setInterval(refresh, 2000)") {
 		t.Fatal("UI does not automatically refresh status")
+	}
+	script := scriptResponse.Body.String()
+	if !strings.Contains(script, "minecraft_local_port: port") || !strings.Contains(script, "public_minecraft_port: port") {
+		t.Fatal("single custom port is not mapped to both local and public ports")
+	}
+}
+
+func TestLegacyHobbyImportRouteIsRemoved(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/local/v1/import", strings.NewReader(`{"server_dir":"C:\\server"}`))
+	New(&fakeRuntime{}).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("legacy import route still reachable: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestDiagnosticExportIsBoundedAndContainsOnlySafeFiles(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/local/v1/diagnostics/export", nil)
+	New(&fakeRuntime{}).Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("unexpected diagnostic export: %d %s", response.Code, response.Header().Get("Content-Type"))
+	}
+	reader, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{"diagnostics.json": false, "recent-logs.json": false, "state-transitions.json": false}
+	for _, file := range reader.File {
+		if _, ok := want[file.Name]; !ok {
+			t.Fatalf("unexpected diagnostic file %q", file.Name)
+		}
+		want[file.Name] = true
+		stream, err := file.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, err := io.ReadAll(io.LimitReader(stream, 1024*1024))
+		_ = stream.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{"access_token", "Bearer ", "private key", "server_dir", "current_host", "tunnel"} {
+			if bytes.Contains(bytes.ToLower(content), bytes.ToLower([]byte(forbidden))) {
+				t.Fatalf("diagnostic file %s contains %q: %s", file.Name, forbidden, content)
+			}
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Fatalf("diagnostic export missing %s", name)
+		}
 	}
 }

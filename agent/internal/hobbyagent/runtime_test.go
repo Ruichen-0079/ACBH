@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,61 +15,39 @@ import (
 	"github.com/Ruichen-0079/ACBH/agent/internal/frprelay"
 )
 
-type fakeMinecraft struct {
-	mu           sync.RWMutex
-	state        componentstate.State
-	startCount   int
-	stopCount    int
-	readyOnStart bool
-	lastPort     int
+type fakeProbe struct {
+	mu    sync.RWMutex
+	state componentstate.State
+	port  int
+	count int
 }
 
-func (m *fakeMinecraft) Start(_ context.Context, _ ImportedServer, port int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.startCount++
-	m.lastPort = port
-	if m.readyOnStart {
-		m.state = componentstate.Ready
-	}
-	return nil
-}
-
-func (m *fakeMinecraft) Stop(context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.stopCount++
-	m.state = componentstate.Stopped
-	return nil
-}
-
-func (m *fakeMinecraft) Status(_ context.Context, port int) MinecraftStatus {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (p *fakeProbe) Status(_ context.Context, port int) LocalServerStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.port, p.count = port, p.count+1
 	now := time.Now().UTC()
-	snapshot := componentstate.NewSnapshot(m.state, now, "fake", "fake")
-	if m.state == componentstate.Ready {
+	message := "未检测到本地服务器"
+	if p.state == componentstate.Ready {
+		message = "已检测到本地服务器"
+	}
+	snapshot := componentstate.NewSnapshot(p.state, now, "fake_probe", message)
+	if p.state == componentstate.Ready {
 		snapshot.LastOKAt = &now
 	}
-	if m.state == componentstate.Error {
-		snapshot.TechnicalMessage = "minecraft exited"
-	}
-	m.lastPort = port
-	return MinecraftStatus{Snapshot: snapshot, PID: 123}
+	return LocalServerStatus{Snapshot: snapshot}
 }
 
-func (m *fakeMinecraft) Diagnose(ctx context.Context, port int) any { return m.Status(ctx, port) }
-
-func (m *fakeMinecraft) setState(state componentstate.State) {
-	m.mu.Lock()
-	m.state = state
-	m.mu.Unlock()
+func (p *fakeProbe) setState(state componentstate.State) {
+	p.mu.Lock()
+	p.state = state
+	p.mu.Unlock()
 }
 
-func (m *fakeMinecraft) counts() (int, int) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.startCount, m.stopCount
+func (p *fakeProbe) observedPort() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.port
 }
 
 type fakeRelay struct {
@@ -79,6 +58,10 @@ type fakeRelay struct {
 	lastConfig frprelay.Config
 }
 
+func newFakeRelay() *fakeRelay {
+	return &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "not_started", "offline")}}
+}
+
 func (r *fakeRelay) Start(_ context.Context, config frprelay.Config) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -87,7 +70,7 @@ func (r *fakeRelay) Start(_ context.Context, config frprelay.Config) error {
 	now := time.Now().UTC()
 	r.status = frprelay.Status{
 		Snapshot:      componentstate.NewSnapshot(componentstate.Online, now, "public_probe_success", "online"),
-		FRPSConnected: true, LocalReachable: true, PublicReachable: true,
+		FRPSConnected: true, LocalReachable: false, PublicReachable: true,
 	}
 	r.status.LastOKAt = &now
 	return nil
@@ -108,7 +91,7 @@ func (r *fakeRelay) Status() frprelay.Status {
 }
 
 func (r *fakeRelay) Diagnose(context.Context) frprelay.Diagnosis {
-	return frprelay.Diagnosis{Status: r.Status(), AccessToken: "[REDACTED]"}
+	return frprelay.Diagnosis{Status: r.Status(), Desired: r.Status().State != componentstate.Offline, AccessToken: "[REDACTED]"}
 }
 
 func (r *fakeRelay) counts() (int, int) {
@@ -117,15 +100,24 @@ func (r *fakeRelay) counts() (int, int) {
 	return r.startCount, r.stopCount
 }
 
+func (r *fakeRelay) setStatus(status frprelay.Status) {
+	r.mu.Lock()
+	r.status = status
+	r.mu.Unlock()
+}
+
 type fakeCoordinator struct {
 	mu            sync.Mutex
 	info          CoordinatorInfo
+	infoErr       error
 	heartbeatErr  error
 	heartbeats    int
 	lastHeartbeat Heartbeat
 }
 
-func (c *fakeCoordinator) Info(context.Context, Config) (CoordinatorInfo, error) { return c.info, nil }
+func (c *fakeCoordinator) Info(context.Context, Config) (CoordinatorInfo, error) {
+	return c.info, c.infoErr
+}
 
 func (c *fakeCoordinator) Heartbeat(_ context.Context, _ Config, heartbeat Heartbeat) (CoordinatorStatus, error) {
 	c.mu.Lock()
@@ -135,46 +127,43 @@ func (c *fakeCoordinator) Heartbeat(_ context.Context, _ Config, heartbeat Heart
 	return CoordinatorStatus{State: "ONLINE"}, c.heartbeatErr
 }
 
-func (c *fakeCoordinator) heartbeatCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.heartbeats
-}
-
 func (c *fakeCoordinator) latestHeartbeat() Heartbeat {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastHeartbeat
 }
 
-func newTestRuntime(t *testing.T, minecraft *fakeMinecraft, relay *fakeRelay, coordinator *fakeCoordinator) *Runtime {
-	return newTestRuntimeWithOperationLimit(t, minecraft, relay, coordinator, 0)
+func defaultCoordinator() *fakeCoordinator {
+	return &fakeCoordinator{info: CoordinatorInfo{
+		ProtocolVersion: 1, FRPServerPort: 7000, PublicMinecraftPort: 25565,
+		HeartbeatIntervalSeconds: 3600,
+	}}
 }
 
-func newTestRuntimeWithOperationLimit(t *testing.T, minecraft *fakeMinecraft, relay *fakeRelay, coordinator *fakeCoordinator, operationLimit int) *Runtime {
+func newTestRuntime(t *testing.T, probe *fakeProbe, relay *fakeRelay, coordinator *fakeCoordinator) *Runtime {
+	return newTestRuntimeWithOperationLimit(t, probe, relay, coordinator, 0)
+}
+
+func newTestRuntimeWithOperationLimit(t *testing.T, probe *fakeProbe, relay *fakeRelay, coordinator *fakeCoordinator, operationLimit int) *Runtime {
 	t.Helper()
 	directory := t.TempDir()
 	store := FileStore{
-		ConfigPath: filepath.Join(directory, "config.json"),
-		ImportPath: filepath.Join(directory, "import.json"),
+		ConfigPath:  filepath.Join(directory, "config.json"),
+		DesiredPath: filepath.Join(directory, "desired.json"),
 	}
-	if err := store.SaveConfig(Config{CoordinatorHost: "vps.example.test", CoordinatorPort: 6121, AccessToken: "test-secret", MinecraftLocalPort: 25566, PublicMinecraftPort: 25575}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveImportedServer(ImportedServer{ServerDir: directory, JavaPath: "java", JarPath: filepath.Join(directory, "server.jar")}); err != nil {
+	if err := store.SaveConfig(Config{
+		CoordinatorHost: "vps.example.test", CoordinatorPort: 6121,
+		AccessToken: "test-secret", MinecraftLocalPort: 25566, PublicMinecraftPort: 25575,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	runtime, err := NewRuntime(RuntimeOptions{
-		Store: store, Minecraft: minecraft, Relay: relay, Coordinator: coordinator,
-		FRPCPath: "frpc", RuntimeDir: filepath.Join(directory, "relay"), AgentVersion: "test",
-		ComponentTimeout: 40 * time.Millisecond, PollInterval: time.Millisecond,
+		Store: store, Probe: probe, Relay: relay, Coordinator: coordinator,
+		FRPCPath: "frpc", RuntimeDir: filepath.Join(directory, "relay"),
+		LogDir: filepath.Join(directory, "logs"), AgentVersion: "test",
+		ComponentTimeout: 100 * time.Millisecond, PollInterval: time.Millisecond,
 		MonitorInterval: 2 * time.Millisecond, RelayTTL: time.Minute,
-		Preflight: func(serverDir string) (PreflightResult, error) {
-			return PreflightResult{ServerDir: serverDir, JavaPath: "java", JarPath: filepath.Join(serverDir, "server.jar"), EULAAccepted: true}, nil
-		},
-		NodeID:               "test-node",
-		AutoRestartMinecraft: true, MaxMinecraftRestarts: 3, MinecraftRestartDelay: time.Millisecond,
-		OperationHistoryLimit: operationLimit,
+		NodeID: "test-node", OperationHistoryLimit: operationLimit,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -182,244 +171,193 @@ func newTestRuntimeWithOperationLimit(t *testing.T, minecraft *fakeMinecraft, re
 	return runtime
 }
 
-func defaultCoordinator() *fakeCoordinator {
-	return &fakeCoordinator{info: CoordinatorInfo{
-		ProtocolVersion: 1, FRPServerPort: 7000, PublicMinecraftPort: 25565,
-		HeartbeatIntervalSeconds: 1,
-	}}
-}
-
-func TestRelayDoesNotStartBeforeMinecraftReady(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Starting}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
+func TestStartKeepsRelayOnlineWhenLocalServerOffline(t *testing.T) {
+	probe := &fakeProbe{state: componentstate.Offline}
+	relay := newFakeRelay()
+	runtime := newTestRuntime(t, probe, relay, defaultCoordinator())
 	operation := runtime.Start()
-	waitOperation(t, runtime, operation.ID, "FAILED")
-	starts, _ := relay.counts()
-	if starts != 0 {
-		t.Fatalf("relay started %d time(s) before Minecraft READY", starts)
+	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
+
+	status := runtime.Status()
+	if status.LocalServer.State != componentstate.Offline {
+		t.Fatalf("local server = %s, want OFFLINE", status.LocalServer.State)
+	}
+	if status.Relay.State != componentstate.Online || status.OverallState != componentstate.Online {
+		t.Fatalf("offline local server degraded relay: relay=%s overall=%s", status.Relay.State, status.OverallState)
+	}
+	starts, stops := relay.counts()
+	if starts != 1 || stops != 0 {
+		t.Fatalf("relay lifecycle = start %d stop %d", starts, stops)
+	}
+	if probe.observedPort() != 25566 || relay.lastConfig.LocalPort != 25566 || relay.lastConfig.RemotePort != 25575 {
+		t.Fatalf("configured ports not propagated: probe=%d relay=%+v", probe.observedPort(), relay.lastConfig)
 	}
 }
 
-func TestDuplicateStartDoesNotCreateTwoProcesses(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
-	first := runtime.Start()
-	second := runtime.Start()
+func TestLocalServerTransitionsNeverRestartOrStopRelay(t *testing.T) {
+	probe := &fakeProbe{state: componentstate.Offline}
+	relay := newFakeRelay()
+	runtime := newTestRuntime(t, probe, relay, defaultCoordinator())
+	waitOperation(t, runtime, runtime.Start().ID, "SUCCEEDED")
+
+	probe.setState(componentstate.Ready)
+	waitFor(t, func() bool { return runtime.Status().LocalServer.State == componentstate.Ready })
+	probe.setState(componentstate.Offline)
+	waitFor(t, func() bool { return runtime.Status().LocalServer.State == componentstate.Offline })
+	starts, stops := relay.counts()
+	if starts != 1 || stops != 0 {
+		t.Fatalf("local probe transition changed relay lifecycle: start=%d stop=%d", starts, stops)
+	}
+}
+
+func TestStopOnlyStopsRelayAndIsIdempotent(t *testing.T) {
+	probe := &fakeProbe{state: componentstate.Ready}
+	relay := newFakeRelay()
+	runtime := newTestRuntime(t, probe, relay, defaultCoordinator())
+	waitOperation(t, runtime, runtime.Start().ID, "SUCCEEDED")
+	first := runtime.Stop()
+	second := runtime.Stop()
 	if first.ID != second.ID {
-		t.Fatalf("duplicate start returned different operations: %s and %s", first.ID, second.ID)
+		t.Fatalf("duplicate stop operation: %s != %s", first.ID, second.ID)
 	}
 	waitOperation(t, runtime, first.ID, "SUCCEEDED")
-	minecraftStarts, _ := minecraft.counts()
-	relayStarts, _ := relay.counts()
-	if minecraftStarts != 1 || relayStarts != 1 {
-		t.Fatalf("expected one Minecraft and relay start, got %d and %d", minecraftStarts, relayStarts)
+	starts, stops := relay.counts()
+	if starts != 1 || stops != 1 {
+		t.Fatalf("relay lifecycle = start %d stop %d", starts, stops)
 	}
-	stop := runtime.Stop()
-	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
+	if runtime.Status().LocalServer.State != componentstate.Ready {
+		t.Fatal("stopping relay changed the user-owned local server state")
+	}
 }
 
-func TestConfiguredPortsDriveMinecraftRelayStatusAndHeartbeat(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
+func TestCoordinatorHeartbeatFailureDoesNotStopHealthyDataPlane(t *testing.T) {
 	coordinator := defaultCoordinator()
-	runtime := newTestRuntime(t, minecraft, relay, coordinator)
-	operation := runtime.Start()
-	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
-	waitForCondition(t, time.Second, func() bool { return coordinator.heartbeatCount() > 0 })
-
-	minecraft.mu.RLock()
-	observedPort := minecraft.lastPort
-	minecraft.mu.RUnlock()
-	relay.mu.RLock()
-	relayConfig := relay.lastConfig
-	relay.mu.RUnlock()
+	coordinator.heartbeatErr = errors.New("coordinator unavailable")
+	relay := newFakeRelay()
+	runtime := newTestRuntime(t, &fakeProbe{state: componentstate.Offline}, relay, coordinator)
+	waitOperation(t, runtime, runtime.Start().ID, "SUCCEEDED")
+	waitFor(t, func() bool { return runtime.Status().Coordinator.State == componentstate.Degraded })
 	status := runtime.Status()
+	if status.Relay.State != componentstate.Online || status.OverallState != componentstate.Online {
+		t.Fatalf("Coordinator failure closed data plane: %+v", status)
+	}
+	_, stops := relay.counts()
+	if stops != 0 {
+		t.Fatalf("Coordinator failure stopped relay %d time(s)", stops)
+	}
+}
+
+func TestHeartbeatUsesProbeSnapshotWithoutProcessData(t *testing.T) {
+	coordinator := defaultCoordinator()
+	runtime := newTestRuntime(t, &fakeProbe{state: componentstate.Offline}, newFakeRelay(), coordinator)
+	waitOperation(t, runtime, runtime.Start().ID, "SUCCEEDED")
+	waitFor(t, func() bool { return coordinator.latestHeartbeat().NodeID != "" })
 	heartbeat := coordinator.latestHeartbeat()
-	if observedPort != 25566 || relayConfig.LocalPort != 25566 || relayConfig.RemotePort != 25575 {
-		t.Fatalf("configured ports were not propagated: Minecraft=%d Relay=%+v", observedPort, relayConfig)
+	if heartbeat.Minecraft.State != componentstate.Offline || heartbeat.MinecraftLocalPort != 25566 || heartbeat.PublicMinecraftPort != 25575 {
+		t.Fatalf("unexpected heartbeat: %+v", heartbeat)
 	}
-	if status.PublicEndpoint != "vps.example.test:25575" || status.LocalEndpoint != "127.0.0.1:25566" {
-		t.Fatalf("configured endpoints missing from status: %+v", status)
-	}
-	if heartbeat.MinecraftLocalPort != 25566 || heartbeat.PublicMinecraftPort != 25575 || heartbeat.PublicEndpoint != "vps.example.test:25575" {
-		t.Fatalf("configured endpoints missing from heartbeat: %+v", heartbeat)
-	}
-	stop := runtime.Stop()
-	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
-}
-
-func TestPortConfigIsLockedWhileHosting(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
-	operation := runtime.Start()
-	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
-	_, err := runtime.UpdateConfig(Config{CoordinatorHost: "vps.example.test", CoordinatorPort: 6121, AccessToken: "secret", MinecraftLocalPort: 25567, PublicMinecraftPort: 25576})
-	if ErrorCode(err) != CodeConfigLockedWhileRunning {
-		t.Fatalf("expected %s, got %v", CodeConfigLockedWhileRunning, err)
-	}
-	stop := runtime.Stop()
-	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
-}
-
-func TestMinecraftCrashInvalidatesRelay(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
-	operation := runtime.Start()
-	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
-	minecraft.setState(componentstate.Error)
-	waitForCondition(t, time.Second, func() bool { return runtime.Status().Relay.State != componentstate.Online })
-	if runtime.Status().OverallState == componentstate.Online {
-		t.Fatal("overall status remained ONLINE after Minecraft crash")
-	}
-}
-
-func TestMinecraftCrashRestartsWithinLimitAndRestoresRelay(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready, readyOnStart: true}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
-	operation := runtime.Start()
-	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
-	minecraft.setState(componentstate.Error)
-	waitForCondition(t, time.Second, func() bool {
-		minecraftStarts, _ := minecraft.counts()
-		relayStarts, _ := relay.counts()
-		return minecraftStarts == 2 && relayStarts == 2 && runtime.Status().OverallState == componentstate.Online
-	})
-	stop := runtime.Stop()
-	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
-}
-
-func TestMinecraftRestartCanBeDisabled(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
-	runtime.autoRestartMinecraft = false
-	operation := runtime.Start()
-	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
-	minecraft.setState(componentstate.Error)
-	waitForCondition(t, time.Second, func() bool {
-		return runtime.states.Components().Minecraft.ReasonCode == "restart_limit_reached"
-	})
-	status := runtime.Status()
-	if status.Minecraft.State != componentstate.Error || status.Minecraft.ReasonCode != "restart_limit_reached" {
-		t.Fatalf("restart limit is not visible in runtime status: %+v", status.Minecraft)
-	}
-	minecraftStarts, _ := minecraft.counts()
-	if minecraftStarts != 1 {
-		t.Fatalf("disabled policy restarted Minecraft %d time(s)", minecraftStarts-1)
-	}
-	stop := runtime.Stop()
-	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
-}
-
-func TestMinecraftRestartStopsAtConfiguredLimit(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
-	runtime.maxMinecraftRestarts = 2
-	operation := runtime.Start()
-	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
-	minecraft.setState(componentstate.Error)
-	waitForCondition(t, time.Second, func() bool {
-		return runtime.states.Components().Minecraft.ReasonCode == "restart_limit_reached"
-	})
-	status := runtime.Status()
-	if status.Minecraft.State != componentstate.Error || status.Minecraft.ReasonCode != "restart_limit_reached" {
-		t.Fatalf("restart limit is not visible in runtime status: %+v", status.Minecraft)
-	}
-	minecraftStarts, _ := minecraft.counts()
-	if minecraftStarts != 3 {
-		t.Fatalf("expected initial start plus two retries, got %d starts", minecraftStarts)
-	}
-	stop := runtime.Stop()
-	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
-}
-
-func TestCoordinatorDegradedDoesNotOverrideHealthyDataPlane(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	coordinator := defaultCoordinator()
-	coordinator.heartbeatErr = errors.New("temporary coordinator outage token=test-secret")
-	runtime := newTestRuntime(t, minecraft, relay, coordinator)
-	operation := runtime.Start()
-	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
-	waitForCondition(t, time.Second, func() bool { return runtime.Status().Coordinator.State == componentstate.Degraded })
-	if runtime.Status().OverallState != componentstate.Online {
-		t.Fatalf("healthy data plane was not ONLINE: %+v", runtime.Status())
-	}
-	diagnostics, err := json.Marshal(runtime.Diagnostics(context.Background()))
+	encoded, err := json.Marshal(heartbeat)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(diagnostics), "test-secret") {
-		t.Fatal("access token leaked into diagnostics")
-	}
-	for _, required := range []string{
-		`"operating_system"`, `"coordinator"`, `"java"`, `"eula_accepted"`,
-		`"local_minecraft_probe"`, `"minecraft_local_port":25566`, `"public_minecraft_port":25575`, `"frpc"`, `"disk"`, `"recent_state_transitions"`,
-	} {
-		if !strings.Contains(string(diagnostics), required) {
-			t.Fatalf("diagnostics are missing %s: %s", required, diagnostics)
+	for _, forbidden := range []string{"pid", "java", "server_dir", "jar", "restart"} {
+		if strings.Contains(strings.ToLower(string(encoded)), forbidden) {
+			t.Fatalf("heartbeat contains managed Minecraft field %q: %s", forbidden, encoded)
 		}
 	}
-	stop := runtime.Stop()
-	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
 }
 
-func TestStopIsIdempotent(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
-	start := runtime.Start()
-	waitOperation(t, runtime, start.ID, "SUCCEEDED")
-	first := runtime.Stop()
-	waitOperation(t, runtime, first.ID, "SUCCEEDED")
-	second := runtime.Stop()
-	if first.ID != second.ID {
-		t.Fatalf("idempotent stop returned a new operation: %s then %s", first.ID, second.ID)
+func TestConfigPreservesStoredTokenButNeverReturnsIt(t *testing.T) {
+	runtime := newTestRuntime(t, &fakeProbe{state: componentstate.Offline}, newFakeRelay(), defaultCoordinator())
+	public, err := runtime.UpdateConfig(Config{
+		CoordinatorHost: "vps.example.test", CoordinatorPort: 6121,
+		MinecraftLocalPort: 25566, PublicMinecraftPort: 25575,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	_, minecraftStops := minecraft.counts()
-	_, relayStops := relay.counts()
-	if minecraftStops != 1 || relayStops != 1 {
-		t.Fatalf("expected one stop per component, got Minecraft=%d Relay=%d", minecraftStops, relayStops)
+	if !public.AccessTokenConfigured {
+		t.Fatal("stored token was not preserved")
+	}
+	encoded, _ := json.Marshal(public)
+	if strings.Contains(string(encoded), "test-secret") || strings.Contains(string(encoded), "access_token\"") {
+		t.Fatalf("public config leaked token: %s", encoded)
 	}
 }
 
-func TestResumeRestoresPersistedDesiredState(t *testing.T) {
-	minecraft := &fakeMinecraft{state: componentstate.Ready}
-	relay := &fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}}
-	runtime := newTestRuntime(t, minecraft, relay, defaultCoordinator())
+func TestTerminalRelayErrorAllowsCorrectiveConfiguration(t *testing.T) {
+	relay := newFakeRelay()
+	relay.setStatus(frprelay.Status{
+		Snapshot: componentstate.NewSnapshot(componentstate.Error, time.Now().UTC(), CodePublicPortInUse, "端口被占用"),
+		Terminal: true,
+	})
+	runtime := newTestRuntime(t, &fakeProbe{state: componentstate.Offline}, relay, defaultCoordinator())
+	public, err := runtime.UpdateConfig(Config{
+		CoordinatorHost: "vps.example.test", CoordinatorPort: 6121,
+		MinecraftLocalPort: 25577, PublicMinecraftPort: 25577,
+	})
+	if err != nil {
+		t.Fatalf("terminal relay error blocked corrective configuration: %v", err)
+	}
+	if public.MinecraftLocalPort != 25577 || public.PublicMinecraftPort != 25577 || !public.AccessTokenConfigured {
+		t.Fatalf("corrective configuration was not stored safely: %+v", public)
+	}
+}
+
+func TestRuntimeDiagnosticsExcludeManagedMinecraftAndSecrets(t *testing.T) {
+	runtime := newTestRuntime(t, &fakeProbe{state: componentstate.Offline}, newFakeRelay(), defaultCoordinator())
+	diagnostics := runtime.Diagnostics(context.Background())
+	encoded, err := json.Marshal(diagnostics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ToLower(string(encoded))
+	for _, forbidden := range []string{"test-secret", "server_dir", "server_jar", "eula", "java", "session", "lease", "remote-public", "current_host", "tunnel"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("diagnostics contain forbidden value %q: %s", forbidden, encoded)
+		}
+	}
+}
+
+func TestShutdownStopsRelayButPreservesDesiredState(t *testing.T) {
+	relay := newFakeRelay()
+	runtime := newTestRuntime(t, &fakeProbe{state: componentstate.Offline}, relay, defaultCoordinator())
+	waitOperation(t, runtime, runtime.Start().ID, "SUCCEEDED")
+	if err := runtime.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	desired, err := runtime.store.LoadDesired()
+	if err != nil || !desired {
+		t.Fatalf("service shutdown lost desired relay state: desired=%v err=%v", desired, err)
+	}
+	_, stops := relay.counts()
+	if stops != 1 {
+		t.Fatalf("service shutdown stopped relay %d times", stops)
+	}
+}
+
+func TestResumeRestoresPersistedRelayIntent(t *testing.T) {
+	relay := newFakeRelay()
+	runtime := newTestRuntime(t, &fakeProbe{state: componentstate.Offline}, relay, defaultCoordinator())
 	if err := runtime.store.SaveDesired(true); err != nil {
 		t.Fatal(err)
 	}
 	operation, resumed := runtime.Resume()
 	if !resumed {
-		t.Fatal("persisted desired hosting state was not resumed")
+		t.Fatal("desired relay state was not resumed")
 	}
 	waitOperation(t, runtime, operation.ID, "SUCCEEDED")
-	minecraftStarts, _ := minecraft.counts()
-	relayStarts, _ := relay.counts()
-	if minecraftStarts != 1 || relayStarts != 1 {
-		t.Fatalf("resume did not safely rebuild components: Minecraft=%d Relay=%d", minecraftStarts, relayStarts)
+	starts, _ := relay.counts()
+	if starts != 1 {
+		t.Fatalf("resume started relay %d times", starts)
 	}
-	stop := runtime.Stop()
-	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
 }
 
 func TestOperationHistoryDefaultsToBoundedCapacityAndPreservesNewestOrder(t *testing.T) {
-	runtime := newTestRuntime(t,
-		&fakeMinecraft{state: componentstate.Stopped},
-		&fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}},
-		defaultCoordinator(),
-	)
+	runtime := newTestRuntime(t, &fakeProbe{state: componentstate.Offline}, newFakeRelay(), defaultCoordinator())
 	if runtime.operationLimit != DefaultOperationHistoryLimit {
 		t.Fatalf("operation limit = %d, want %d", runtime.operationLimit, DefaultOperationHistoryLimit)
 	}
-
 	const writes = 20_000
 	generated := make([]string, 0, writes)
 	for index := 0; index < writes; index++ {
@@ -429,11 +367,10 @@ func TestOperationHistoryDefaultsToBoundedCapacityAndPreservesNewestOrder(t *tes
 		runtime.mu.Unlock()
 		generated = append(generated, operation.ID)
 	}
-
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
 	if len(runtime.operations) != DefaultOperationHistoryLimit || len(runtime.operationOrder) != DefaultOperationHistoryLimit {
-		t.Fatalf("operation history is not bounded: map=%d order=%d limit=%d", len(runtime.operations), len(runtime.operationOrder), runtime.operationLimit)
+		t.Fatalf("operation history is not bounded: map=%d order=%d", len(runtime.operations), len(runtime.operationOrder))
 	}
 	if cap(runtime.operationOrder) != DefaultOperationHistoryLimit {
 		t.Fatalf("operation order capacity grew to %d", cap(runtime.operationOrder))
@@ -444,71 +381,31 @@ func TestOperationHistoryDefaultsToBoundedCapacityAndPreservesNewestOrder(t *tes
 			t.Fatalf("retained order[%d] = %s, want %s", index, runtime.operationOrder[index], id)
 		}
 		if _, ok := runtime.operations[id]; !ok {
-			t.Fatalf("newest operation %s missing from lookup map", id)
+			t.Fatalf("newest operation %s missing", id)
 		}
-	}
-	if _, ok := runtime.operations[generated[0]]; ok {
-		t.Fatal("oldest operation was not evicted")
 	}
 }
 
-func TestOperationHistoryLimitOneEvictsAndDoesNotResurrect(t *testing.T) {
-	runtime := newTestRuntimeWithOperationLimit(t,
-		&fakeMinecraft{state: componentstate.Stopped},
-		&fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}},
-		defaultCoordinator(),
-		1,
-	)
+func TestOperationHistoryLimitOneDoesNotResurrectEvictedCallback(t *testing.T) {
+	runtime := newTestRuntimeWithOperationLimit(t, &fakeProbe{state: componentstate.Offline}, newFakeRelay(), defaultCoordinator(), 1)
 	runtime.mu.Lock()
 	first := runtime.newOperationLocked("first")
 	second := runtime.newOperationLocked("second")
 	runtime.mu.Unlock()
-
-	if _, ok := runtime.Operation(first.ID); ok {
-		t.Fatal("capacity-one history retained the oldest operation")
-	}
-	if operation, ok := runtime.Operation(second.ID); !ok || operation.Kind != "second" {
-		t.Fatalf("newest operation missing: %+v, %v", operation, ok)
-	}
-
-	// Late callbacks from an evicted asynchronous operation must not insert it
-	// back into the bounded history.
-	runtime.setCurrentStep(first.ID, "late step")
-	runtime.succeed(first.ID, "late success")
-	runtime.fail(first.ID, errors.New("late failure"))
+	runtime.setCurrentStep(first.ID, "late")
+	runtime.succeed(first.ID, "late")
+	runtime.fail(first.ID, errors.New("late"))
 	if _, ok := runtime.Operation(first.ID); ok {
 		t.Fatal("late callback resurrected an evicted operation")
 	}
-	runtime.mu.RLock()
-	defer runtime.mu.RUnlock()
-	if len(runtime.operations) != 1 || len(runtime.operationOrder) != 1 || runtime.operationOrder[0] != second.ID {
-		t.Fatalf("capacity-one history changed after late callback: map=%d order=%v", len(runtime.operations), runtime.operationOrder)
-	}
-}
-
-func TestOperationHistoryRejectsNegativeLimit(t *testing.T) {
-	_, err := NewRuntime(RuntimeOptions{
-		Minecraft: &fakeMinecraft{}, Relay: &fakeRelay{}, Coordinator: defaultCoordinator(),
-		OperationHistoryLimit: -1,
-	})
-	if err == nil || !strings.Contains(err.Error(), "operation history limit") {
-		t.Fatalf("negative operation history limit error = %v", err)
+	if operation, ok := runtime.Operation(second.ID); !ok || operation.Kind != "second" {
+		t.Fatalf("newest operation missing: %+v %v", operation, ok)
 	}
 }
 
 func TestOperationHistoryConcurrentWritersAndReadersRemainBounded(t *testing.T) {
-	const (
-		limit           = 32
-		writerCount     = 8
-		writesPerWriter = 1_000
-	)
-	runtime := newTestRuntimeWithOperationLimit(t,
-		&fakeMinecraft{state: componentstate.Stopped},
-		&fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}},
-		defaultCoordinator(),
-		limit,
-	)
-
+	const limit, writerCount, writesPerWriter = 32, 8, 1_000
+	runtime := newTestRuntimeWithOperationLimit(t, &fakeProbe{state: componentstate.Offline}, newFakeRelay(), defaultCoordinator(), limit)
 	var waitGroup sync.WaitGroup
 	for writer := 0; writer < writerCount; writer++ {
 		waitGroup.Add(1)
@@ -528,46 +425,74 @@ func TestOperationHistoryConcurrentWritersAndReadersRemainBounded(t *testing.T) 
 		go func() {
 			defer waitGroup.Done()
 			for index := 0; index < writesPerWriter; index++ {
-				_, _ = runtime.Operation("missing-operation")
+				_, _ = runtime.Operation("missing")
 			}
 		}()
 	}
 	waitGroup.Wait()
-
 	runtime.mu.RLock()
 	defer runtime.mu.RUnlock()
 	if len(runtime.operations) != limit || len(runtime.operationOrder) != limit {
 		t.Fatalf("concurrent history is not bounded: map=%d order=%d", len(runtime.operations), len(runtime.operationOrder))
 	}
-	for _, id := range runtime.operationOrder {
-		if _, ok := runtime.operations[id]; !ok {
-			t.Fatalf("ordered operation %s missing after concurrent writes", id)
+}
+
+func TestOperationHistoryRejectsNegativeLimit(t *testing.T) {
+	_, err := NewRuntime(RuntimeOptions{
+		Probe: &fakeProbe{}, Relay: newFakeRelay(), Coordinator: defaultCoordinator(),
+		OperationHistoryLimit: -1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "operation history limit") {
+		t.Fatalf("negative operation history error = %v", err)
+	}
+}
+
+func TestTCPLocalProbeConnectsWithoutOccupyingPort(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	accepted := make(chan struct{})
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			_ = connection.Close()
+			close(accepted)
 		}
+	}()
+	probe := TCPLocalProbe{Timeout: time.Second}
+	if status := probe.Status(context.Background(), port); status.State != componentstate.Ready {
+		t.Fatalf("listening server probe = %s", status.State)
+	}
+	<-accepted
+	_ = listener.Close()
+	if replacement, err := net.Listen("tcp", listener.Addr().String()); err != nil {
+		t.Fatalf("probe occupied the Minecraft port: %v", err)
+	} else {
+		_ = replacement.Close()
 	}
 }
 
 func waitOperation(t *testing.T, runtime *Runtime, id, expected string) Operation {
 	t.Helper()
 	var result Operation
-	waitForCondition(t, time.Second, func() bool {
-		operation, ok := runtime.Operation(id)
-		if !ok {
-			return false
-		}
-		result = operation
-		return operation.Status == expected
+	waitFor(t, func() bool {
+		var ok bool
+		result, ok = runtime.Operation(id)
+		return ok && result.Status == expected
 	})
 	return result
 }
 
-func waitForCondition(t *testing.T, timeout time.Duration, condition func() bool) {
+func waitFor(t *testing.T, predicate func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if condition() {
+		if predicate() {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatal("condition not met before timeout")
+	t.Fatal("condition did not become true")
 }

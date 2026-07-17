@@ -2,7 +2,6 @@ package hobbyagent
 
 import (
 	"context"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -11,11 +10,8 @@ import (
 
 func (r *Runtime) buildDiagnostics(ctx context.Context) map[string]any {
 	config, _ := r.Config()
-	imported, importErr := r.store.LoadImportedServer()
-	eula := false
-	if importErr == nil {
-		eula, _ = eulaAccepted(imported.ServerDir + string(os.PathSeparator) + "eula.txt")
-	}
+	status := r.Status()
+	diagnosis := r.relay.Diagnose(ctx)
 	r.mu.RLock()
 	var coordinatorInfo any
 	if r.coordinatorInfo != nil {
@@ -23,37 +19,36 @@ func (r *Runtime) buildDiagnostics(ctx context.Context) map[string]any {
 		coordinatorInfo = copy
 	}
 	r.mu.RUnlock()
-	diskPath := imported.ServerDir
-	if diskPath == "" {
-		diskPath = r.runtimeDir
+	r.frpcVersionOnce.Do(func() {
+		r.frpcVersion = executableVersion(context.Background(), r.frpcPath, "-v")
+	})
+	frpcVersion := map[string]string{
+		"version": r.frpcVersion["version"],
+		"error":   r.frpcVersion["error"],
 	}
-	diskBytes, diskErr := diskFreeBytes(diskPath)
-	status := r.Status()
 	return map[string]any{
-		"agent_version":            r.version,
-		"operating_system":         map[string]string{"os": runtime.GOOS, "arch": runtime.GOARCH},
-		"config":                   config,
-		"coordinator":              map[string]any{"connectivity": status.Coordinator, "protocol": coordinatorInfo},
-		"java":                     executableVersion(ctx, imported.JavaPath, "-version"),
-		"server_dir":               imported.ServerDir,
-		"server_jar":               imported.JarPath,
-		"eula_accepted":            eula,
-		"minecraft":                r.minecraft.Diagnose(ctx, config.MinecraftLocalPort),
-		"minecraft_local_port":     config.MinecraftLocalPort,
-		"public_minecraft_port":    config.PublicMinecraftPort,
-		"local_minecraft_probe":    status.Minecraft.State,
-		"frpc":                     executableVersion(ctx, r.frpcPath, "-v"),
-		"relay":                    r.relay.Diagnose(ctx),
-		"status":                   status,
-		"disk":                     map[string]any{"path": diskPath, "free_bytes": diskBytes, "error": errorText(diskErr)},
+		"agent_version":    r.version,
+		"operating_system": map[string]string{"os": runtime.GOOS, "arch": runtime.GOARCH},
+		"config":           config,
+		"agent":            status.Agent,
+		"local_probe":      status.LocalServer,
+		"local_target":     status.LocalEndpoint,
+		"public_endpoint":  status.PublicEndpoint,
+		"coordinator":      map[string]any{"connectivity": status.Coordinator, "protocol": coordinatorInfo},
+		"frpc_version":     frpcVersion,
+		"relay": map[string]any{
+			"status":        diagnosis.Status,
+			"desired":       diagnosis.Desired,
+			"recent_events": diagnosis.RecentEvents,
+		},
 		"recent_errors":            r.Logs(100),
-		"recent_state_transitions": r.Events(500),
+		"recent_state_transitions": r.Events(200),
 	}
 }
 
-func executableVersion(parent context.Context, path string, argument string) map[string]string {
+func executableVersion(parent context.Context, path, argument string) map[string]string {
 	if strings.TrimSpace(path) == "" {
-		return map[string]string{"path": "", "version": "", "error": "not configured"}
+		return map[string]string{"version": "", "error": "not configured"}
 	}
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
@@ -62,7 +57,7 @@ func executableVersion(parent context.Context, path string, argument string) map
 	if len(version) > 2048 {
 		version = version[:2048]
 	}
-	return map[string]string{"path": path, "version": version, "error": errorText(err)}
+	return map[string]string{"version": version, "error": errorText(err)}
 }
 
 func errorText(err error) string {
