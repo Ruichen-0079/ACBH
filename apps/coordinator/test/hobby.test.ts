@@ -53,6 +53,7 @@ test("Hobby heartbeat authenticates and upserts a node", async (t) => {
     url: "/v1/heartbeat",
     headers: { authorization: `Bearer ${accessToken}` },
     payload: heartbeat(),
+    remoteAddress: "203.0.113.42:43123",
   });
   assert.equal(accepted.statusCode, 200);
   assert.equal(accepted.json().state, "ONLINE");
@@ -68,6 +69,9 @@ test("Hobby heartbeat authenticates and upserts a node", async (t) => {
 	assert.equal(nodes.json().nodes[0].minecraft_local_port, 25566);
 	assert.equal(nodes.json().nodes[0].public_minecraft_port, 25575);
 	assert.equal(nodes.json().nodes[0].public_endpoint, "vps.example.test:25575");
+  assert.equal("remote_address" in nodes.json().nodes[0], false);
+  assert.equal(nodes.body.includes("203.0.113.42"), false);
+  assert.equal(nodes.body.includes("43123"), false);
   assert.equal(nodes.body.includes(accessToken), false);
 });
 

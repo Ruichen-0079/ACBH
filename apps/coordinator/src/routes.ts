@@ -340,7 +340,6 @@ const hobbyHeartbeatSchema = z.object({
 
 type HobbyNode = z.infer<typeof hobbyHeartbeatSchema> & {
   last_seen_at: string;
-  remote_address: string;
 };
 
 export async function registerRoutes(
@@ -410,7 +409,6 @@ export async function registerRoutes(
     const node: HobbyNode = {
       ...body,
       last_seen_at: new Date().toISOString(),
-      remote_address: request.ip,
     };
     hobbyNodes.set(body.node_id, node);
     return {
