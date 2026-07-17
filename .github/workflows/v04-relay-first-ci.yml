@@ -69,12 +69,16 @@ jobs:
           mapfile -d '' go_files < <(
             git diff -z --name-only --diff-filter=ACMR "${base_sha}"...HEAD -- ':(glob)agent/**/*.go'
           )
-          if (( ${#go_files[@]} > 0 )); then
-            gofmt -l "${go_files[@]}" | tee gofmt-files.txt
-          else
-            : > gofmt-files.txt
-          fi
-          test ! -s gofmt-files.txt
+          format_failed=0
+          for file in "${go_files[@]}"; do
+            if ! diff -u \
+              <(git show "HEAD:${file}") \
+              <(git show "HEAD:${file}" | gofmt) >/dev/null; then
+              echo "${file}"
+              format_failed=1
+            fi
+          done
+          test "${format_failed}" -eq 0
 
       - name: Race-test bounded operation history
         if: runner.os == 'Linux'
