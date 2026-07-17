@@ -72,6 +72,33 @@ func TestGcExecuteFlag(t *testing.T) {
 	}
 }
 
+func TestGcDryRunReportsRetainedManifestBlocker(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/groups/group_1/election/status":
+			_, _ = w.Write([]byte(`{"groupId":"group_1","currentHostId":"host_1","currentHostGeneration":1,"lastElection":null,"activeTakeoverAssignment":null}`))
+		case "/v1/groups/group_1/artifacts/gc":
+			_, _ = w.Write([]byte(`{"dryRun":true,"blocked":true,"blockers":[{"groupId":"group_1","artifactKind":"world-snapshot","artifactId":"snap_retained","reason":"manifest does not exist"}],"deletedArtifacts":[{"groupId":"group_1","artifactKind":"world-snapshot","artifactId":"snap_candidate","status":"rejected"}],"deletedObjectCount":0,"protectedArtifactIds":[]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	configureTestAgent(t, server.URL)
+	out, err := executeCommand("gc")
+	if err != nil {
+		t.Fatalf("gc command error = %v", err)
+	}
+	if !strings.Contains(out, "Dry run blocked") || !strings.Contains(out, "object deletion is not safe") {
+		t.Fatalf("gc output missing blocked warning: %q", out)
+	}
+	if strings.Contains(out, "would be deleted") {
+		t.Fatalf("gc output misleadingly reports safe deletion: %q", out)
+	}
+}
+
 func TestGcDryRunAndExecuteMutuallyExclusive(t *testing.T) {
 	_, err := executeCommand("gc", "--dry-run", "--execute")
 	if err == nil {
@@ -126,6 +153,34 @@ func TestGc409ErrorClearMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("error = %v, want stale generation message", err)
+	}
+}
+
+func TestGcRetainedManifest409ErrorClearMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/groups/group_1/election/status":
+			_, _ = w.Write([]byte(`{"groupId":"group_1","currentHostId":"host_1","currentHostGeneration":1,"lastElection":null,"activeTakeoverAssignment":null}`))
+		case "/v1/groups/group_1/artifacts/gc":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"Conflict","message":"Artifact GC blocked by retained manifest read failure"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	configureTestAgent(t, server.URL)
+	_, err := executeCommand("gc", "--execute")
+	if err == nil {
+		t.Fatal("expected error for retained manifest failure")
+	}
+	if !strings.Contains(err.Error(), "retained manifest could not be read") {
+		t.Fatalf("error = %v, want retained manifest message", err)
+	}
+	if strings.Contains(err.Error(), "generation is stale") {
+		t.Fatalf("error = %v, should not report a generation failure", err)
 	}
 }
 

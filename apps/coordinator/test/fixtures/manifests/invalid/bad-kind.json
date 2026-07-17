@@ -1,0 +1,15 @@
+{
+  "artifactKind": "invalid-kind",
+  "artifactId": "snap_bad_kind",
+  "groupId": "grp_bad",
+  "createdAt": "2026-06-06T00:00:00Z",
+  "creatorHostId": "host_bad",
+  "files": [],
+  "summary": {
+    "includedFiles": 0,
+    "ignoredFiles": 0,
+    "unknownFiles": 0,
+    "deletedFiles": 0,
+    "totalBytes": 0
+  }
+}

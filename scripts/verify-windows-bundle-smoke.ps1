@@ -1,0 +1,415 @@
+# Smoke-test the Windows desktop bundle without global installs during runtime.
+$ErrorActionPreference = "Stop"
+
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$TempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("acbh-bundle-smoke-" + [Guid]::NewGuid().ToString("N"))
+$BundleRoot = Join-Path $TempRoot "bundle"
+$AppData = Join-Path $TempRoot "appdata-owner"
+$JoinAppData = Join-Path $TempRoot "appdata-joiner"
+$Port = $null
+
+function Get-FreeTcpPort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 0)
+    $listener.Start()
+    try {
+        return $listener.LocalEndpoint.Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+function Invoke-Pnpm {
+    param([Parameter(Mandatory = $true)][string[]]$PnpmArgs)
+
+    if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+        & pnpm @PnpmArgs
+    } elseif (Get-Command corepack -ErrorAction SilentlyContinue) {
+        & corepack pnpm @PnpmArgs
+    } else {
+        throw "pnpm not found; install pnpm or use a full release bundle"
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "pnpm command failed: $($PnpmArgs -join ' ')"
+    }
+}
+
+function Write-Utf8NoBom {
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Text)
+    $encoding = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($Path, $Text, $encoding)
+}
+
+function Copy-PowerShellUtf8Bom {
+    param([Parameter(Mandatory = $true)][string]$Source, [Parameter(Mandatory = $true)][string]$Target)
+    $text = [System.IO.File]::ReadAllText($Source, [System.Text.Encoding]::UTF8)
+    $encoding = [System.Text.UTF8Encoding]::new($true)
+    [System.IO.File]::WriteAllText($Target, $text, $encoding)
+}
+
+function Quote-ProcessArgument {
+    param([string]$Arg)
+    if ($null -eq $Arg) { return '""' }
+    $value = [string]$Arg
+    if ($value.Length -eq 0) { return '""' }
+    if ($value -notmatch '[\s"]') { return $value }
+    $builder = New-Object System.Text.StringBuilder
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($ch in $value.ToCharArray()) {
+        if ($ch -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($ch -eq '"') {
+            if ($backslashes -gt 0) { [void]$builder.Append(('\' * ($backslashes * 2))) }
+            [void]$builder.Append('\"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$builder.Append(('\' * $backslashes))
+            $backslashes = 0
+        }
+        [void]$builder.Append($ch)
+    }
+    if ($backslashes -gt 0) { [void]$builder.Append(('\' * ($backslashes * 2))) }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
+function Join-ProcessArguments {
+    param([string[]]$CommandArgs)
+    return (($CommandArgs | ForEach-Object { Quote-ProcessArgument $_ }) -join " ")
+}
+
+function Set-ProcessUtf8OutputEncoding {
+    param([System.Diagnostics.ProcessStartInfo]$ProcessStartInfo)
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    try { $ProcessStartInfo.StandardOutputEncoding = $utf8 } catch { }
+    try { $ProcessStartInfo.StandardErrorEncoding = $utf8 } catch { }
+}
+
+function Invoke-AgentRaw {
+    param([Parameter(Mandatory = $true)][Alias("Args")][string[]]$CommandArgs)
+
+    $agentExe = Join-Path $BundleRoot "acbh-agent-windows-amd64.exe"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $agentExe
+    $psi.Arguments = Join-ProcessArguments $CommandArgs
+    $psi.WorkingDirectory = $BundleRoot
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    Set-ProcessUtf8OutputEncoding $psi
+    $process = [System.Diagnostics.Process]::Start($psi)
+    if ($null -eq $process) {
+        throw "failed to start agent process"
+    }
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Stdout = $(if ($null -eq $stdout) { "" } else { $stdout.Trim() })
+        Stderr = $(if ($null -eq $stderr) { "" } else { $stderr.Trim() })
+        Command = $CommandArgs -join " "
+    }
+}
+
+function Invoke-AgentJson {
+    param([Parameter(Mandatory = $true)][Alias("Args")][string[]]$CommandArgs)
+
+    $result = Invoke-AgentRaw -CommandArgs $CommandArgs
+    if ($result.ExitCode -ne 0) {
+        throw "agent command failed ($($result.Command)): $($result.Stderr) $($result.Stdout)"
+    }
+    if (-not $result.Stdout.StartsWith("{") -and -not $result.Stdout.StartsWith("[")) {
+        throw "agent command did not return pure JSON ($($result.Command)): $($result.Stdout)"
+    }
+    return $result.Stdout | ConvertFrom-Json
+}
+
+function Invoke-DesktopProbe {
+    $desktopExe = Join-Path $BundleRoot "acbh-desktop-windows-amd64.exe"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $desktopExe
+    $psi.Arguments = "--gui"
+    $psi.WorkingDirectory = $BundleRoot
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    Set-ProcessUtf8OutputEncoding $psi
+    $process = [System.Diagnostics.Process]::Start($psi)
+    if ($null -eq $process) {
+        throw "failed to start desktop process"
+    }
+    Start-Sleep -Seconds 3
+    if (-not $process.HasExited) {
+        $process.Kill()
+        $process.WaitForExit()
+    }
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Stdout = $process.StandardOutput.ReadToEnd()
+        Stderr = $process.StandardError.ReadToEnd()
+    }
+}
+
+function New-TestEnvironmentPackage {
+    param([Parameter(Mandatory = $true)][string]$Target)
+
+    $pkgRoot = Join-Path $TempRoot "envpkg-root"
+    New-Item -ItemType Directory -Force -Path (Join-Path $pkgRoot "base") | Out-Null
+    $readme = Join-Path $pkgRoot "base\readme.txt"
+    Write-Utf8NoBom -Path $readme -Text "ACBH runtime package smoke"
+    $hash = (Get-FileHash -Algorithm SHA256 -Path $readme).Hash.ToLowerInvariant()
+    $size = (Get-Item $readme).Length
+    $manifest = [ordered]@{
+        version = 1
+        id = "smoke-runtime-base"
+        packageId = "acbh-runtime-base-windows-amd64"
+        kind = "runtime-base"
+        os = "windows"
+        architecture = "amd64"
+        signature = "smoke-signature-placeholder"
+        files = @(
+            [ordered]@{
+                path = "base/readme.txt"
+                sha256 = $hash
+                size = $size
+            }
+        )
+    } | ConvertTo-Json -Depth 6
+    Write-Utf8NoBom -Path (Join-Path $pkgRoot "acbh-package.json") -Text $manifest
+    Compress-Archive -Path (Join-Path $pkgRoot "*") -DestinationPath $Target -Force
+}
+
+try {
+    New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot "coordinator\dist") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot "docs") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $BundleRoot "runtime\node") | Out-Null
+
+    Push-Location (Join-Path $RepoRoot "apps\coordinator")
+    try {
+        Invoke-Pnpm -PnpmArgs @("build")
+    } finally {
+        Pop-Location
+    }
+
+    Push-Location (Join-Path $RepoRoot "agent")
+    try {
+        go build -o (Join-Path $BundleRoot "acbh-agent-windows-amd64.exe") .
+        go build -o (Join-Path $BundleRoot "acbh-desktop-windows-amd64.exe") .\cmd\acbh-desktop
+    } finally {
+        Pop-Location
+    }
+
+    Copy-Item -Recurse -Force (Join-Path $RepoRoot "apps\coordinator\dist\*") (Join-Path $BundleRoot "coordinator\dist")
+    Copy-Item -Force (Join-Path $RepoRoot "apps\coordinator\package.json") (Join-Path $BundleRoot "coordinator\package.json")
+    Copy-Item -Recurse -Force (Join-Path $RepoRoot "docs\zh-CN") (Join-Path $BundleRoot "docs\zh-CN")
+
+    $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCommand) {
+        throw "node.exe is required to assemble the smoke bundle runtime"
+    }
+    Copy-Item -Force $nodeCommand.Source (Join-Path $BundleRoot "runtime\node\node.exe")
+
+    Push-Location (Join-Path $BundleRoot "coordinator")
+    try {
+        if (Get-Command npm -ErrorAction SilentlyContinue) {
+            & npm install --omit=dev --no-audit --no-fund --package-lock=false
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+        } else {
+            Invoke-Pnpm -PnpmArgs @("install", "--prod", "--offline")
+        }
+    } finally {
+        Pop-Location
+    }
+
+    $legacyGuiPath = Join-Path $BundleRoot "scripts\acbh-desktop-gui.ps1"
+    if (Test-Path $legacyGuiPath) {
+        throw "production Windows bundle must not include legacy PowerShell GUI script"
+    }
+    $desktopProbe = Invoke-DesktopProbe
+    if ($desktopProbe.Stdout -notmatch "ACBH Desktop: http://") {
+        throw "Go desktop runtime did not print local URL"
+    }
+
+    $packageJson = Get-Content -Raw -Path (Join-Path $BundleRoot "coordinator\package.json") | ConvertFrom-Json
+    if (-not $packageJson.dependencies.ws) {
+        throw "ws is not present in coordinator production dependencies"
+    }
+
+    $envReport = Invoke-AgentJson -Args @("desktop", "environment", "check", "--app-data-dir", $AppData, "--json")
+    if (-not (Test-Path $envReport.environmentReportPath)) {
+        throw "desktop environment check did not write environment-report.json"
+    }
+    $envReportRaw = Invoke-AgentRaw -Args @("desktop", "environment", "check", "--app-data-dir", $AppData, "--json")
+    $mojibakeMarkers = @([char]0x951B, [char]0x6D93, [char]0x6748, [char]0x9241, [char]0xFFFD)
+    foreach ($marker in $mojibakeMarkers) {
+        if ($envReportRaw.Stdout.Contains([string]$marker)) {
+            throw "desktop environment check JSON was decoded with mojibake"
+        }
+    }
+    $null = $envReportRaw.Stdout | ConvertFrom-Json
+
+    $packagePath = Join-Path $TempRoot "acbh-runtime-base-windows-amd64.zip"
+    New-TestEnvironmentPackage -Target $packagePath
+    $verifyPackage = Invoke-AgentJson -Args @("desktop", "environment", "verify-package", "--file", $packagePath, "--json")
+    if (-not $verifyPackage.ok) {
+        throw "verify-package should pass for generated smoke package"
+    }
+    $importPackage = Invoke-AgentJson -Args @("desktop", "environment", "import-pack", "--app-data-dir", $AppData, "--file", $packagePath, "--json")
+    if (-not $importPackage.ok -or -not (Test-Path (Join-Path $AppData "runtime\base\readme.txt"))) {
+        throw "import-pack did not install generated smoke package"
+    }
+
+    $Port = Get-FreeTcpPort
+    $start = Invoke-AgentRaw -Args @("desktop", "start", "--app-data-dir", $AppData, "--coordinator", (Join-Path $BundleRoot "coordinator\dist\index.js"), "--port", "$Port")
+    if ($start.ExitCode -ne 0) {
+        throw "desktop start failed: $($start.Stderr) $($start.Stdout)"
+    }
+    $status = Invoke-AgentJson -Args @("desktop", "status", "--app-data-dir", $AppData, "--port", "$Port", "--json")
+    if (-not $status.healthOk) {
+        throw "desktop status did not report healthy coordinator"
+    }
+    if (($status | ConvertTo-Json -Depth 8) -match "(?i)accessKey|hostToken|rcon\.password") {
+        throw "desktop status leaked sensitive field names"
+    }
+
+    $coordURL = "http://127.0.0.1:$Port"
+    $network = Invoke-AgentJson -Args @("desktop", "setup", "configure-network", "--app-data-dir", $AppData, "--host-name", "127.0.0.1", "--coordinator-port", "$Port", "--public-game-port", "25565", "--json")
+    if ($network.coordinatorUrl -ne $coordURL -or $network.playerAddress -ne "127.0.0.1:25565") {
+        throw "configure-network returned unexpected addresses"
+    }
+    $desktopConfig = Invoke-AgentJson -Args @("desktop", "setup", "config", "--app-data-dir", $AppData, "--json")
+    if ($desktopConfig.coordinatorUrl -ne $coordURL -or $desktopConfig.publicEntry -ne "127.0.0.1:25565") {
+        throw "desktop config did not remember network settings"
+    }
+
+    $group = Invoke-AgentJson -Args @("desktop", "setup", "create-group", "--app-data-dir", $AppData, "--group-name", "Smoke Group", "--display-name", "Owner", "--coordinator-url", $coordURL, "--json")
+    if (-not $group.ok -or -not $group.inviteCode) {
+        throw "setup create-group did not create an invite code"
+    }
+    $ownerConfig = Invoke-AgentJson -Args @("desktop", "setup", "config", "--app-data-dir", $AppData, "--json")
+    if ($ownerConfig.group.groupId -ne $group.groupId -or -not $ownerConfig.group.hostId) {
+        throw "desktop config did not remember group identity"
+    }
+    $desktopConfigRaw = Get-Content -Raw -Encoding UTF8 -Path (Join-Path $AppData "desktop-config.json")
+    if ($desktopConfigRaw -match "(?i)accessKey|hostToken|memberToken|inviteCode|rcon\.password|takeoverToken") {
+        throw "desktop-config.json leaked a sensitive field"
+    }
+    $inviteList = Invoke-AgentJson -Args @("desktop", "setup", "list-invites", "--app-data-dir", $AppData, "--json")
+    if (-not $inviteList.ok -or ($inviteList | ConvertTo-Json -Depth 8) -match [regex]::Escape($group.inviteCode)) {
+        throw "invite list failed or exposed plaintext invite code"
+    }
+    $joined = Invoke-AgentJson -Args @("desktop", "setup", "join-group", "--app-data-dir", $JoinAppData, "--invite-code", $group.inviteCode, "--display-name", "Friend", "--coordinator-url", $coordURL, "--json")
+    if (-not $joined.ok -or $joined.groupId -ne $group.groupId) {
+        throw "setup join-group failed to use invite code"
+    }
+
+    $serverDir = Join-Path $TempRoot "fixture-server"
+    New-Item -ItemType Directory -Force -Path (Join-Path $serverDir "world") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $serverDir "mods") | Out-Null
+    Write-Utf8NoBom -Path (Join-Path $serverDir "paper-1.20.1.jar") -Text "fake jar"
+    Write-Utf8NoBom -Path (Join-Path $serverDir "mods\demo.jar") -Text "fake mod"
+    Write-Utf8NoBom -Path (Join-Path $serverDir "world\level.dat") -Text "fake world"
+    Write-Utf8NoBom -Path (Join-Path $serverDir "eula.txt") -Text "eula=true"
+    Write-Utf8NoBom -Path (Join-Path $serverDir "server.properties") -Text "enable-rcon=false`nserver-port=25565`nlevel-name=world"
+
+    $inspect = Invoke-AgentJson -Args @("desktop", "setup", "inspect-server", "--app-data-dir", $AppData, "--server-dir", $serverDir, "--json")
+    if (-not $inspect.ok -or -not $inspect.inspectionOk -or -not $inspect.launchReady -or $inspect.state -ne "ReadyToStart" -or $inspect.report.serverType -ne "Paper" -or -not $inspect.report.launchEntry) {
+        throw "setup inspect-server did not recognize Paper fixture"
+    }
+    if ($inspect.requiredJavaVersion -ne "17" -or [string]::IsNullOrWhiteSpace($inspect.detectedJavaVersion) -or [string]::IsNullOrWhiteSpace($inspect.detectedJavaPath)) {
+        throw "setup inspect-server did not report distinct required/detected Java fields"
+    }
+    $candidates = Invoke-AgentJson -Args @("desktop", "server", "candidates", "--app-data-dir", $AppData, "--json")
+    if ($candidates.jars.Count -lt 1 -or $candidates.recommended.kind -ne "jar") {
+        throw "desktop server candidates did not return launch candidates"
+    }
+    $profile = Invoke-AgentJson -Args @("desktop", "server", "launch-profile", "--app-data-dir", $AppData, "--json")
+    if ($profile.kind -ne "jar" -or $profile.serverType -ne "Paper") {
+        throw "desktop server launch-profile did not return saved profile"
+    }
+    $desktopConfigAfterServer = Invoke-AgentJson -Args @("desktop", "setup", "config", "--app-data-dir", $AppData, "--json")
+    if ($desktopConfigAfterServer.lastServerDir -ne $serverDir -or $desktopConfigAfterServer.launchProfile.path -ne "paper-1.20.1.jar") {
+        throw "desktop config did not remember server directory and launch profile"
+    }
+
+    $psServerDir = Join-Path $TempRoot "fixture-ps1-server"
+    New-Item -ItemType Directory -Force -Path (Join-Path $psServerDir "world") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $psServerDir "mods") | Out-Null
+    Write-Utf8NoBom -Path (Join-Path $psServerDir "Run.PS1") -Text "Write-Host 'smoke run.ps1 fixture'"
+    Write-Utf8NoBom -Path (Join-Path $psServerDir "eula.txt") -Text "eula=true"
+    Write-Utf8NoBom -Path (Join-Path $psServerDir "server.properties") -Text "server-port=25565`nlevel-name=world"
+    $psInspect = Invoke-AgentJson -Args @("desktop", "setup", "inspect-server", "--app-data-dir", $AppData, "--server-dir", $psServerDir, "--json")
+    if (-not $psInspect.ok -or -not $psInspect.launchReady -or $psInspect.report.serverType -ne "CustomScript" -or $psInspect.launchProfile.scriptType -ne "powershell" -or $psInspect.launchProfile.scriptPath -ne "Run.PS1") {
+        throw "setup inspect-server did not recognize Run.PS1 as PowerShell CustomScript"
+    }
+    $psCandidates = Invoke-AgentJson -Args @("desktop", "server", "candidates", "--app-data-dir", $AppData, "--json")
+    if ($psCandidates.scripts.Count -lt 1 -or $psCandidates.recommended.scriptType -ne "powershell") {
+        throw "desktop server candidates did not return PowerShell script candidate"
+    }
+    $psSelected = Invoke-AgentJson -Args @("desktop", "server", "select-launch", "--app-data-dir", $AppData, "--path", "Run.PS1", "--json")
+    if (-not $psSelected.launchReady -or $psSelected.launchProfile.scriptType -ne "powershell") {
+        throw "desktop server select-launch did not save PowerShell profile"
+    }
+    $psProfile = Invoke-AgentJson -Args @("desktop", "server", "launch-profile", "--app-data-dir", $AppData, "--json")
+    if ($psProfile.kind -ne "script" -or $psProfile.scriptType -ne "powershell" -or $psProfile.scriptPath -ne "Run.PS1") {
+        throw "desktop server launch-profile did not preserve PowerShell profile"
+    }
+    $desktopConfigAfterPs1 = Invoke-AgentJson -Args @("desktop", "setup", "config", "--app-data-dir", $AppData, "--json")
+    if ($desktopConfigAfterPs1.lastServerDir -ne $psServerDir -or $desktopConfigAfterPs1.launchProfile.path -ne "Run.PS1" -or $desktopConfigAfterPs1.launchProfile.scriptType -ne "powershell") {
+        throw "desktop config did not remember run.ps1 launch profile"
+    }
+    $complete = Invoke-AgentJson -Args @("desktop", "setup", "complete", "--app-data-dir", $AppData, "--json")
+    if (-not $complete.ok -or $complete.state -ne "Ready") {
+        throw "setup complete did not enter Ready state"
+    }
+    $cfg = Get-Content -Raw -Encoding UTF8 -Path (Join-Path $AppData "config.yaml") | ConvertFrom-Json
+    if ($cfg.server.dir -ne $psServerDir -or -not $cfg.server.command) {
+        throw "setup inspect-server did not persist server config for one-click start"
+    }
+
+    $autoStatus = Invoke-AgentJson -Args @("desktop", "server", "status", "--app-data-dir", $AppData, "--json")
+    if ($null -eq $autoStatus.ok) {
+        throw "desktop server status did not return the simplified status contract"
+    }
+    $stopAuto = Invoke-AgentJson -Args @("desktop", "server", "stop-auto", "--app-data-dir", $AppData, "--json")
+    if (-not $stopAuto.ok) {
+        throw "desktop server stop-auto should be idempotent in smoke"
+    }
+
+    foreach ($requiredPath in @(
+        "docs\zh-CN\windows-private-desktop-quickstart.md",
+        "coordinator\package.json",
+        "coordinator\node_modules\ws\package.json",
+        "runtime\node\node.exe",
+        "acbh-desktop-windows-amd64.exe",
+        "acbh-agent-windows-amd64.exe"
+    )) {
+        if (-not (Test-Path (Join-Path $BundleRoot $requiredPath))) {
+            throw "bundle smoke missing $requiredPath"
+        }
+    }
+
+    Write-Host "Windows desktop simple-flow bundle smoke passed." -ForegroundColor Green
+} finally {
+    try {
+        $agentExe = Join-Path $BundleRoot "acbh-agent-windows-amd64.exe"
+        if (Test-Path $agentExe) {
+            & $agentExe desktop server stop-auto --app-data-dir $AppData 2> $null | Out-Null
+            if ($Port) {
+                & $agentExe desktop stop --app-data-dir $AppData --port $Port 2> $null | Out-Null
+            }
+        }
+    } catch {
+    }
+    Start-Sleep -Milliseconds 500
+    if (Test-Path $TempRoot) {
+        Remove-Item -Recurse -Force $TempRoot -ErrorAction SilentlyContinue
+    }
+}

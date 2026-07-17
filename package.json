@@ -1,6 +1,6 @@
 {
   "name": "acbh",
-  "version": "0.1.0",
+  "version": "0.4.0-alpha6",
   "private": true,
   "description": "Anyone Can Be Host — distributed Minecraft host handoff platform",
   "scripts": {

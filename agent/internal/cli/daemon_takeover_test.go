@@ -289,8 +289,8 @@ func TestRunAutoTakeoverWithDepsFailureReportsFail(t *testing.T) {
 	if completed {
 		t.Fatal("expected completed=false on failure")
 	}
-	if client.failureReason != "pull-server-pack-failed" {
-		t.Fatalf("failureReason = %q, want pull-server-pack-failed", client.failureReason)
+	if client.failureReason != "pull-world-snapshot-failed" {
+		t.Fatalf("failureReason = %q, want pull-world-snapshot-failed", client.failureReason)
 	}
 	wantCalls := []string{"poll", "accept", "fail"}
 	if len(client.calls) != len(wantCalls) {

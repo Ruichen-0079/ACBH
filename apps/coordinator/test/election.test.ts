@@ -10,7 +10,7 @@ import {
   type HostScoreHints,
   type LatestLocalArtifacts,
 } from "../src/store.js";
-import { LocalFilesystemStorage } from "../src/storage/index.js";
+import { LocalFilesystemStorage, StorageNotFoundError } from "../src/storage/index.js";
 
 test("heartbeat keeps old format compatible and stores election hints", () => {
   const clock = testClock("2026-06-06T00:00:00.000Z");
@@ -446,7 +446,8 @@ test("stale host manifest upload returns 403, 400, and 409 and never mutates lat
 
   const root = await mkdtemp(path.join(os.tmpdir(), "acbh-stale-host-api-"));
   t.after(async () => rm(root, { force: true, recursive: true }));
-  const app = await buildApp({ logger: false, store, storage: new LocalFilesystemStorage(root) });
+  const storage = new LocalFilesystemStorage(root);
+  const app = await buildApp({ logger: false, store, storage });
   t.after(async () => app.close());
 
   const baseline = await app.inject({
@@ -464,6 +465,11 @@ test("stale host manifest upload returns 403, 400, and 409 and never mutates lat
   });
   assert.equal(baseline.statusCode, 200, baseline.body);
   assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+  const baselineManifest = await storage.readManifest({
+    groupId: hostA.groupId,
+    artifactKind: "world-snapshot",
+    artifactId: "snap_baseline",
+  });
 
   const stale = await app.inject({
     method: "POST",
@@ -480,6 +486,36 @@ test("stale host manifest upload returns 403, 400, and 409 and never mutates lat
   assert.equal(stale.statusCode, 403);
   assert.match(stale.body, /Only the current host may publish/);
   assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+  await assert.rejects(
+    storage.readManifest({
+      groupId: hostA.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_stale",
+    }),
+    StorageNotFoundError,
+  );
+
+  const staleOverwrite = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostB.hostId,
+      hostToken: hostB.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_baseline",
+      manifest: makeTestManifest(hostA.groupId, hostB.hostId, "snap_baseline", "2026-06-06T00:20:00Z"),
+    },
+  });
+  assert.equal(staleOverwrite.statusCode, 403);
+  assert.deepEqual(
+    await storage.readManifest({
+      groupId: hostA.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_baseline",
+    }),
+    baselineManifest,
+  );
 
   const noGen = await app.inject({
     method: "POST",
@@ -496,6 +532,14 @@ test("stale host manifest upload returns 403, 400, and 409 and never mutates lat
   assert.equal(noGen.statusCode, 400);
   assert.match(noGen.body, /Host generation header is required/);
   assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+  await assert.rejects(
+    storage.readManifest({
+      groupId: hostA.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_no_gen",
+    }),
+    StorageNotFoundError,
+  );
 
   const staleGen = await app.inject({
     method: "POST",
@@ -513,6 +557,86 @@ test("stale host manifest upload returns 403, 400, and 409 and never mutates lat
   assert.equal(staleGen.statusCode, 409);
   assert.match(staleGen.body, /Host generation is stale/);
   assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+  await assert.rejects(
+    storage.readManifest({
+      groupId: hostA.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_stale_gen",
+    }),
+    StorageNotFoundError,
+  );
+
+  const staleGenerationOverwrite = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    headers: { "x-acbh-host-generation": "0" },
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostA.hostId,
+      hostToken: hostA.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_baseline",
+      manifest: makeTestManifest(hostA.groupId, hostA.hostId, "snap_baseline", "2026-06-06T00:21:00Z"),
+    },
+  });
+  assert.equal(staleGenerationOverwrite.statusCode, 409);
+  assert.deepEqual(
+    await storage.readManifest({
+      groupId: hostA.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_baseline",
+    }),
+    baselineManifest,
+  );
+
+  const creatorMismatch = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    headers: { "x-acbh-host-generation": "1" },
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostA.hostId,
+      hostToken: hostA.hostToken,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_creator_mismatch",
+      manifest: makeTestManifest(hostA.groupId, hostB.hostId, "snap_creator_mismatch"),
+    },
+  });
+  assert.equal(creatorMismatch.statusCode, 403);
+  assert.match(creatorMismatch.body, /creatorHostId/);
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+  await assert.rejects(
+    storage.readManifest({
+      groupId: hostA.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_creator_mismatch",
+    }),
+    StorageNotFoundError,
+  );
+
+  const badToken = await app.inject({
+    method: "POST",
+    url: "/v1/artifacts/manifests",
+    headers: { "x-acbh-host-generation": "1" },
+    payload: {
+      groupId: hostA.groupId,
+      hostId: hostA.hostId,
+      hostToken: "wrong-token",
+      artifactKind: "world-snapshot",
+      artifactId: "snap_bad_token",
+      manifest: makeTestManifest(hostA.groupId, hostA.hostId, "snap_bad_token"),
+    },
+  });
+  assert.equal(badToken.statusCode, 401);
+  assert.equal(store.getLatestArtifact(hostA.groupId, "world-snapshot").artifactId, "snap_baseline");
+  await assert.rejects(
+    storage.readManifest({
+      groupId: hostA.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_bad_token",
+    }),
+    StorageNotFoundError,
+  );
 
   const badGenFormat = await app.inject({
     method: "POST",
@@ -563,6 +687,7 @@ function createHost(store: ReturnType<typeof createInMemoryCoordinatorStore>): T
   });
   const host = store.registerHost({
     groupId: group.groupId,
+    accessKey: group.accessKey,
     memberId: joined.memberId,
     deviceName: "host-a",
     platform: "test",
@@ -583,6 +708,7 @@ function addHost(
   });
   const host = store.registerHost({
     groupId: group.groupId,
+    accessKey: group.accessKey,
     memberId: joined.memberId,
     deviceName: name,
     platform: "test",

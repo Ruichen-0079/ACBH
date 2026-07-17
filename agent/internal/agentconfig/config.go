@@ -6,12 +6,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 const (
-	DirName      = "acbh"
+	DirName      = "ACBH"
 	FileName     = "config.yaml"
-	AgentVersion = "0.1.0"
+	AgentVersion = "v0.4.0-alpha6"
+
+	DefaultServerStartTimeout = 120 * time.Second
+	MinServerStartTimeout     = 10 * time.Second
 )
 
 type Config struct {
@@ -28,10 +33,31 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Dir         string `json:"dir,omitempty"`
-	Command     string `json:"command,omitempty"`
-	LogDir      string `json:"logDir,omitempty"`
-	StopTimeout string `json:"stopTimeout,omitempty"`
+	Dir          string   `json:"dir,omitempty"`
+	LaunchType   string   `json:"launchType,omitempty"`
+	LaunchPath   string   `json:"launchPath,omitempty"`
+	Command      string   `json:"command,omitempty"`
+	JavaPath     string   `json:"javaPath,omitempty"`
+	WorkingDir   string   `json:"workingDir,omitempty"`
+	StartArgs    []string `json:"startArgs,omitempty"`
+	LogDir       string   `json:"logDir,omitempty"`
+	StopTimeout  string   `json:"stopTimeout,omitempty"`
+	StartTimeout string   `json:"startTimeout,omitempty"`
+}
+
+func (s ServerConfig) ResolvedStartTimeout() (time.Duration, error) {
+	raw := strings.TrimSpace(s.StartTimeout)
+	if raw == "" {
+		return DefaultServerStartTimeout, nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid server.startTimeout %q: %w", s.StartTimeout, err)
+	}
+	if parsed < MinServerStartTimeout {
+		return 0, fmt.Errorf("server.startTimeout must be at least %s", MinServerStartTimeout)
+	}
+	return parsed, nil
 }
 
 func DefaultPath() (string, error) {
@@ -44,12 +70,29 @@ func DefaultPath() (string, error) {
 }
 
 func DefaultDir() (string, error) {
+	if override := os.Getenv("ACBH_APP_DATA_DIR"); override != "" {
+		return override, nil
+	}
+
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("find user config directory: %w", err)
 	}
 
 	return filepath.Join(dir, DirName), nil
+}
+
+func ResolveAppDataDir(executablePath string) (string, error) {
+	if override := os.Getenv("ACBH_APP_DATA_DIR"); override != "" {
+		return override, nil
+	}
+
+	exeDir := filepath.Dir(executablePath)
+	if Exists(filepath.Join(exeDir, "portable.flag")) {
+		return filepath.Join(exeDir, "data"), nil
+	}
+
+	return DefaultDir()
 }
 
 func Exists(path string) bool {

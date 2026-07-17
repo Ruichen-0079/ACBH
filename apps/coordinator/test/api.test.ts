@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test, type TestContext } from "node:test";
@@ -8,7 +8,7 @@ import { buildApp } from "../src/app.js";
 import { createInMemoryCoordinatorStore } from "../src/store.js";
 import { LocalFilesystemStorage, type ArtifactManifest } from "../src/storage/index.js";
 
-test("in-memory group join, host registration, heartbeat, and debug state", async (t) => {
+test("host registration and group state require group-scoped authentication", async (t) => {
   const app = await buildTestApp(t);
 
   try {
@@ -49,11 +49,41 @@ test("in-memory group join, host registration, heartbeat, and debug state", asyn
     const joined = joinResponse.json<{ memberId: string; role: string }>();
     assert.equal(joined.role, "member");
 
+    const anonymousRegister = await app.inject({
+      method: "POST",
+      url: "/v1/hosts/register",
+      payload: {
+        groupId: created.groupId,
+        memberId: joined.memberId,
+        deviceName: "PlayerA-PC",
+        platform: "windows",
+        agentVersion: "0.1.0",
+      },
+    });
+    assert.equal(anonymousRegister.statusCode, 401);
+
+    const wrongKey = "wrong-access-key";
+    const deniedRegister = await app.inject({
+      method: "POST",
+      url: "/v1/hosts/register",
+      payload: {
+        groupId: created.groupId,
+        accessKey: wrongKey,
+        memberId: joined.memberId,
+        deviceName: "PlayerA-PC",
+        platform: "windows",
+        agentVersion: "0.1.0",
+      },
+    });
+    assert.equal(deniedRegister.statusCode, 401);
+    assert.equal(deniedRegister.body.includes(wrongKey), false);
+
     const registerResponse = await app.inject({
       method: "POST",
       url: "/v1/hosts/register",
       payload: {
         groupId: created.groupId,
+        accessKey: created.accessKey,
         memberId: joined.memberId,
         deviceName: "PlayerA-PC",
         platform: "windows",
@@ -81,9 +111,20 @@ test("in-memory group join, host registration, heartbeat, and debug state", asyn
       status: "standby",
     });
 
+    const anonymousState = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${created.groupId}/state`,
+    });
+    assert.equal(anonymousState.statusCode, 401);
+    assert.equal(anonymousState.body.includes(created.accessKey), false);
+    assert.equal(anonymousState.body.includes(registered.hostToken), false);
+
     const stateResponse = await app.inject({
       method: "GET",
       url: `/v1/groups/${created.groupId}/state`,
+      headers: {
+        "x-acbh-access-key": created.accessKey,
+      },
     });
     assert.equal(stateResponse.statusCode, 200);
     const stateText = stateResponse.body;
@@ -101,6 +142,195 @@ test("in-memory group join, host registration, heartbeat, and debug state", asyn
     assert.equal(state.hosts.length, 1);
     assert.equal(stateText.includes(created.accessKey), false);
     assert.equal(stateText.includes(registered.hostToken), false);
+
+    const hostAuthenticatedState = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${created.groupId}/state`,
+      headers: hostHeaders(registered.hostId, registered.hostToken),
+    });
+    assert.equal(hostAuthenticatedState.statusCode, 200);
+
+    const otherGroup = (
+      await app.inject({
+        method: "POST",
+        url: "/v1/groups",
+        payload: {
+          name: "Other Server",
+          ownerName: "Other Owner",
+        },
+      })
+    ).json<{ groupId: string; accessKey: string }>();
+
+    const crossGroupRegister = await app.inject({
+      method: "POST",
+      url: "/v1/hosts/register",
+      payload: {
+        groupId: created.groupId,
+        accessKey: otherGroup.accessKey,
+        memberId: joined.memberId,
+        deviceName: "Cross-group-PC",
+        platform: "windows",
+        agentVersion: "0.1.0",
+      },
+    });
+    assert.equal(crossGroupRegister.statusCode, 401);
+    assert.equal(crossGroupRegister.body.includes(otherGroup.accessKey), false);
+    assert.equal(crossGroupRegister.body.includes(registered.hostToken), false);
+
+    const crossGroupState = await app.inject({
+      method: "GET",
+      url: `/v1/groups/${created.groupId}/state`,
+      headers: {
+        "x-acbh-access-key": otherGroup.accessKey,
+      },
+    });
+    assert.equal(crossGroupState.statusCode, 401);
+    assert.equal(crossGroupState.body.includes(otherGroup.accessKey), false);
+    assert.equal(crossGroupState.body.includes(registered.hostToken), false);
+  } finally {
+    await app.close();
+  }
+});
+
+test("invite codes register joined hosts and support revoke", async (t) => {
+  const app = await buildTestApp(t);
+
+  try {
+    const createdResponse = await app.inject({
+      method: "POST",
+      url: "/v1/groups",
+      payload: {
+        name: "Invite Server",
+        ownerName: "Owner",
+      },
+    });
+    assert.equal(createdResponse.statusCode, 200);
+    const created = createdResponse.json<{ groupId: string; accessKey: string }>();
+
+    const deniedCreate = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${created.groupId}/invites`,
+      payload: {
+        accessKey: "wrong",
+      },
+    });
+    assert.equal(deniedCreate.statusCode, 401);
+    assert.equal(deniedCreate.body.includes(created.accessKey), false);
+
+    const inviteResponse = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${created.groupId}/invites`,
+      payload: {
+        accessKey: created.accessKey,
+        expiresInSeconds: 120,
+        oneTime: true,
+      },
+    });
+    assert.equal(inviteResponse.statusCode, 200, inviteResponse.body);
+    const invite = inviteResponse.json<{
+      inviteId: string;
+      inviteCode: string;
+      groupId: string;
+      oneTime: boolean;
+    }>();
+    assert.match(invite.inviteId, /^inv_/);
+    assert.match(invite.inviteCode, /^ACBH-[0-9A-F]{6}-[0-9A-F]{6}$/);
+    assert.equal(invite.groupId, created.groupId);
+    assert.equal(invite.oneTime, true);
+    assert.equal(inviteResponse.body.includes(created.accessKey), false);
+
+    const joinedResponse = await app.inject({
+      method: "POST",
+      url: "/v1/invites/join",
+      payload: {
+        inviteCode: invite.inviteCode,
+        displayName: "PlayerA",
+        deviceName: "PlayerA-PC",
+        platform: "windows",
+        agentVersion: "0.3.3-test",
+      },
+    });
+    assert.equal(joinedResponse.statusCode, 200, joinedResponse.body);
+    const joined = joinedResponse.json<{ groupId: string; memberId: string; hostId: string; hostToken: string }>();
+    assert.equal(joined.groupId, created.groupId);
+    assert.match(joined.hostToken, /^ht_/);
+    assert.equal(joinedResponse.body.includes(invite.inviteCode), false);
+
+    const heartbeat = await app.inject({
+      method: "POST",
+      url: "/v1/hosts/heartbeat",
+      payload: {
+        groupId: joined.groupId,
+        hostId: joined.hostId,
+        hostToken: joined.hostToken,
+        status: "standby",
+      },
+    });
+    assert.equal(heartbeat.statusCode, 200, heartbeat.body);
+
+    const reuse = await app.inject({
+      method: "POST",
+      url: "/v1/invites/join",
+      payload: {
+        inviteCode: invite.inviteCode,
+        displayName: "PlayerB",
+        deviceName: "PlayerB-PC",
+        platform: "windows",
+        agentVersion: "0.3.3-test",
+      },
+    });
+    assert.equal(reuse.statusCode, 401);
+
+    const reusableInvite = (
+      await app.inject({
+        method: "POST",
+        url: `/v1/groups/${created.groupId}/invites`,
+        payload: {
+          accessKey: created.accessKey,
+          expiresInSeconds: 120,
+          oneTime: false,
+        },
+      })
+    ).json<{ inviteId: string; inviteCode: string; oneTime: boolean }>();
+    assert.equal(reusableInvite.oneTime, false);
+
+    for (const player of ["PlayerC", "PlayerD"]) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/invites/join",
+        payload: {
+          inviteCode: reusableInvite.inviteCode,
+          displayName: player,
+          deviceName: `${player}-PC`,
+          platform: "windows",
+          agentVersion: "0.3.3-test",
+        },
+      });
+      assert.equal(response.statusCode, 200, response.body);
+    }
+
+    const revoke = await app.inject({
+      method: "POST",
+      url: `/v1/groups/${created.groupId}/invites/revoke`,
+      payload: {
+        accessKey: created.accessKey,
+        inviteId: reusableInvite.inviteId,
+      },
+    });
+    assert.equal(revoke.statusCode, 200, revoke.body);
+
+    const revokedJoin = await app.inject({
+      method: "POST",
+      url: "/v1/invites/join",
+      payload: {
+        inviteCode: reusableInvite.inviteCode,
+        displayName: "PlayerE",
+        deviceName: "PlayerE-PC",
+        platform: "windows",
+        agentVersion: "0.3.3-test",
+      },
+    });
+    assert.equal(revokedJoin.statusCode, 401);
   } finally {
     await app.close();
   }
@@ -120,6 +350,61 @@ test("storage info endpoint reports local backend", async (t) => {
     assert.equal(info.backend, "local");
     assert.equal(typeof info.root, "string");
     assert.equal(info.ready, true);
+  } finally {
+    await app.close();
+  }
+});
+
+test("bootstrap manifest exposes locally installed runtime packages", async (t) => {
+  const packageDir = await mkdtemp(path.join(os.tmpdir(), "acbh-bootstrap-packages-"));
+  const previous = process.env.ACBH_BOOTSTRAP_PACKAGE_DIR;
+  process.env.ACBH_BOOTSTRAP_PACKAGE_DIR = packageDir;
+  t.after(async () => {
+    if (previous === undefined) {
+      delete process.env.ACBH_BOOTSTRAP_PACKAGE_DIR;
+    } else {
+      process.env.ACBH_BOOTSTRAP_PACKAGE_DIR = previous;
+    }
+    await rm(packageDir, { force: true, recursive: true });
+  });
+
+  const content = Buffer.from("runtime package");
+  await writeFile(path.join(packageDir, "acbh-runtime-base-windows-amd64.zip"), content);
+  await writeFile(path.join(packageDir, "acbh-runtime-base-windows-amd64.zip.sig"), "test-signature\n");
+  const app = await buildTestApp(t);
+
+  try {
+    const manifestResponse = await app.inject({
+      method: "GET",
+      url: "/v1/bootstrap/manifest",
+      headers: { host: "example.test" },
+    });
+    assert.equal(manifestResponse.statusCode, 200, manifestResponse.body);
+    const runtimePackage = manifestResponse
+      .json<{
+        packages: Array<{
+          id: string;
+          available: boolean;
+          size: number;
+          sha256: string;
+          signature: string;
+          url: string | null;
+        }>;
+      }>()
+      .packages.find((pkg) => pkg.id === "acbh-runtime-base-windows-amd64");
+    assert.ok(runtimePackage);
+    assert.equal(runtimePackage.available, true);
+    assert.equal(runtimePackage.size, content.byteLength);
+    assert.equal(runtimePackage.sha256, sha256(content));
+    assert.equal(runtimePackage.signature, "test-signature");
+    assert.match(runtimePackage.url ?? "", /\/v1\/bootstrap\/packages\/acbh-runtime-base-windows-amd64\.zip$/);
+
+    const downloadResponse = await app.inject({
+      method: "GET",
+      url: "/v1/bootstrap/packages/acbh-runtime-base-windows-amd64.zip",
+    });
+    assert.equal(downloadResponse.statusCode, 200, downloadResponse.body);
+    assert.deepEqual(downloadResponse.rawPayload, content);
   } finally {
     await app.close();
   }
@@ -575,6 +860,7 @@ async function createJoinedHost(app: Awaited<ReturnType<typeof buildApp>>): Prom
     url: "/v1/hosts/register",
     payload: {
       groupId: created.groupId,
+      accessKey: created.accessKey,
       memberId: joined.memberId,
       deviceName: "PlayerA-PC",
       platform: "windows",

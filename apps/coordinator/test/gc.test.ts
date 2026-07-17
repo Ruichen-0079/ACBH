@@ -9,6 +9,7 @@ import { LocalFilesystemStorage } from "../src/storage/local.js";
 import {
   createInMemoryCoordinatorStore,
   type GcBackend,
+  GcBlockedError,
   StoreError,
   type ArtifactKind,
 } from "../src/store.js";
@@ -33,16 +34,12 @@ function testGcBackend(storage: LocalFilesystemStorage): GcBackend {
       return storage.listObjectSha256s({ groupId: p.groupId });
     },
     readManifestFiles: async (p) => {
-      try {
-        const manifest = await storage.readManifest({
-          groupId: p.groupId,
-          artifactKind: p.artifactKind,
-          artifactId: p.artifactId,
-        });
-        return (manifest.files ?? []).map((f) => ({ sha256: f.sha256, deleted: !!f.deleted }));
-      } catch {
-        return [];
-      }
+      const manifest = await storage.readManifest({
+        groupId: p.groupId,
+        artifactKind: p.artifactKind,
+        artifactId: p.artifactId,
+      });
+      return (manifest.files ?? []).map((f) => ({ sha256: f.sha256, deleted: !!f.deleted }));
     },
   };
 }
@@ -62,6 +59,7 @@ async function saveArtifactMeta(
 ) {
   const content = Buffer.from("hello-world-object");
   const objectSha256 = sha256raw(content);
+  const fileClass = kind === "world-snapshot" ? "world-runtime" : kind;
   const manifest = {
     manifestVersion: 1,
     artifactKind: kind,
@@ -71,7 +69,7 @@ async function saveArtifactMeta(
     creatorHostId,
     parentArtifactId: null,
     serverPackVersion: kind === "world-snapshot" ? "pack_000001" : null,
-    files: [{ path: "test.file", size: content.byteLength, sha256: objectSha256, modifiedAt: "2026-06-01T00:00:00.000Z", deleted: false }],
+    files: [{ path: "test.file", class: fileClass, size: content.byteLength, sha256: objectSha256, modifiedAt: "2026-06-01T00:00:00.000Z", deleted: false }],
     summary: { includedFiles: 1, ignoredFiles: 0, unknownFiles: 0, deletedFiles: 0, totalBytes: content.byteLength },
   };
   await storage.saveObject({ groupId, sha256: objectSha256, content });
@@ -90,6 +88,7 @@ function createTestHost(store: ReturnType<typeof createInMemoryCoordinatorStore>
   const joined = store.joinGroup({ groupId: group.groupId, accessKey: group.accessKey, displayName: "Test" });
   const host = store.registerHost({
     groupId: group.groupId,
+    accessKey: group.accessKey,
     memberId: joined.memberId,
     deviceName: "gc-host",
     platform: "test",
@@ -102,6 +101,7 @@ function addTestHost(store: ReturnType<typeof createInMemoryCoordinatorStore>, g
   const joined = store.joinGroup({ groupId: group.groupId, accessKey: group.accessKey, displayName: "Other" });
   const host = store.registerHost({
     groupId: group.groupId,
+    accessKey: group.accessKey,
     memberId: joined.memberId,
     deviceName: "gc-host-b",
     platform: "test",
@@ -138,6 +138,60 @@ function recordArtifact(
     hostId: host.hostId,
     hostToken: host.hostToken,
   });
+}
+
+async function prepareRetainedFailureScenario(
+  store: ReturnType<typeof createInMemoryCoordinatorStore>,
+  storage: LocalFilesystemStorage,
+  host: TestHost,
+) {
+  const retained = await saveArtifactMeta(
+    storage,
+    host.groupId,
+    "world-snapshot",
+    "snap_retained",
+    host.hostId,
+    "2026-06-02T00:00:00Z",
+  );
+  recordArtifact(
+    store,
+    host.groupId,
+    host,
+    "world-snapshot",
+    "snap_retained",
+    "2026-06-02T00:00:00Z",
+    "available",
+  );
+  await saveArtifactMeta(
+    storage,
+    host.groupId,
+    "world-snapshot",
+    "snap_candidate",
+    host.hostId,
+    "2026-06-01T00:00:00Z",
+  );
+  recordArtifact(
+    store,
+    host.groupId,
+    host,
+    "world-snapshot",
+    "snap_candidate",
+    "2026-06-01T00:00:00Z",
+    "rejected",
+  );
+
+  const orphanContent = Buffer.from("blocked-orphan-data");
+  const orphanSha256 = sha256raw(orphanContent);
+  await storage.saveObject({ groupId: host.groupId, sha256: orphanSha256, content: orphanContent });
+
+  return {
+    retainedObjectSha256: retained.files[0].sha256,
+    orphanSha256,
+  };
+}
+
+function retainedManifestPath(root: string, groupId: string): string {
+  return path.join(root, "groups", groupId, "world-snapshots", "snap_retained", "manifest.json");
 }
 
 test("dry-run does not delete any artifacts or objects", async () => {
@@ -340,6 +394,165 @@ test("orphan object blobs are deleted when unreferenced", async () => {
     assert.equal(await storage.objectExists({ groupId: host.groupId, sha256: objDelete }), false, "orphan object should be deleted");
     const keptSha256 = sha256raw(Buffer.from("hello-world-object"));
     assert.ok(await storage.objectExists({ groupId: host.groupId, sha256: keptSha256 }), "referenced object should survive");
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("missing retained manifest blocks dry-run and preserves objects", async () => {
+  const store = createInMemoryCoordinatorStore({ retentionPerKind: 1, gcMinAgeMs: 0 });
+  const host = createTestHost(store);
+  const { storage, root } = await createStorage();
+  try {
+    const objects = await prepareRetainedFailureScenario(store, storage, host);
+    await storage.deleteManifest({
+      groupId: host.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_retained",
+    });
+
+    const result = await store.gcArtifacts({
+      groupId: host.groupId,
+      dryRun: true,
+      hostId: host.hostId,
+      hostToken: host.hostToken,
+      retentionPerKind: 1,
+      minAgeMs: 0,
+      backend: testGcBackend(storage),
+    });
+
+    assert.equal(result.blocked, true);
+    assert.deepEqual(result.blockers, [{
+      groupId: host.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_retained",
+      reason: "manifest does not exist",
+    }]);
+    assert.deepEqual(result.deletedArtifacts.map((artifact) => artifact.artifactId), ["snap_candidate"]);
+    assert.equal(result.deletedObjectCount, 0);
+    assert.equal(await storage.objectExists({ groupId: host.groupId, sha256: objects.retainedObjectSha256 }), true);
+    assert.equal(await storage.objectExists({ groupId: host.groupId, sha256: objects.orphanSha256 }), true);
+    assert.equal(store.listArtifacts(host.groupId).length, 2);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("corrupt retained manifest blocks non-dry-run before any deletion", async () => {
+  const store = createInMemoryCoordinatorStore({ retentionPerKind: 1, gcMinAgeMs: 0 });
+  const host = createTestHost(store);
+  const { storage, root } = await createStorage();
+  try {
+    const objects = await prepareRetainedFailureScenario(store, storage, host);
+    await writeFile(retainedManifestPath(root, host.groupId), "{not-json", "utf8");
+
+    await assert.rejects(
+      store.gcArtifacts({
+        groupId: host.groupId,
+        dryRun: false,
+        hostId: host.hostId,
+        hostToken: host.hostToken,
+        retentionPerKind: 1,
+        minAgeMs: 0,
+        backend: testGcBackend(storage),
+      }),
+      (error: unknown) =>
+        error instanceof GcBlockedError &&
+        error.statusCode === 409 &&
+        error.blockers[0]?.reason === "manifest contains invalid JSON",
+    );
+
+    assert.equal(await storage.objectExists({ groupId: host.groupId, sha256: objects.retainedObjectSha256 }), true);
+    assert.equal(await storage.objectExists({ groupId: host.groupId, sha256: objects.orphanSha256 }), true);
+    await storage.readManifest({
+      groupId: host.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_candidate",
+    });
+    assert.equal(store.listArtifacts(host.groupId).length, 2);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("retained manifest storage error blocks GC without leaking raw paths", async () => {
+  const store = createInMemoryCoordinatorStore({ retentionPerKind: 1, gcMinAgeMs: 0 });
+  const host = createTestHost(store);
+  const { storage, root } = await createStorage();
+  try {
+    const objects = await prepareRetainedFailureScenario(store, storage, host);
+    const backend = testGcBackend(storage);
+    backend.readManifestFiles = async (params) => {
+      if (params.artifactId === "snap_retained") {
+        throw new Error("EACCES: permission denied, open 'C:\\secret\\manifest.json'");
+      }
+      const manifest = await storage.readManifest(params);
+      return manifest.files.map((file) => ({ sha256: file.sha256, deleted: file.deleted }));
+    };
+
+    await assert.rejects(
+      store.gcArtifacts({
+        groupId: host.groupId,
+        dryRun: false,
+        hostId: host.hostId,
+        hostToken: host.hostToken,
+        retentionPerKind: 1,
+        minAgeMs: 0,
+        backend,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof GcBlockedError);
+        assert.equal(error.blockers[0]?.reason, "manifest storage read failed");
+        assert.ok(!error.message.includes("C:\\secret"));
+        return true;
+      },
+    );
+
+    assert.equal(await storage.objectExists({ groupId: host.groupId, sha256: objects.orphanSha256 }), true);
+    assert.equal(store.listArtifacts(host.groupId).length, 2);
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("non-dry-run GC route returns structured 409 for a retained manifest failure", async () => {
+  const store = createInMemoryCoordinatorStore({ retentionPerKind: 1, gcMinAgeMs: 0 });
+  const host = createTestHost(store);
+  const { storage, root } = await createStorage();
+  try {
+    const objects = await prepareRetainedFailureScenario(store, storage, host);
+    await storage.deleteManifest({
+      groupId: host.groupId,
+      artifactKind: "world-snapshot",
+      artifactId: "snap_retained",
+    });
+    const app = await buildApp({ logger: false, store, storage });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/v1/groups/${host.groupId}/artifacts/gc`,
+        headers: {
+          "x-acbh-host-id": host.hostId,
+          "x-acbh-host-token": host.hostToken,
+        },
+        payload: { dryRun: false, retentionPerKind: 1, minAgeMs: 1 },
+      });
+
+      assert.equal(response.statusCode, 409, response.body);
+      const body = response.json();
+      assert.equal(body.blocked, true);
+      assert.deepEqual(body.blockers, [{
+        groupId: host.groupId,
+        artifactKind: "world-snapshot",
+        artifactId: "snap_retained",
+        reason: "manifest does not exist",
+      }]);
+      assert.ok(!response.body.includes(host.hostToken));
+      assert.equal(await storage.objectExists({ groupId: host.groupId, sha256: objects.orphanSha256 }), true);
+      assert.equal(store.listArtifacts(host.groupId).length, 2);
+    } finally {
+      await app.close();
+    }
   } finally {
     await rm(root, { force: true, recursive: true });
   }

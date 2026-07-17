@@ -1,7 +1,15 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ArtifactKind } from "./domain/artifacts.js";
+import type {
+  TunnelMode,
+  TunnelStatus,
+  TunnelSession,
+  PlayerSession,
+  PlayerSessionResponse,
+  HostTunnelPresence,
+} from "./network.js";
 
-export type MemberRole = "owner" | "member";
+export type MemberRole = "owner" | "admin" | "member";
 
 export type HostStatus = "online" | "standby" | "hosting" | "unhealthy" | "offline";
 
@@ -36,6 +44,13 @@ export type ArtifactMetadata = {
   manifestObjectPath: string;
   fileCount: number;
   totalBytes: number;
+  consistent?: boolean;
+  pinned?: boolean;
+  sourceHostId?: string;
+  hostGeneration?: number;
+  uploadedSize?: number;
+  changedFileCount?: number;
+  deletedFileCount?: number;
 };
 
 export type ElectionCandidate = {
@@ -112,6 +127,28 @@ export type TakeoverPollResponse = {
     | null;
 };
 
+export type HostLeaseStatus = {
+  groupId: string;
+  hostId: string;
+  currentHostId: string | null;
+  currentHostIdMatches: boolean;
+  leaseValid: boolean;
+  leaseExpiresAt: string | null;
+  leaseRemaining: number;
+  generation: number;
+  serverTime: string;
+  heartbeatActive: boolean;
+};
+
+export type WhoAmIResponse = {
+  groupId: string;
+  memberId: string;
+  hostId: string;
+  role: MemberRole;
+  credentialKind: "host_token";
+  lease: HostLeaseStatus;
+};
+
 export type GroupState = {
   groupId: string;
   name: string;
@@ -147,6 +184,29 @@ export type GroupState = {
   }>;
 };
 
+export type PublicGroupState = GroupState;
+
+export type InviteRecord = {
+  inviteId: string;
+  groupId: string;
+  inviteCodeHash: string;
+  expiresAt: string;
+  oneTime: boolean;
+  usedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+};
+
+export type PublicInvite = {
+  inviteId: string;
+  groupId: string;
+  expiresAt: string;
+  oneTime: boolean;
+  usedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+};
+
 export type DeletedArtifact = {
   groupId: string;
   artifactKind: ArtifactKind;
@@ -156,9 +216,18 @@ export type DeletedArtifact = {
 
 export type GcResult = {
   dryRun: boolean;
+  blocked: boolean;
+  blockers: GcBlocker[];
   deletedArtifacts: DeletedArtifact[];
   deletedObjectCount: number;
   protectedArtifactIds: string[];
+};
+
+export type GcBlocker = {
+  groupId: string;
+  artifactKind: ArtifactKind;
+  artifactId: string;
+  reason: string;
 };
 
 export interface GcBackend {
@@ -212,6 +281,13 @@ type GroupRecord = {
   lastElection: ElectionResult | null;
   activeTakeoverAssignmentId: string | null;
   takeoverAssignments: Map<string, TakeoverAssignmentRecord>;
+  playerSessions: Map<string, PlayerSessionRecord>;
+  tunnelSessions: Map<string, TunnelSession>;
+  invites: Map<string, InviteRecord>;
+};
+
+type PlayerSessionRecord = PlayerSession & {
+  playerTokenHash: string;
 };
 
 export type GroupSnapshot = {
@@ -254,6 +330,7 @@ export type GroupSnapshot = {
   lastElection: ElectionResult | null;
   activeTakeoverAssignmentId: string | null;
   takeoverAssignments: TakeoverAssignmentRecord[];
+  invites?: InviteRecord[];
 };
 
 export type StoreSnapshot = {
@@ -266,6 +343,7 @@ type StoreOptions = {
   assignmentTtlMs?: number;
   retentionPerKind?: number;
   gcMinAgeMs?: number;
+  tunnelSessionTtlMs?: number;
   onMutation?: () => void;
 };
 
@@ -273,6 +351,7 @@ const defaultHeartbeatTimeoutMs = 30_000;
 const defaultAssignmentTtlMs = 60_000;
 const defaultRetentionPerKind = 5;
 const defaultGcMinAgeMs = 3_600_000;
+const defaultTunnelSessionTtlMs = 300_000;
 const ALL_ARTIFACT_KINDS: ArtifactKind[] = ["world-snapshot", "server-pack", "admin-state"];
 const fourGiB = 4 * 1024 * 1024 * 1024;
 const tenGiB = 10 * 1024 * 1024 * 1024;
@@ -281,9 +360,23 @@ export class StoreError extends Error {
   constructor(
     public readonly statusCode: number,
     message: string,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = "StoreError";
+  }
+}
+
+export class GcBlockedError extends StoreError {
+  constructor(public readonly blockers: GcBlocker[]) {
+    const first = blockers[0];
+    super(
+      409,
+      first
+        ? `Artifact GC blocked by retained manifest read failure: groupId=${first.groupId} artifactKind=${first.artifactKind} artifactId=${first.artifactId} reason=${first.reason}`
+        : "Artifact GC blocked by retained manifest read failure",
+    );
+    this.name = "GcBlockedError";
   }
 }
 
@@ -294,6 +387,7 @@ export class InMemoryCoordinatorStore {
   readonly assignmentTtlMs: number;
   readonly retentionPerKind: number;
   readonly gcMinAgeMs: number;
+  readonly tunnelSessionTtlMs: number;
   private readonly onMutation?: () => void;
 
   constructor(options: StoreOptions = {}) {
@@ -306,6 +400,8 @@ export class InMemoryCoordinatorStore {
       options.retentionPerKind ?? positiveEnvInteger("ACBH_ARTIFACT_RETENTION_PER_KIND", defaultRetentionPerKind);
     this.gcMinAgeMs =
       options.gcMinAgeMs ?? positiveEnvInteger("ACBH_GC_MIN_AGE_MS", defaultGcMinAgeMs);
+    this.tunnelSessionTtlMs =
+      options.tunnelSessionTtlMs ?? positiveEnvInteger("ACBH_TUNNEL_SESSION_TTL_MS", defaultTunnelSessionTtlMs);
     this.onMutation = options.onMutation;
   }
 
@@ -360,6 +456,7 @@ export class InMemoryCoordinatorStore {
         lastElection: group.lastElection,
         activeTakeoverAssignmentId: group.activeTakeoverAssignmentId,
         takeoverAssignments: Array.from(group.takeoverAssignments.values()),
+        invites: Array.from(group.invites.values()),
       });
     }
     return { groups };
@@ -391,6 +488,9 @@ export class InMemoryCoordinatorStore {
         lastElection: g.lastElection,
         activeTakeoverAssignmentId: g.activeTakeoverAssignmentId,
         takeoverAssignments: new Map(g.takeoverAssignments.map((a) => [a.assignmentId, a])),
+        playerSessions: new Map(),
+        tunnelSessions: new Map(),
+        invites: new Map((g.invites ?? []).map((i) => [i.inviteId, i])),
       };
       store.groups.set(g.groupId, group);
     }
@@ -437,6 +537,9 @@ export class InMemoryCoordinatorStore {
       lastElection: null,
       activeTakeoverAssignmentId: null,
       takeoverAssignments: new Map(),
+      playerSessions: new Map(),
+      tunnelSessions: new Map(),
+      invites: new Map(),
     });
 
     this.triggerMutation();
@@ -449,9 +552,7 @@ export class InMemoryCoordinatorStore {
   } {
     const group = this.requireGroup(input.groupId);
 
-    if (!verifySecret(input.accessKey, group.accessKeyHash)) {
-      throw new StoreError(401, "Invalid access key");
-    }
+    this.verifyAccessKey(group, input.accessKey);
 
     const now = this.nowIso();
     const memberId = createId("mem");
@@ -469,12 +570,14 @@ export class InMemoryCoordinatorStore {
 
   registerHost(input: {
     groupId: string;
+    accessKey: string;
     memberId: string;
     deviceName: string;
     platform: string;
     agentVersion: string;
   }): { hostId: string; hostToken: string } {
     const group = this.requireGroup(input.groupId);
+    this.verifyAccessKey(group, input.accessKey);
 
     if (!group.members.has(input.memberId)) {
       throw new StoreError(404, "Member does not exist in group");
@@ -507,6 +610,117 @@ export class InMemoryCoordinatorStore {
 
     this.triggerMutation();
     return { hostId, hostToken };
+  }
+
+  createInvite(input: {
+    groupId: string;
+    accessKey?: string;
+    hostId?: string;
+    hostToken?: string;
+    expiresInSeconds?: number;
+    oneTime?: boolean;
+  }): { inviteId: string; inviteCode: string; groupId: string; expiresAt: string; oneTime: boolean } {
+    const group = this.requireInviteManager(input);
+    const ttlSeconds = Math.max(60, Math.min(input.expiresInSeconds ?? 30 * 60, 30 * 24 * 3600));
+    const now = this.now();
+    const inviteId = createId("inv");
+    const inviteCode = createInviteCode();
+    const expiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
+    group.invites.set(inviteId, {
+      inviteId,
+      groupId: input.groupId,
+      inviteCodeHash: hashSecret(inviteCode),
+      expiresAt,
+      oneTime: input.oneTime ?? true,
+      usedAt: null,
+      revokedAt: null,
+      createdAt: now.toISOString(),
+    });
+    group.updatedAt = now.toISOString();
+    this.triggerMutation();
+    return { inviteId, inviteCode, groupId: input.groupId, expiresAt, oneTime: input.oneTime ?? true };
+  }
+
+  revokeInvite(input: { groupId: string; accessKey?: string; hostId?: string; hostToken?: string; inviteId: string }): { ok: true; inviteId: string } {
+    const group = this.requireInviteManager(input);
+    const invite = group.invites.get(input.inviteId);
+    if (!invite) {
+      throw new StoreError(404, "Invite does not exist");
+    }
+    invite.revokedAt = this.nowIso();
+    group.updatedAt = invite.revokedAt;
+    this.triggerMutation();
+    return { ok: true, inviteId: input.inviteId };
+  }
+
+  listInvites(input: { groupId: string; accessKey?: string; hostId?: string; hostToken?: string }): { invites: PublicInvite[] } {
+    const group = this.requireInviteManager(input);
+    return {
+      invites: Array.from(group.invites.values()).map((invite) => ({
+        inviteId: invite.inviteId,
+        groupId: invite.groupId,
+        expiresAt: invite.expiresAt,
+        oneTime: invite.oneTime,
+        usedAt: invite.usedAt,
+        revokedAt: invite.revokedAt,
+        createdAt: invite.createdAt,
+      })),
+    };
+  }
+
+  joinWithInvite(input: {
+    inviteCode: string;
+    displayName: string;
+    deviceName: string;
+    platform: string;
+    agentVersion: string;
+  }): { groupId: string; memberId: string; hostId: string; hostToken: string } {
+    const found = this.findInvite(input.inviteCode);
+    if (found === null) {
+      throw new StoreError(401, "Invalid or expired invite code");
+    }
+    const { group, invite } = found;
+    const now = this.nowIso();
+    const memberId = createId("mem");
+    group.members.set(memberId, {
+      memberId,
+      displayName: input.displayName,
+      role: "member",
+      createdAt: now,
+    });
+    const hostId = createId("host");
+    const hostToken = createSecret("ht");
+    group.hosts.set(hostId, {
+      hostId,
+      memberId,
+      deviceName: input.deviceName,
+      platform: input.platform,
+      agentVersion: input.agentVersion,
+      status: "standby",
+      hostTokenHash: hashSecret(hostToken),
+      latestLocalSnapshotId: null,
+      latestLocalArtifacts: {},
+      hostScoreHints: {},
+      connection: null,
+      computedHostScore: 0,
+      recentFailureCount: 0,
+      manualPriority: 0,
+      lastElectionCandidateAt: null,
+      createdAt: now,
+      updatedAt: now,
+      lastHeartbeatAt: now,
+    });
+    if (invite.oneTime) {
+      invite.usedAt = now;
+    }
+    group.updatedAt = now;
+    this.triggerMutation();
+    return { groupId: group.groupId, memberId, hostId, hostToken };
+  }
+
+  verifyGroupAccessKey(groupId: string, accessKey: string): void {
+    const group = this.requireGroup(groupId);
+    this.verifyAccessKey(group, accessKey);
   }
 
   updateHeartbeat(input: {
@@ -555,6 +769,62 @@ export class InMemoryCoordinatorStore {
     return { ok: true, hostId: host.hostId, status: host.status };
   }
 
+  whoami(input: { groupId: string; hostId: string; hostToken: string }): WhoAmIResponse {
+    const { group, host, member } = this.requireAuthenticatedHost(input);
+    return {
+      groupId: group.groupId,
+      memberId: member.memberId,
+      hostId: host.hostId,
+      role: member.role,
+      credentialKind: "host_token",
+      lease: this.hostLeaseStatusFor(group, host),
+    };
+  }
+
+  getHostLeaseStatus(input: { groupId: string; hostId: string; hostToken: string }): HostLeaseStatus {
+    const { group, host } = this.requireAuthenticatedHost(input);
+    return this.hostLeaseStatusFor(group, host);
+  }
+
+  ensureActiveLease(input: {
+    groupId: string;
+    hostId: string;
+    hostToken: string;
+    generation?: number;
+  }): { ok: true; renewed: boolean; lease: HostLeaseStatus; message: string } {
+    const { group, host } = this.requireAuthenticatedHost(input);
+    const now = this.now();
+    const nowIso = now.toISOString();
+    const currentHost = group.currentHostId === null ? null : group.hosts.get(group.currentHostId);
+    const currentLeaseFresh = currentHost !== undefined && currentHost !== null && isFresh(currentHost.lastHeartbeatAt, now, this.heartbeatTimeoutMs);
+
+    if (group.currentHostId === host.hostId && currentLeaseFresh) {
+      if (input.generation !== undefined && input.generation !== group.currentHostGeneration) {
+        throw new StoreError(409, "Host generation is stale; current host may have changed", "stale_host_generation");
+      }
+      host.lastHeartbeatAt = nowIso;
+      host.updatedAt = nowIso;
+      group.updatedAt = nowIso;
+      this.triggerMutation();
+      return { ok: true, renewed: false, lease: this.hostLeaseStatusFor(group, host), message: "lease is active" };
+    }
+
+    if (group.currentHostId !== null && group.currentHostId !== host.hostId && currentLeaseFresh) {
+      throw new StoreError(409, "Current host lease is held by another host", "lease_held_by_other_host");
+    }
+
+    group.currentHostId = host.hostId;
+    group.currentHostGeneration += 1;
+    host.lastHeartbeatAt = nowIso;
+    if (host.status === "offline" || host.status === "unhealthy") {
+      host.status = "standby";
+    }
+    host.updatedAt = nowIso;
+    group.updatedAt = nowIso;
+    this.triggerMutation();
+    return { ok: true, renewed: true, lease: this.hostLeaseStatusFor(group, host), message: "lease renewed" };
+  }
+
   getGroupState(groupId: string): GroupState {
     const group = this.requireGroup(groupId);
 
@@ -594,6 +864,10 @@ export class InMemoryCoordinatorStore {
     };
   }
 
+  listGroups(): PublicGroupState[] {
+    return Array.from(this.groups.keys()).map((groupId) => this.getGroupState(groupId));
+  }
+
   evaluateCandidates(groupId: string): ElectionCandidate[] {
     const group = this.requireGroup(groupId);
     const evaluatedAt = this.now();
@@ -618,6 +892,9 @@ export class InMemoryCoordinatorStore {
       }
       if (!hasLatestWorld) {
         reasons.push("missing-latest-world-snapshot");
+      }
+      if (latestWorld !== undefined && latestWorld.consistent === false) {
+        reasons.push("latest-world-snapshot-inconsistent");
       }
       if (host.hostScoreHints.javaAvailable === false) {
         reasons.push("java-unavailable");
@@ -881,10 +1158,6 @@ export class InMemoryCoordinatorStore {
   recordArtifact(metadata: Omit<ArtifactMetadata, "updatedAt">): ArtifactMetadata {
     const group = this.requireGroup(metadata.groupId);
 
-    if (metadata.status === "available" && metadata.artifactKind === "world-snapshot" && !metadata.serverPackVersion) {
-      throw new StoreError(400, "serverPackVersion is required for world-snapshot artifacts");
-    }
-
     const now = this.nowIso();
     const artifact = {
       ...metadata,
@@ -916,23 +1189,112 @@ export class InMemoryCoordinatorStore {
     hostToken: string;
     currentHostGeneration?: number;
   }): ArtifactMetadata {
+    this.authorizeArtifactPublish(input);
+    return this.recordArtifact(input.metadata);
+  }
+
+  authorizeArtifactPublish(input: {
+    metadata: Pick<ArtifactMetadata, "groupId" | "creatorHostId">;
+    hostId: string;
+    hostToken: string;
+    currentHostGeneration?: number;
+  }): void {
     const group = this.requireGroup(input.metadata.groupId);
     const host = this.requireHost(group, input.hostId);
     this.verifyHostToken(host, input.hostToken);
 
-    if (group.currentHostId !== null) {
-      if (input.hostId !== group.currentHostId) {
-        throw new StoreError(403, "Only the current host may publish artifacts");
-      }
-      if (input.currentHostGeneration === undefined) {
-        throw new StoreError(400, "Host generation header is required when a current host is set");
-      }
-      if (input.currentHostGeneration !== group.currentHostGeneration) {
-        throw new StoreError(409, "Host generation is stale; current host may have changed");
-      }
+    if (input.metadata.creatorHostId !== input.hostId) {
+      throw new StoreError(403, "Manifest creatorHostId must match the authenticated host");
     }
+    if (group.currentHostId === null) {
+      return;
+    }
+    if (input.hostId !== group.currentHostId) {
+      throw new StoreError(403, "Only the current host may publish artifacts");
+    }
+    if (input.currentHostGeneration === undefined) {
+      throw new StoreError(400, "Host generation header is required when a current host is set");
+    }
+    if (input.currentHostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Host generation is stale; current host may have changed");
+    }
+  }
 
-    return this.recordArtifact(input.metadata);
+  authorizeWorldSnapshotPublish(input: {
+    groupId: string;
+    sourceHostId: string;
+    hostId: string;
+    hostToken: string;
+    hostGeneration?: number;
+    parentSnapshotId?: string;
+  }): void {
+    const group = this.requireGroup(input.groupId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+    if (input.sourceHostId !== input.hostId) {
+      throw new StoreError(403, "Snapshot sourceHostId must match the authenticated host", "not_current_host");
+    }
+    if (group.currentHostId !== input.hostId) {
+      throw new StoreError(403, "Only the current host may publish world snapshots", "not_current_host");
+    }
+    if (input.hostGeneration === undefined || input.hostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Host generation is stale; current host may have changed", "stale_host_generation");
+    }
+    if (!isFresh(host.lastHeartbeatAt, this.now(), this.heartbeatTimeoutMs)) {
+      throw new StoreError(403, "Host lease has expired", "host_lease_expired");
+    }
+    const latest = this.findLatestArtifact(group, "world-snapshot");
+    const parent = input.parentSnapshotId ?? "";
+    if (latest !== undefined && parent !== latest.artifactId) {
+      throw new StoreError(409, "Snapshot parent does not match latest world snapshot", "snapshot_parent_conflict");
+    }
+    if (latest === undefined && parent !== "") {
+      throw new StoreError(409, "Snapshot parent was provided but no latest world snapshot exists", "snapshot_parent_conflict");
+    }
+  }
+
+  pinWorldSnapshot(input: {
+    groupId: string;
+    snapshotId: string;
+    hostId: string;
+    hostToken: string;
+    pinned: boolean;
+  }): ArtifactMetadata {
+    this.verifyHost({ groupId: input.groupId, hostId: input.hostId, hostToken: input.hostToken });
+    const group = this.requireGroup(input.groupId);
+    const artifact = group.artifacts.get("world-snapshot")?.get(input.snapshotId);
+    if (!artifact) {
+      throw new StoreError(404, "World snapshot does not exist");
+    }
+    artifact.pinned = input.pinned;
+    artifact.updatedAt = this.nowIso();
+    group.updatedAt = artifact.updatedAt;
+    this.triggerMutation();
+    return artifact;
+  }
+
+  deleteWorldSnapshot(input: {
+    groupId: string;
+    snapshotId: string;
+    hostId: string;
+    hostToken: string;
+  }): ArtifactMetadata {
+    this.verifyHost({ groupId: input.groupId, hostId: input.hostId, hostToken: input.hostToken });
+    const group = this.requireGroup(input.groupId);
+    const artifact = group.artifacts.get("world-snapshot")?.get(input.snapshotId);
+    if (!artifact) {
+      throw new StoreError(404, "World snapshot does not exist");
+    }
+    if (group.latestArtifacts.get("world-snapshot") === input.snapshotId || group.latestSnapshotId === input.snapshotId) {
+      throw new StoreError(409, "Latest world snapshot cannot be deleted");
+    }
+    if (artifact.pinned === true) {
+      throw new StoreError(409, "Pinned world snapshot cannot be deleted");
+    }
+    group.artifacts.get("world-snapshot")?.delete(input.snapshotId);
+    group.updatedAt = this.nowIso();
+    this.triggerMutation();
+    return artifact;
   }
 
   async gcArtifacts(input: {
@@ -972,6 +1334,12 @@ export class InMemoryCoordinatorStore {
     for (const [kind, artifactId] of group.latestArtifacts) {
       protectedIds.add(artifactId);
       protectedLog.push(`${artifactId} (latest ${kind})`);
+    }
+    for (const artifact of (group.artifacts.get("world-snapshot")?.values() ?? [])) {
+      if (artifact.pinned === true) {
+        protectedIds.add(artifact.artifactId);
+        protectedLog.push(`${artifact.artifactId} (pinned world-snapshot)`);
+      }
     }
 
     if (group.activeTakeoverAssignmentId !== null) {
@@ -1024,21 +1392,16 @@ export class InMemoryCoordinatorStore {
       });
     }
 
-    if (input.dryRun) {
-      return {
-        dryRun: true,
-        deletedArtifacts: candidates,
-        deletedObjectCount: 0,
-        protectedArtifactIds: protectedLog,
-      };
-    }
-
     const retainedSha256s = new Set<string>();
+    const blockers: GcBlocker[] = [];
     for (const kind of ALL_ARTIFACT_KINDS) {
       const artifactsByKind = group.artifacts.get(kind);
       if (!artifactsByKind) continue;
       for (const [artifactId, artifact] of artifactsByKind) {
-        if (protectedIds.has(artifactId) || !candidates.some((c) => c.artifactId === artifactId)) {
+        if (
+          artifact.status !== "uploading" &&
+          (protectedIds.has(artifactId) || !candidates.some((c) => c.artifactId === artifactId))
+        ) {
           try {
             const files = await input.backend.readManifestFiles({
               groupId: artifact.groupId,
@@ -1050,11 +1413,32 @@ export class InMemoryCoordinatorStore {
                 retainedSha256s.add(file.sha256);
               }
             }
-          } catch {
-            protectedLog.push(`${artifactId} (manifest read error, treating as retained)`);
+          } catch (error) {
+            blockers.push({
+              groupId: artifact.groupId,
+              artifactKind: artifact.artifactKind,
+              artifactId: artifact.artifactId,
+              reason: describeManifestReadFailure(error),
+            });
+            protectedLog.push(`${artifactId} (manifest read failure blocks object GC)`);
           }
         }
       }
+    }
+
+    if (input.dryRun) {
+      return {
+        dryRun: true,
+        blocked: blockers.length > 0,
+        blockers,
+        deletedArtifacts: candidates,
+        deletedObjectCount: 0,
+        protectedArtifactIds: protectedLog,
+      };
+    }
+
+    if (blockers.length > 0) {
+      throw new GcBlockedError(blockers);
     }
 
     for (const candidate of candidates) {
@@ -1094,6 +1478,8 @@ export class InMemoryCoordinatorStore {
     this.triggerMutation();
     return {
       dryRun: false,
+      blocked: false,
+      blockers: [],
       deletedArtifacts: candidates,
       deletedObjectCount,
       protectedArtifactIds: protectedLog,
@@ -1126,10 +1512,178 @@ export class InMemoryCoordinatorStore {
     const artifact = this.findLatestArtifact(group, artifactKind);
 
     if (!artifact) {
-      throw new StoreError(404, "No available artifact exists for this kind");
+      throw new StoreError(404, "No available artifact exists for this kind", "artifact_empty");
     }
 
     return artifact;
+  }
+
+  createPlayerSession(input: { groupId: string; displayName?: string }): PlayerSessionResponse {
+    const group = this.requireGroup(input.groupId);
+    const now = this.now();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + this.tunnelSessionTtlMs).toISOString();
+    const playerId = createId("plyr");
+    const playerToken = createSecret("pt");
+
+    const record: PlayerSessionRecord = {
+      playerId,
+      groupId: group.groupId,
+      displayName: input.displayName,
+      createdAt: nowIso,
+      expiresAt,
+      playerTokenHash: hashSecret(playerToken),
+    };
+
+    group.playerSessions.set(playerId, record);
+    const { playerTokenHash: _, ...publicSession } = record;
+    return { ...publicSession, playerToken };
+  }
+
+  getPlayerSession(groupId: string, playerId: string): PlayerSession {
+    const group = this.requireGroup(groupId);
+    const record = group.playerSessions.get(playerId);
+    if (!record) {
+      throw new StoreError(404, "Player session does not exist");
+    }
+    const { playerTokenHash: _, ...session } = record;
+    return { ...session };
+  }
+
+  verifyPlayerToken(groupId: string, playerId: string, playerToken: string): void {
+    const group = this.requireGroup(groupId);
+    const record = group.playerSessions.get(playerId);
+    if (!record) {
+      throw new StoreError(404, "Player session does not exist");
+    }
+    const expiresMs = Date.parse(record.expiresAt);
+    if (!Number.isFinite(expiresMs) || expiresMs <= this.now().getTime()) {
+      throw new StoreError(401, "Player token has expired", "token_expired");
+    }
+    if (!verifySecret(playerToken, record.playerTokenHash)) {
+      throw new StoreError(401, "Invalid player token");
+    }
+  }
+
+  createTunnelSession(input: { groupId: string; playerId: string }): TunnelSession {
+    const group = this.requireGroup(input.groupId);
+
+    const playerSession = group.playerSessions.get(input.playerId);
+    if (!playerSession) {
+      throw new StoreError(404, "Player session does not exist");
+    }
+    const playerExpiresMs = Date.parse(playerSession.expiresAt);
+    if (!Number.isFinite(playerExpiresMs) || playerExpiresMs <= this.now().getTime()) {
+      throw new StoreError(401, "Player token has expired", "token_expired");
+    }
+
+    if (group.currentHostId === null) {
+      throw new StoreError(400, "Group has no current host; cannot create tunnel session");
+    }
+
+    const now = this.now();
+    const nowIso = now.toISOString();
+    const expiresAt = new Date(now.getTime() + this.tunnelSessionTtlMs).toISOString();
+    const sessionId = createId("tun");
+
+    const session: TunnelSession = {
+      sessionId,
+      groupId: group.groupId,
+      hostId: group.currentHostId,
+      playerId: input.playerId,
+      mode: "relay",
+      status: "pending",
+      currentHostGeneration: group.currentHostGeneration,
+      createdAt: nowIso,
+      expiresAt,
+    };
+
+    group.tunnelSessions.set(sessionId, session);
+    return { ...session };
+  }
+
+  getTunnelSession(groupId: string, sessionId: string): TunnelSession {
+    const group = this.requireGroup(groupId);
+    const session = group.tunnelSessions.get(sessionId);
+    if (!session) {
+      throw new StoreError(404, "Tunnel session does not exist");
+    }
+    return { ...session };
+  }
+
+  listTunnelSessions(groupId: string): TunnelSession[] {
+    const group = this.requireGroup(groupId);
+    return Array.from(group.tunnelSessions.values()).map(s => ({ ...s }));
+  }
+
+  updateTunnelSessionStatus(
+    groupId: string,
+    sessionId: string,
+    status: TunnelStatus,
+  ): TunnelSession {
+    const group = this.requireGroup(groupId);
+    const session = group.tunnelSessions.get(sessionId);
+    if (!session) {
+      throw new StoreError(404, "Tunnel session does not exist");
+    }
+    session.status = status;
+    return { ...session };
+  }
+
+  getTunnelSessionForRelay(
+    groupId: string,
+    sessionId: string,
+    expectedHostId: string,
+    expectedHostGeneration: number,
+  ): TunnelSession {
+    const group = this.requireGroup(groupId);
+    const session = group.tunnelSessions.get(sessionId);
+    if (!session) {
+      throw new StoreError(404, "Tunnel session does not exist");
+    }
+    if (session.status !== "pending" && session.status !== "active") {
+      throw new StoreError(409, `Tunnel session is ${session.status} and cannot be joined for relay`);
+    }
+    const expiresMs = Date.parse(session.expiresAt);
+    if (!Number.isFinite(expiresMs) || expiresMs <= this.now().getTime()) {
+      session.status = "expired";
+      throw new StoreError(410, "Tunnel session has expired");
+    }
+    if (session.hostId !== expectedHostId) {
+      throw new StoreError(403, "Tunnel session belongs to a different host");
+    }
+    if (session.currentHostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Generation is stale; current host has changed");
+    }
+    if (expectedHostGeneration !== group.currentHostGeneration) {
+      throw new StoreError(409, "Host generation is stale; current host may have changed");
+    }
+    if (group.currentHostId !== expectedHostId) {
+      throw new StoreError(403, "Only the current host may join relay");
+    }
+    return { ...session };
+  }
+
+  expireTunnelSessions(now?: Date): void {
+    const nowDate = now ?? this.now();
+    const nowMs = nowDate.getTime();
+
+    for (const group of this.groups.values()) {
+      for (const [sessionId, session] of group.tunnelSessions) {
+        if (session.status !== "expired") {
+          const expiresMs = Date.parse(session.expiresAt);
+          if (Number.isFinite(expiresMs) && expiresMs <= nowMs) {
+            session.status = "expired";
+          }
+        }
+      }
+      for (const [playerId, player] of group.playerSessions) {
+        const expiresMs = Date.parse(player.expiresAt);
+        if (Number.isFinite(expiresMs) && expiresMs <= nowMs) {
+          group.playerSessions.delete(playerId);
+        }
+      }
+    }
   }
 
   private requireGroup(groupId: string): GroupRecord {
@@ -1150,10 +1704,98 @@ export class InMemoryCoordinatorStore {
     return host;
   }
 
+  private findInvite(inviteCode: string): { group: GroupRecord; invite: InviteRecord } | null {
+    for (const group of this.groups.values()) {
+      for (const invite of group.invites.values()) {
+        if (invite.revokedAt !== null || invite.usedAt !== null) continue;
+        if (Date.parse(invite.expiresAt) <= this.now().getTime()) continue;
+        if (verifySecret(inviteCode, invite.inviteCodeHash)) {
+          return { group, invite };
+        }
+      }
+    }
+    return null;
+  }
+
   private verifyHostToken(host: HostRecord, hostToken: string): void {
     if (!verifySecret(hostToken, host.hostTokenHash)) {
       throw new StoreError(401, "Invalid host token");
     }
+  }
+
+  private verifyAccessKey(group: GroupRecord, accessKey: string): void {
+    if (!verifySecret(accessKey, group.accessKeyHash)) {
+      throw new StoreError(401, "Invalid access key");
+    }
+  }
+
+  private requireAuthenticatedHost(input: {
+    groupId: string;
+    hostId: string;
+    hostToken: string;
+  }): { group: GroupRecord; host: HostRecord; member: MemberRecord } {
+    const group = this.requireGroup(input.groupId);
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+    const member = group.members.get(host.memberId);
+    if (!member) {
+      throw new StoreError(409, "Host member identity does not exist in group", "identity_mismatch");
+    }
+    return { group, host, member };
+  }
+
+  private requireInviteManager(input: {
+    groupId: string;
+    accessKey?: string;
+    hostId?: string;
+    hostToken?: string;
+  }): GroupRecord {
+    const group = this.requireGroup(input.groupId);
+    if (input.accessKey !== undefined && input.accessKey !== "") {
+      this.verifyAccessKey(group, input.accessKey);
+      return group;
+    }
+    if (!input.hostId || !input.hostToken) {
+      throw new StoreError(401, "Invite management requires authenticated owner/admin identity", "invite_auth_required");
+    }
+    const host = this.requireHost(group, input.hostId);
+    this.verifyHostToken(host, input.hostToken);
+    const member = group.members.get(host.memberId);
+    if (!member) {
+      throw new StoreError(409, "Host member identity does not exist in group", "identity_mismatch");
+    }
+    if (member.role !== "owner" && member.role !== "admin") {
+      throw new StoreError(403, "Invite management requires owner/admin role", "invite_permission_denied");
+    }
+    return group;
+  }
+
+  private hostLeaseStatusFor(group: GroupRecord, host: HostRecord): HostLeaseStatus {
+    const now = this.now();
+    const heartbeatActive = isFresh(host.lastHeartbeatAt, now, this.heartbeatTimeoutMs);
+    const currentHostIdMatches = group.currentHostId === host.hostId;
+    const leaseValid = currentHostIdMatches && heartbeatActive;
+    let leaseExpiresAt: string | null = null;
+    let leaseRemaining = 0;
+    if (host.lastHeartbeatAt !== null) {
+      const expiresAtMs = Date.parse(host.lastHeartbeatAt) + this.heartbeatTimeoutMs;
+      if (Number.isFinite(expiresAtMs)) {
+        leaseExpiresAt = new Date(expiresAtMs).toISOString();
+        leaseRemaining = Math.max(0, expiresAtMs - now.getTime());
+      }
+    }
+    return {
+      groupId: group.groupId,
+      hostId: host.hostId,
+      currentHostId: group.currentHostId,
+      currentHostIdMatches,
+      leaseValid,
+      leaseExpiresAt,
+      leaseRemaining,
+      generation: group.currentHostGeneration,
+      serverTime: now.toISOString(),
+      heartbeatActive,
+    };
   }
 
   private findLatestArtifact(group: GroupRecord, artifactKind: ArtifactKind): ArtifactMetadata | undefined {
@@ -1293,12 +1935,32 @@ function positiveEnvInteger(name: string, fallback: number): number {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function describeManifestReadFailure(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return "manifest read failed";
+  }
+  if (error.name === "StorageNotFoundError") {
+    return "manifest does not exist";
+  }
+  if (error.name === "SyntaxError") {
+    return "manifest contains invalid JSON";
+  }
+  if (error.name === "StorageValidationError") {
+    return "manifest validation failed";
+  }
+  return "manifest storage read failed";
+}
+
 function createId(prefix: string): string {
   return `${prefix}_${randomBytes(12).toString("base64url")}`;
 }
 
 function createSecret(prefix: string): string {
   return `${prefix}_${randomBytes(24).toString("base64url")}`;
+}
+
+function createInviteCode(): string {
+  return `ACBH-${randomBytes(3).toString("hex").toUpperCase()}-${randomBytes(3).toString("hex").toUpperCase()}`;
 }
 
 function hashSecret(secret: string): string {

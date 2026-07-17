@@ -46,9 +46,90 @@ A public lightweight service responsible for groups, members, hosts, heartbeats,
 
 A client-side daemon/CLI installed on candidate host devices. It downloads server packs, starts Minecraft, performs safe sync, uploads snapshots, reports health, and executes takeover.
 
+### Windows 桌面 GUI（中文）
+
+`scripts/acbh-desktop-gui.ps1` 提供四步组网与世界备份。v0.4.0-alpha2 起，主界面 **成员与邀请** 支持：
+
+- Owner 生成 / 查看 / 撤销 Group 邀请码（后台任务，窗口保持响应）
+- 邀请码明文仅在一次结果对话框显示，日志与列表默认掩码
+- 加入已有 Group 时使用 `ACBH_INVITE_CODE` 环境变量，避免命令行暴露
+
+详见 [docs/zh-CN/windows-gui-invites.md](docs/zh-CN/windows-gui-invites.md) 与 [docs/zh-CN/v0.4-operations.md](docs/zh-CN/v0.4-operations.md)。
+
 ### Storage
 
 A content-addressed file store for server packs, snapshot manifests, and file blobs. V1 starts with local filesystem storage; S3-compatible storage can be added later.
+
+## Quick start
+
+```bash
+pnpm install
+pnpm dev:coordinator
+```
+
+In another terminal:
+
+```bash
+cd agent
+go run . --help
+go run . doctor
+```
+
+## Run tests
+
+```bash
+bash scripts/verify-all.sh       # Linux / Fedora / macOS
+powershell scripts/verify-all.ps1 # Windows
+```
+
+Or individually:
+
+```bash
+# Go
+cd agent && go vet ./... && go test ./... -count=1
+
+# Coordinator
+pnpm build:coordinator && pnpm --filter @acbh/coordinator test
+```
+
+## Run demo smoke
+
+```bash
+bash scripts/demo-smoke.sh
+```
+
+The demo runs build + health + group + host + heartbeat + scan + push + latest + pull
++ restore verify all locally. No real Minecraft or public network needed.
+
+See [docs/demo.md](docs/demo.md) for detailed walkthrough and troubleshooting.
+
+## Run the graphical demo
+
+Start the Coordinator, then open `http://127.0.0.1:6121/dashboard`:
+
+```bash
+pnpm dev:coordinator
+```
+
+The existing Dashboard can create a group, register a host, send heartbeats,
+inspect group/election state, connect to the loopback-only Local Control API,
+control a managed server, validate and transfer artifacts, and handle takeover
+actions. Credentials stay in page memory and are cleared on refresh. Follow the
+[graphical demo walkthrough](docs/demo.md#graphical-dashboard-demo) for the
+bootstrap steps and fake server directory.
+
+## Security defaults
+
+- Local Control binds to `127.0.0.1:6122`; remote binding requires explicit
+  opt-in and displays a warning.
+- Dashboard secrets are memory-only, masked by default, and cleared on refresh.
+- Recommended login and safe-sync commands use `ACBH_ACCESS_KEY` and
+  `ACBH_RCON_PASSWORD` instead of placing credentials in argv.
+- Manifest fencing, atomic commit, fail-closed GC, restore path hardening, and
+  server process locking remain enabled.
+
+Before delivery, follow the
+[release readiness checklist](docs/release-checklist.md).
 
 ## First local targets
 
@@ -71,43 +152,22 @@ Start the Coordinator:
 pnpm dev:coordinator
 ```
 
-Create a group. Save the returned `groupId`, `ownerMemberId`, and one-time `accessKey`:
+Create a group. Save the returned `groupId`, `ownerMemberId`, and one-time `accessKey`.
+Use a request file so JSON is not embedded in the curl process arguments:
 
 ```bash
+printf '%s\n' '{"name":"Survival Server","ownerName":"Owner"}' > group-request.json
 curl -s http://localhost:6121/v1/groups \
   -H "content-type: application/json" \
-  -d '{"name":"Survival Server","ownerName":"Owner"}'
+  --data-binary @group-request.json
+rm -f group-request.json
 ```
 
-Join the group with the one-time access key value:
-
-```bash
-curl -s http://localhost:6121/v1/groups/<groupId>/join \
-  -H "content-type: application/json" \
-  -d '{"accessKey":"<accessKey>","displayName":"PlayerA"}'
-```
-
-Register a host candidate device. Save the returned one-time `hostToken`:
-
-```bash
-curl -s http://localhost:6121/v1/hosts/register \
-  -H "content-type: application/json" \
-  -d '{"groupId":"<groupId>","memberId":"<memberId>","deviceName":"PlayerA-PC","platform":"windows","agentVersion":"0.1.0"}'
-```
-
-Send a heartbeat:
-
-```bash
-curl -s http://localhost:6121/v1/hosts/heartbeat \
-  -H "content-type: application/json" \
-  -d '{"groupId":"<groupId>","hostId":"<hostId>","hostToken":"<hostToken>","status":"standby","latestLocalSnapshotId":null}'
-```
-
-Inspect debug state. This does not return access keys or host tokens:
-
-```bash
-curl -s http://localhost:6121/v1/groups/<groupId>/state
-```
+For join, host registration, heartbeat, and authenticated state requests, use
+the Dashboard or the protected header/body-file pattern in
+[`scripts/demo-smoke.sh`](scripts/demo-smoke.sh). Do not inline `accessKey`,
+`hostToken`, or bearer tokens in curl arguments. Group state responses never
+return access keys or host tokens.
 
 ## Agent CLI example
 
@@ -123,16 +183,22 @@ go run . doctor
 After creating a group with the Coordinator API, log in with the returned one-time access key:
 
 ```bash
+read -rsp "ACBH access key: " ACBH_ACCESS_KEY
+export ACBH_ACCESS_KEY
+echo
 go run . login \
   --coordinator http://localhost:6121 \
   --group-id <groupId> \
-  --access-key <accessKey> \
   --name PlayerA \
   --device-name PlayerA-PC \
   --platform windows
+unset ACBH_ACCESS_KEY
 ```
 
-The Agent stores config at `<user config dir>/acbh/config.yaml`. It does not print the host token after storing it.
+PowerShell users can set `ACBH_ACCESS_KEY` from `Read-Host -AsSecureString`; see
+the Windows section in [docs/demo.md](docs/demo.md). The Agent stores config at
+`<user config dir>/acbh/config.yaml`. It does not print the host token after
+storing it.
 
 Send one heartbeat:
 
@@ -146,11 +212,23 @@ Run the heartbeat loop:
 go run . daemon --interval 10s --status standby
 ```
 
-Then inspect Coordinator state:
+Start the Dashboard-facing local control API:
 
 ```bash
-curl -s http://localhost:6121/v1/groups/<groupId>/state
+go run . control serve
 ```
+
+The API binds to `127.0.0.1:6122` by default. Its generated bearer token is
+stored at `<user config dir>/acbh/control-token` with restrictive permissions;
+the full token is not printed. Binding a non-loopback address requires the
+explicit `--allow-remote-control` flag and should only be done on a trusted
+network. The embedded Dashboard keeps access keys, host tokens, RCON passwords,
+and the local control token in page memory only, so they must be entered again
+after a refresh.
+
+Then inspect Coordinator state from the Dashboard. Direct API clients should
+send host headers from a mode-0600 temporary header file, never as literal
+command arguments.
 
 ## Agent local server process manager
 
@@ -180,13 +258,24 @@ go run . server start \
 
 go run . server status
 go run . server stop
+go run . server repair-state --server-dir /path/to/server
 ```
 
-`server start` launches a detached local supervisor, records runtime state under `<user config dir>/acbh/runtime/server-state.json`, and appends stdout and stderr to separate log files. The default log directory is `<user config dir>/acbh/logs`.
+`server start` first acquires an exclusive process lock under `<user config dir>/acbh/runtime`, then launches a detached local supervisor, records runtime state in `server-state.json`, and appends stdout and stderr to separate log files. Concurrent starts fail instead of launching a second Java process. The default log directory is `<user config dir>/acbh/logs`.
 
-`server stop` asks the verified supervisor to write `stop` to the child process stdin, waits for the configured timeout, and then kills the child if it has not exited. A stale state file is reported without signaling its recorded PID. Logs are append-only and may grow until the user rotates or removes them.
+`server stop` asks the verified supervisor to write `stop` to the child process stdin, waits for the configured timeout, and then kills the child if it has not exited. Stale or unverifiable state and lock files block new starts by default. `server repair-state` removes them only when all recorded local processes can be confirmed stopped; it never kills a process. Logs are append-only and may grow until the user rotates or removes them.
 
 Launch commands are parsed into an executable and arguments without a shell. Shell operators such as pipes and redirection are not supported. Server process control is local-only; it does not elect a host, perform automatic takeover, send heartbeats, or run artifact synchronization.
+
+### Structured argv (recommended)
+
+The local control API (`POST /v1/server/start`) accepts `jvmArgs` and `serverArgs` as JSON string arrays. The Agent passes these directly to the supervisor as an argv slice, avoiding the vulnerabilities of string join-then-reparse.
+
+### Legacy `--command` string
+
+The CLI `--command` flag accepts a space-separated command string for backward compatibility. It is parsed by `ParseCommand()` which handles quoting and whitespace but cannot recover original intent if an argument contains unquoted spaces (e.g. Windows paths like `C:\Program Files\...`). New configurations should prefer structured argv when possible, and always quote paths containing spaces in `--command`.
+
+The Agent config `server.command` field is a legacy string. It remains supported for backward compatibility with existing `config.yaml` files.
 
 ## Agent local manifest examples
 
@@ -241,17 +330,22 @@ rcon.password=change-me
 Then run `safe-sync`. It authenticates to RCON, sends `save-all flush`, waits for a successful response, and only then scans the server directory:
 
 ```bash
+read -rsp "RCON password: " ACBH_RCON_PASSWORD
+export ACBH_RCON_PASSWORD
+echo
 go run . safe-sync \
   --server-dir C:/minecraft/server \
   --artifact-id snap_000001 \
   --server-pack-version pack_000001 \
   --output ./snap_000001.manifest.json \
   --rcon-host 127.0.0.1 \
-  --rcon-port 25575 \
-  --rcon-password change-me
+  --rcon-port 25575
+unset ACBH_RCON_PASSWORD
 ```
 
-Instead of placing the password in command history, set `ACBH_RCON_PASSWORD` and omit `--rcon-password`. The flag takes precedence when both are present. The password is not saved in Agent config or printed.
+The legacy `--rcon-password` flag remains compatible, but the environment
+variable avoids exposing the password through shell history and process
+arguments. The password is not saved in Agent config or printed.
 
 `safe-sync` only generates a `world-snapshot` manifest. Upload remains a separate step:
 
@@ -359,10 +453,21 @@ It proves Host A timeout detection, Host B selection, one-time assignment accept
 
 ## Documentation
 
+- `docs/demo.md` — Local demo walkthrough and troubleshooting
+- `docs/security.md` — Security model
+- `docs/release-checklist.md` — Pre-release verification checklist
 - `docs/architecture.md`
 - `docs/dependency-plan.md`
 - `docs/mvp-scope.md`
 - `docs/sync-design.md`
 - `docs/election-design.md`
-- `docs/security.md`
 - `docs/codex-guide.md`
+
+## V1 release
+
+- `docs/v1-release-checklist.md` — Smoke checklist for V1 release preparation
+- `docs/release-checklist.md` — Release readiness checklist
+- `docs/v1-release-notes.md` — V1 capabilities, security, limitations, next milestones
+- `docs/release-packaging.md` — How to build distributable Agent binaries
+- `docs/tunnel-protocol.md` — Relay and player proxy protocol details
+- `docs/network-design.md` — Network and relay architecture

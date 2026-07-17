@@ -4,11 +4,18 @@ ACBH V1 uses a minimal security model focused on preventing unauthorized hosts a
 
 ## Roles
 
-- `owner`: manages group and recovery.
-- `admin`: manages members and host candidates.
-- `host_candidate`: may be elected as host.
-- `member`: may view group connection metadata.
-- `guest`: no Agent privileges.
+- `owner`: manages group and recovery (created at group creation; one per group).
+- `member`: joined the group via access key. May register hosts. Not used for any elevated auth check beyond group membership validation.
+- `host`: a registered Agent that may heartbeat, upload artifacts, participate in elections, execute takeover. Requires a `hostToken`.
+- `player`: an external peer that may create tunnel sessions for relay connections. Requires a `playerToken`, scoped to one group.
+- `guest`: no Agent privileges (public endpoints only).
+
+Role boundaries:
+- A host token is valid only for the group it was registered in. Cross-group use returns 404.
+- A player token cannot call host API endpoints (artifact, election, takeover) and returns 401.
+- A host token cannot call player tunnel endpoints and returns 401.
+- Tokens are rejected when `expiresAt <= now`. Expiry returns 401 with code `token_expired`.
+- Error responses never contain raw token values.
 
 ## Access Key
 
@@ -25,9 +32,11 @@ Rules:
 
 A Host Token is unique to one Agent installation/device.
 
-Required for:
+An existing group Access Key is required to register a host. The registration
+response returns the new Host Token once and never echoes the Access Key.
 
-- host registration;
+A Host Token is required for:
+
 - heartbeat;
 - snapshot upload;
 - takeover execution.
@@ -38,6 +47,15 @@ Rules:
 - Store a hash.
 - Allow revocation.
 - Token must be scoped to one group and one host.
+
+## Group state access
+
+Group state and debug state endpoints are not public. They require either:
+
+- the group's Access Key via `x-acbh-access-key`; or
+- a valid Host ID and Host Token for the same group.
+
+Responses must never include Access Keys, Host Tokens, or their hashes.
 
 ## Artifact push and pull
 
@@ -130,4 +148,146 @@ Never print these values in logs:
 - Takeover Token
 - storage credentials
 
-RCON passwords are runtime-only Agent inputs. `safe-sync` accepts the password from `--rcon-password` or `ACBH_RCON_PASSWORD`; it does not write the password to Agent config, manifests, Coordinator storage, or command output.
+The recommended Agent login path reads the group access key from
+`ACBH_ACCESS_KEY`. The legacy `--access-key` flag remains compatible, but
+Dashboard-generated commands and demo documentation do not put the key in
+process arguments.
+
+RCON passwords are runtime-only Agent inputs. The recommended `safe-sync` path
+uses `ACBH_RCON_PASSWORD`. The legacy `--rcon-password` flag remains compatible.
+The password is not written to Agent config, manifests, Coordinator storage, or
+command output.
+
+## Player tunnel and session security
+
+Player-to-host tunneling uses ephemeral player session tokens and host
+authentication for relay connections (PR27).
+
+Rules:
+
+- Player session creation (`POST /v1/groups/:groupId/player-sessions`) returns
+  a one-time raw player token. The Coordinator stores only the SHA256 hash.
+- `getPlayerSession` and all tunnel session endpoints must never return the
+  raw player token.
+- Player relay WebSocket connections require `X-ACBH-Player-ID` and
+  `X-ACBH-Player-Token` headers. Invalid tokens are rejected.
+- Player tokens are rejected when `expiresAt <= now`. Expired credentials
+  return `401` with code `token_expired`, without returning the raw token.
+- Tunnel session create and read endpoints require matching
+  `X-ACBH-Player-ID` and `X-ACBH-Player-Token` headers.
+- Host relay WebSocket connections require `X-ACBH-Host-ID`,
+  `X-ACBH-Host-Token`, and `X-ACBH-Host-Generation` headers.
+- Host tunnel presence must never expose the local Minecraft address to
+  players.
+- The relay forwards opaque binary frames. Relay payloads must never be
+  logged or stored.
+- Relay runtime state is ephemeral and not persisted across Coordinator
+  restarts.
+- Production deployment should use HTTPS/WSS for transport security.
+- No host token, takeover token, or player token material is exposed through
+  tunnel session responses or relay endpoints.
+
+## Local control and Dashboard secrets
+
+The Agent local control API is a privileged local interface.
+
+- `acbh-agent control serve` binds to `127.0.0.1:6122` by default.
+- Non-loopback binding is refused unless `--allow-remote-control` is supplied.
+  The Agent logs a warning when that explicit override is used.
+- All operations except `/health` require the same bearer-token middleware.
+- The generated token is stored in `<user config dir>/acbh/control-token` with
+  restrictive permissions. Logs and normal command output show only a masked
+  token.
+- Browser CORS access is limited to `localhost`, `127.0.0.1`, and `::1`
+  origins by default.
+- Operation failures return a stable error code and request ID. Detailed
+  errors, including local paths, remain in the Agent's local log.
+- Manifest validation is exposed through the same authenticated Local Control
+  middleware and returns a generic error plus request ID on failure.
+- The Dashboard never stores access keys, host tokens, takeover tokens, player
+  tokens, RCON passwords, or the local control token in `localStorage`,
+  `sessionStorage`, IndexedDB, URLs, or console logs. It removes legacy secret
+  keys at startup and keeps current credentials in page memory only.
+- A `401` or `403` Local Control response clears the in-memory control token.
+- Non-loopback Local Control URLs display a warning and require an explicit
+  confirmation before connection.
+- Dashboard command generators use `ACBH_ACCESS_KEY` and
+  `ACBH_RCON_PASSWORD`; they do not interpolate credential values into argv.
+
+## Host Agent relay client security (PR28)
+
+The Host Agent relay tunnel client (`acbh-agent relay host`) enforces:
+
+- The host's local Minecraft address (`--target-address`, typically
+  `127.0.0.1:25565`) is a local-only configuration on the Host Agent. It is
+  never transmitted to the Coordinator or exposed to players.
+- The host token is sent only via WebSocket upgrade headers to the
+  Coordinator. It is never logged, printed to stdout/stderr, or included
+  in error messages.
+- Binary payloads are forwarded opaque between the WebSocket and TCP
+  connections. No payload bytes are logged or inspected.
+- The relay client does not parse or interpret the Minecraft protocol.
+- Context cancellation triggers clean shutdown of both WebSocket and TCP
+  connections.
+
+## Player local proxy security (PR29)
+
+The Player local TCP proxy (`acbh-agent relay player`) enforces:
+
+- The local proxy binds to `127.0.0.1` by default, limiting access to the
+  local machine.
+- If `--listen-address` is explicitly set to `0.0.0.0`, the proxy binds to
+  all interfaces and may be reachable from other LAN hosts. This should be
+  used carefully and only in trusted network environments.
+- The player token is never logged, printed to stdout/stderr, or included
+  in error messages.
+- Binary payloads are forwarded opaque between TCP and WebSocket without
+  logging or inspection.
+- The proxy does not parse the Minecraft protocol.
+- Context cancellation triggers clean shutdown of listener, local TCP
+  connections, and WebSocket connections.
+
+## Manifest schema Go/TypeScript unification
+
+Manifest validation is unified across Go (Agent scanner/loader) and TypeScript
+(Coordinator storage). Shared test fixtures ensure both sides enforce the same
+constraints.
+
+Common rules:
+
+- `manifestVersion` is optional. When present it must equal `1`.
+- `artifactKind` must be one of `server-pack`, `world-snapshot`, `admin-state`.
+- `artifactId`, `groupId`, `creatorHostId` are required non-blank identifiers
+  matching `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}`.
+- `createdAt` is a required valid ISO 8601 timestamp.
+- `serverPackVersion` is required for `world-snapshot` manifests.
+- `parentArtifactId` is `null` or a valid identifier.
+- `files` must be an array sorted by path with no duplicate entries.
+- Each file entry requires `class` (one of the six `FileClass` values;
+  `ignored` and `unknown` are rejected). The legacy `fileClass` key is
+  normalized to `class` when only `fileClass` is present.
+- `size` must be a non-negative safe integer.
+- `sha256` must be a 64-character lowercase hex string for non-deleted files.
+  Deleted tombstone entries must set `sha256: ""` and `size: 0`.
+- `modifiedAt` is required for non-deleted files.
+- File paths must be relative POSIX paths, cannot contain `\`, and must not
+  traverse directories.
+- `summary` fields (`includedFiles`, `deletedFiles`, `totalBytes`) must match
+  the file list.
+
+## Server start command and argv
+
+The server start command avoids shell interpretation. The local control API
+and the internal supervisor use structured `argv` (`[]string`):
+
+- The local control API endpoint receives `jvmArgs` and `serverArgs` as JSON
+  string arrays. The Agent builds the `java <jvmArgs> -jar <jarPath>
+  <serverArgs>` command as an argv slice and passes it to the supervisor
+  without string join-then-reparse.
+- The CLI `--command` flag accepts a legacy space-separated string and is
+  parsed by `ParseCommand()` for backward compatibility. Structured argv is
+  preferred for new configurations.
+- The supervisor launches the Minecraft process via `exec.Command` directly,
+  never through a shell.
+- Paths containing spaces work correctly with structured argv.
+- Shell metacharacters are never interpreted.

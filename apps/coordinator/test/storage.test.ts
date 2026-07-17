@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -90,6 +90,70 @@ test("saves and reads world snapshot manifests", async () => {
       }),
       manifest,
     );
+  } finally {
+    await rm(root, { force: true, recursive: true });
+  }
+});
+
+test("manifest commit is atomic and cleans temporary files on failure", async () => {
+  const { storage, root } = await testStorage();
+  try {
+    const original = sampleManifest("world-snapshot", "snap_atomic", "pack_001");
+    await storage.saveManifest({
+      groupId: original.groupId,
+      artifactKind: original.artifactKind,
+      artifactId: original.artifactId,
+      manifest: original,
+    });
+
+    const replacement = sampleManifest("world-snapshot", "snap_atomic", "pack_001", {
+      createdAt: "2026-06-05T00:01:00.000Z",
+    });
+    await assert.rejects(
+      storage.saveManifest({
+        groupId: replacement.groupId,
+        artifactKind: replacement.artifactKind,
+        artifactId: replacement.artifactId,
+        manifest: replacement,
+        beforeCommit: () => {
+          throw new Error("fence changed before commit");
+        },
+      }),
+      /fence changed before commit/,
+    );
+
+    assert.deepEqual(
+      await storage.readManifest({
+        groupId: original.groupId,
+        artifactKind: original.artifactKind,
+        artifactId: original.artifactId,
+      }),
+      original,
+    );
+    const artifactDirectory = path.join(
+      root,
+      "groups",
+      original.groupId,
+      "world-snapshots",
+      original.artifactId,
+    );
+    assert.deepEqual(await readdir(artifactDirectory), ["manifest.json"]);
+
+    await storage.saveManifest({
+      groupId: replacement.groupId,
+      artifactKind: replacement.artifactKind,
+      artifactId: replacement.artifactId,
+      manifest: replacement,
+    });
+    assert.deepEqual(
+      await storage.readManifest({
+        groupId: replacement.groupId,
+        artifactKind: replacement.artifactKind,
+        artifactId: replacement.artifactId,
+      }),
+      replacement,
+    );
+    assert.deepEqual(await readdir(artifactDirectory), ["manifest.json"]);
   } finally {
     await rm(root, { force: true, recursive: true });
   }
@@ -267,6 +331,13 @@ function sampleManifest(
         fileClass: artifactKind === "world-snapshot" ? "world-runtime" : artifactKind,
       },
     ],
+    summary: {
+      includedFiles: 1,
+      ignoredFiles: 0,
+      unknownFiles: 0,
+      deletedFiles: 0,
+      totalBytes: fileContent.byteLength,
+    },
     ...overrides,
   };
 }

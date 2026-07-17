@@ -144,7 +144,7 @@ func TestRootIncludesArtifactAndServerCommands(t *testing.T) {
 			t.Fatalf("Find(%q) = %#v", name, found)
 		}
 	}
-	for _, name := range []string{"start", "stop", "status"} {
+	for _, name := range []string{"start", "stop", "status", "repair-state"} {
 		found, _, err := cmd.Find([]string{"server", name})
 		if err != nil {
 			t.Fatalf("Find(server %q) error = %v", name, err)
@@ -152,6 +152,33 @@ func TestRootIncludesArtifactAndServerCommands(t *testing.T) {
 		if found == nil || found.Name() != name {
 			t.Fatalf("Find(server %q) = %#v", name, found)
 		}
+	}
+}
+
+func TestResolveLoginAccessKey(t *testing.T) {
+	t.Setenv("ACBH_ACCESS_KEY", "env-secret")
+
+	got, err := resolveLoginAccessKey("")
+	if err != nil {
+		t.Fatalf("resolveLoginAccessKey() error = %v", err)
+	}
+	if got != "env-secret" {
+		t.Fatalf("resolveLoginAccessKey() = %q, want env-secret", got)
+	}
+
+	got, err = resolveLoginAccessKey("flag-secret")
+	if err != nil {
+		t.Fatalf("resolveLoginAccessKey(flag) error = %v", err)
+	}
+	if got != "flag-secret" {
+		t.Fatalf("resolveLoginAccessKey(flag) = %q, want flag-secret", got)
+	}
+}
+
+func TestResolveLoginAccessKeyRequiresCredential(t *testing.T) {
+	t.Setenv("ACBH_ACCESS_KEY", "")
+	if _, err := resolveLoginAccessKey(""); err == nil || !strings.Contains(err.Error(), "ACBH_ACCESS_KEY") {
+		t.Fatalf("resolveLoginAccessKey() error = %v, want credential guidance", err)
 	}
 }
 

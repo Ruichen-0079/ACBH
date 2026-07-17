@@ -2,7 +2,10 @@ module github.com/Ruichen-0079/ACBH/agent
 
 go 1.22
 
-require github.com/spf13/cobra v1.8.1
+require (
+	github.com/spf13/cobra v1.8.1
+	nhooyr.io/websocket v1.8.17
+)
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

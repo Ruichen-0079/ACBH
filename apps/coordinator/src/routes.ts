@@ -1,4 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
+import path from "node:path";
 import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -6,13 +9,53 @@ import type { ArtifactKind } from "./domain/artifacts.js";
 import type { CoordinatorStorage } from "./storage/index.js";
 import { StorageError, StorageObjectTooLargeError } from "./storage/index.js";
 import type { ArtifactManifest } from "./storage/index.js";
-import type { InMemoryCoordinatorStore, GcBackend } from "./store.js";
-import { StoreError } from "./store.js";
+import type { WorldSnapshotManifest } from "./storage/index.js";
+import type { ArtifactMetadata, InMemoryCoordinatorStore, GcBackend } from "./store.js";
+import { GcBlockedError, StoreError } from "./store.js";
+import type { TunnelSession, PlayerSession } from "./network.js";
+import type { RelayManager } from "./relay.js";
+import { coordinatorVersion } from "./version.js";
 
 const jsonObjectUploadDecodedLimitBytes = 16 * 1024 * 1024;
 const jsonObjectUploadBodyLimitBytes = 24 * 1024 * 1024;
 const manifestUploadBodyLimitBytes = 1024 * 1024;
+const inviteJoinRateLimits = new Map<string, { count: number; resetAt: number }>();
 export const defaultMaxObjectBytes = 256 * 1024 * 1024;
+
+const bootstrapPackageDefinitions = [
+  {
+    id: "acbh-runtime-base-windows-amd64",
+    version: "0.3.3",
+    filename: "acbh-runtime-base-windows-amd64.zip",
+    requiredFor: ["desktop-bootstrap"],
+  },
+  {
+    id: "java-17-windows-amd64",
+    version: "17.x",
+    filename: "acbh-java-17-windows-amd64.zip",
+    requiredFor: ["minecraft-1.18+"],
+  },
+  {
+    id: "java-21-windows-amd64",
+    version: "21.x",
+    filename: "acbh-java-21-windows-amd64.zip",
+    requiredFor: ["minecraft-1.20.5+"],
+  },
+] as const;
+
+const protocolVersion = 2;
+const minimumClientProtocol = 1;
+const coordinatorCapabilities = [
+  "capabilities_v1",
+  "desktop_protocol_v2",
+  "group_whoami_v1",
+  "world_backup_v1",
+  "world_backup_resume",
+  "invite_management_v1",
+  "public_relay_v1",
+  "lease_renew_v1",
+  "bootstrap_packages_v1",
+] as const;
 
 const createGroupSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -23,13 +66,47 @@ const joinGroupParamsSchema = z.object({
   groupId: z.string().min(1),
 });
 
+const bootstrapPackageParamsSchema = z.object({
+  filename: z.string().regex(/^[A-Za-z0-9._-]+\.zip$/),
+});
+
 const joinGroupSchema = z.object({
   accessKey: z.string().min(1),
   displayName: z.string().trim().min(1).max(80),
 });
 
+const createInviteSchema = z.object({
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
+  expiresInSeconds: z.number().int().positive().optional(),
+  oneTime: z.boolean().optional(),
+});
+
+const revokeInviteSchema = z.object({
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
+  inviteId: z.string().min(1),
+});
+
+const listInviteSchema = z.object({
+  accessKey: z.string().min(1).optional(),
+  hostId: z.string().min(1).optional(),
+  hostToken: z.string().min(1).optional(),
+});
+
+const joinInviteSchema = z.object({
+  inviteCode: z.string().trim().min(1).max(80),
+  displayName: z.string().trim().min(1).max(80),
+  deviceName: z.string().trim().min(1).max(120),
+  platform: z.string().trim().min(1).max(40),
+  agentVersion: z.string().trim().min(1).max(40),
+});
+
 const registerHostSchema = z.object({
   groupId: z.string().min(1),
+  accessKey: z.string().min(1).optional(),
   memberId: z.string().min(1),
   deviceName: z.string().trim().min(1).max(120),
   platform: z.string().trim().min(1).max(40),
@@ -79,6 +156,10 @@ const electionAuthSchema = z.object({
   groupId: z.string().min(1),
   hostId: z.string().min(1),
   hostToken: z.string().min(1),
+});
+
+const leaseEnsureSchema = electionAuthSchema.extend({
+  generation: z.number().int().nonnegative().optional(),
 });
 
 const electionRunSchema = electionAuthSchema.extend({
@@ -131,9 +212,102 @@ const artifactManifestParamsSchema = z.object({
   artifactId: z.string().min(1),
 });
 
+const playerSessionParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const playerSessionCreateSchema = z.object({
+  displayName: z.string().trim().min(1).max(80).optional(),
+});
+
+const tunnelSessionParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const tunnelSessionGetParamsSchema = z.object({
+  groupId: z.string().min(1),
+  sessionId: z.string().min(1),
+});
+
+const tunnelSessionListParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const tunnelSessionCreateSchema = z.object({
+  playerId: z.string().min(1),
+});
+
 const objectParamsSchema = z.object({
   groupId: z.string().min(1),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+const worldGroupParamsSchema = z.object({
+  groupId: z.string().min(1),
+});
+
+const worldSnapshotParamsSchema = z.object({
+  groupId: z.string().min(1),
+  snapshotId: z.string().min(1),
+});
+
+const worldLatestQuerySchema = z.object({
+  consistentOnly: z.coerce.boolean().optional().default(false),
+});
+
+const worldObjectParamsSchema = z.object({
+  groupId: z.string().min(1),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+const worldBackupPlanSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  hostGeneration: z.number().int().nonnegative(),
+  parentSnapshotId: z.string().optional(),
+  objects: z.array(z.object({
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    size: z.number().int().nonnegative(),
+    path: z.string().optional(),
+  })).max(100_000),
+});
+
+const worldSnapshotFileSchema = z.object({
+  path: z.string().min(1).max(4096),
+  size: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  objectId: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+});
+
+const worldSnapshotManifestSchema = z.object({
+  schemaVersion: z.literal(1),
+  snapshotId: z.string().min(1).max(128),
+  groupId: z.string().min(1).max(128),
+  sourceHostId: z.string().min(1).max(128),
+  hostGeneration: z.number().int().nonnegative(),
+  parentSnapshotId: z.string().optional(),
+  createdAt: z.string().datetime(),
+  consistent: z.boolean(),
+  logicalSize: z.number().int().nonnegative(),
+  uploadedSize: z.number().int().nonnegative(),
+  fileCount: z.number().int().nonnegative(),
+  changedFileCount: z.number().int().nonnegative(),
+  deletedFileCount: z.number().int().nonnegative(),
+  files: z.array(worldSnapshotFileSchema).max(250_000),
+  deletedPaths: z.array(z.string().min(1).max(4096)).optional(),
+});
+
+const worldBackupCommitSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  hostGeneration: z.number().int().nonnegative(),
+  manifest: worldSnapshotManifestSchema,
+});
+
+const worldBackupPinSchema = z.object({
+  hostId: z.string().min(1),
+  hostToken: z.string().min(1),
+  pinned: z.boolean().optional().default(true),
 });
 
 const streamingObjectParamsSchema = z.object({
@@ -173,6 +347,7 @@ export async function registerRoutes(
   app: FastifyInstance,
   store: InMemoryCoordinatorStore,
   storage: CoordinatorStorage,
+  relay: RelayManager,
   options?: { maxObjectBytes?: number; hobbyAccessToken?: string },
 ): Promise<void> {
   const maxObjectBytes = resolveMaxObjectBytes(options?.maxObjectBytes);
@@ -182,7 +357,21 @@ export async function registerRoutes(
     return {
       ok: true,
       service: "acbh-coordinator",
-      version: "0.1.0",
+      version: coordinatorVersion(),
+      protocolVersion,
+      minimumClientProtocol,
+      capabilities: [...coordinatorCapabilities],
+    };
+  });
+
+  app.get("/v1/capabilities", async () => {
+    return {
+      coordinatorVersion: coordinatorVersion(),
+      protocolVersion,
+      minimumClientProtocol,
+      capabilities: [...coordinatorCapabilities],
+      serverTime: new Date().toISOString(),
+      authenticationMode: "host_token_or_owner_access_key",
     };
   });
 
@@ -247,6 +436,42 @@ export async function registerRoutes(
       });
     }
     return { nodes: [...hobbyNodes.values()] };
+  });
+
+  app.get("/v1/bootstrap/manifest", async (request) => {
+    const origin = `${request.protocol}://${request.hostname}`;
+    const packages = await Promise.all(bootstrapPackageDefinitions.map((definition) => describeBootstrapPackage(definition, origin)));
+    return {
+      version: 1,
+      packages,
+    };
+  });
+
+  app.get("/v1/bootstrap/packages/:filename", async (request, reply) => {
+    const params = parseParams(bootstrapPackageParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const definition = bootstrapPackageDefinitions.find((p) => p.filename === params.filename);
+    if (!definition) {
+      return reply.code(404).send({
+        error: "Not Found",
+        message: "Bootstrap package does not exist",
+      });
+    }
+    const filePath = path.join(bootstrapPackageDir(), definition.filename);
+    try {
+      const info = await stat(filePath);
+      if (!info.isFile()) {
+        throw new Error("not a file");
+      }
+    } catch {
+      return reply.code(404).send({
+        error: "Not Found",
+        message: "Bootstrap package is not installed on this Coordinator",
+      });
+    }
+    return reply.header("content-type", "application/zip").send(createReadStream(filePath));
   });
 
   app.get("/v1/storage/info", async () => {
@@ -387,25 +612,45 @@ export async function registerRoutes(
     }
 
     return handleStoreCall(reply, () => {
-      store.verifyHost(body);
+      const uploadedManifest = body.manifest as unknown as ArtifactManifest;
+      const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
+      const publishAuth = {
+        metadata: {
+          groupId: body.groupId,
+          creatorHostId: uploadedManifest.creatorHostId,
+        },
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        currentHostGeneration: hostGeneration ?? undefined,
+      };
+
+      store.authorizeArtifactPublish(publishAuth);
 
       if (
-        body.manifest.groupId !== body.groupId ||
-        body.manifest.artifactKind !== body.artifactKind ||
-        body.manifest.artifactId !== body.artifactId
+        uploadedManifest.groupId !== body.groupId ||
+        uploadedManifest.artifactKind !== body.artifactKind ||
+        uploadedManifest.artifactId !== body.artifactId
       ) {
         return reply.code(400).send({
           error: "Bad Request",
           message: "Manifest IDs must match upload request",
         });
       }
-      if (body.artifactKind === "world-snapshot" && !body.manifest.serverPackVersion) {
-        return reply.code(400).send({
-          error: "Bad Request",
-          message: "serverPackVersion is required for world-snapshot artifacts",
-        });
-      }
-      const uploadedManifest = body.manifest as unknown as ArtifactManifest;
+      const metadata = {
+        groupId: body.groupId,
+        artifactKind: body.artifactKind,
+        artifactId: body.artifactId,
+        parentArtifactId: uploadedManifest.parentArtifactId ?? null,
+        serverPackVersion:
+          uploadedManifest.serverPackVersion ?? (body.artifactKind === "server-pack" ? body.artifactId : null),
+        creatorHostId: uploadedManifest.creatorHostId,
+        createdAt: uploadedManifest.createdAt,
+        status: "available" as const,
+        manifestSha256: sha256(Buffer.from(JSON.stringify(uploadedManifest), "utf8")),
+        manifestObjectPath: manifestStorageKey(body.groupId, body.artifactKind, body.artifactId),
+        fileCount: countIncludedFiles(uploadedManifest),
+        totalBytes: totalManifestBytes(uploadedManifest),
+      };
 
       return handleStorageCall(reply, async () => {
         for (const file of uploadedManifest.files ?? []) {
@@ -429,36 +674,16 @@ export async function registerRoutes(
           artifactKind: body.artifactKind,
           artifactId: body.artifactId,
           manifest: uploadedManifest,
+          beforeCommit: () => store.authorizeArtifactPublish(publishAuth),
         });
 
-        const manifestSha256 = sha256(Buffer.from(JSON.stringify(uploadedManifest), "utf8"));
-        const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
-        const metadata = store.recordArtifactFromHost({
-          metadata: {
-            groupId: body.groupId,
-            artifactKind: body.artifactKind,
-            artifactId: body.artifactId,
-            parentArtifactId: uploadedManifest.parentArtifactId ?? null,
-            serverPackVersion:
-              uploadedManifest.serverPackVersion ?? (body.artifactKind === "server-pack" ? body.artifactId : null),
-            creatorHostId: uploadedManifest.creatorHostId,
-            createdAt: uploadedManifest.createdAt,
-            status: "available",
-            manifestSha256,
-            manifestObjectPath: manifestStorageKey(body.groupId, body.artifactKind, body.artifactId),
-            fileCount: countIncludedFiles(uploadedManifest),
-            totalBytes: totalManifestBytes(uploadedManifest),
-          },
-          hostId: body.hostId,
-          hostToken: body.hostToken,
-          currentHostGeneration: hostGeneration ?? undefined,
-        });
+        const recorded = store.recordArtifact(metadata);
 
         return {
           ok: true,
-          artifactKind: metadata.artifactKind,
-          artifactId: metadata.artifactId,
-          status: metadata.status,
+          artifactKind: recorded.artifactKind,
+          artifactId: recorded.artifactId,
+          status: recorded.status,
         };
       });
     });
@@ -504,16 +729,12 @@ export async function registerRoutes(
         return storage.listObjectSha256s({ groupId: p.groupId });
       },
       readManifestFiles: async (p) => {
-        try {
-          const manifest = await storage.readManifest({
-            groupId: p.groupId,
-            artifactKind: p.artifactKind,
-            artifactId: p.artifactId,
-          });
-          return (manifest.files ?? []).map((f) => ({ sha256: f.sha256, deleted: !!f.deleted }));
-        } catch {
-          return [];
-        }
+        const manifest = await storage.readManifest({
+          groupId: p.groupId,
+          artifactKind: p.artifactKind,
+          artifactId: p.artifactId,
+        });
+        return (manifest.files ?? []).map((f) => ({ sha256: f.sha256, deleted: !!f.deleted }));
       },
     };
 
@@ -530,12 +751,166 @@ export async function registerRoutes(
       });
       return result;
     } catch (error) {
+      if (error instanceof GcBlockedError) {
+        reply.code(error.statusCode).send({
+          error: statusText(error.statusCode),
+          message: error.message,
+          blocked: true,
+          blockers: error.blockers,
+        });
+        return reply;
+      }
       if (error instanceof StoreError) {
         reply.code(error.statusCode).send({ error: statusText(error.statusCode), message: error.message });
         return reply;
       }
       throw error;
     }
+  });
+
+  app.post("/v1/groups/:groupId/tunnel-sessions", async (request, reply) => {
+    const params = parseParams(tunnelSessionParamsSchema, request, reply);
+    const body = parseBody(tunnelSessionCreateSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestPlayer(store, params.groupId, body.playerId, request, reply)) {
+        return reply;
+      }
+      const session = store.createTunnelSession({
+        groupId: params.groupId,
+        playerId: body.playerId,
+      });
+      return { ...session };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/tunnel-sessions/:sessionId", async (request, reply) => {
+    const params = parseParams(tunnelSessionGetParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      const session = store.getTunnelSession(params.groupId, params.sessionId);
+      if (!verifyRequestPlayer(store, params.groupId, session.playerId, request, reply)) {
+        return reply;
+      }
+      return { ...session };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/tunnel-sessions", async (request, reply) => {
+    const params = parseParams(tunnelSessionListParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+
+    // list may require host or admin auth in future; for now allow for relay host manager polling
+    return handleStoreCall(reply, () => store.listTunnelSessions(params.groupId));
+  });
+
+  app.get(
+    "/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/host",
+    { websocket: true },
+    (socket, request) => {
+      const params = parseWSParams(tunnelSessionGetParamsSchema, request, (code, reason) => {
+        try { socket.socket.close(code, reason); } catch { socket.destroy(); }
+      });
+      if (!params) return;
+
+      const hostId = singleHeader(request.headers["x-acbh-host-id"]);
+      const hostToken = singleHeader(request.headers["x-acbh-host-token"]);
+      const hostGeneration = parseOptionalIntHeader(request.headers["x-acbh-host-generation"]);
+
+      if (!hostId || !hostToken) {
+        socket.socket.close(4001, "Host authentication headers are required (X-ACBH-Host-ID, X-ACBH-Host-Token)");
+        return;
+      }
+      if (hostGeneration === null || hostGeneration === undefined) {
+        socket.socket.close(4001, "Host generation header is required (X-ACBH-Host-Generation)");
+        return;
+      }
+
+      try {
+        store.verifyHost({ groupId: params.groupId, hostId, hostToken });
+        store.getTunnelSessionForRelay(params.groupId, params.sessionId, hostId, hostGeneration);
+      } catch (error) {
+        if (error instanceof StoreError) {
+          socket.socket.close(4000 + error.statusCode, error.message);
+        } else {
+          socket.socket.close(4000, "Internal error");
+        }
+        return;
+      }
+
+      relay.registerHost(params.sessionId, params.groupId, socket.socket);
+    },
+  );
+
+  app.get(
+    "/v1/groups/:groupId/relay/tunnel-sessions/:sessionId/player",
+    { websocket: true },
+    (socket, request) => {
+      const params = parseWSParams(tunnelSessionGetParamsSchema, request, (code, reason) => {
+        try { socket.socket.close(code, reason); } catch { socket.destroy(); }
+      });
+      if (!params) return;
+
+      const playerId = singleHeader(request.headers["x-acbh-player-id"]);
+      const playerToken = singleHeader(request.headers["x-acbh-player-token"]);
+
+      if (!playerId || !playerToken) {
+        socket.socket.close(4001, "Player authentication headers are required (X-ACBH-Player-ID, X-ACBH-Player-Token)");
+        return;
+      }
+
+      try {
+        store.verifyPlayerToken(params.groupId, playerId, playerToken);
+
+        const session = store.getTunnelSession(params.groupId, params.sessionId);
+        if (session.playerId !== playerId) {
+          socket.socket.close(4003, "Tunnel session does not belong to this player");
+          return;
+        }
+        if (session.status !== "pending" && session.status !== "active") {
+          socket.socket.close(4409, `Tunnel session is ${session.status} and cannot be joined for relay`);
+          return;
+        }
+        const expiresMs = Date.parse(session.expiresAt);
+        if (!Number.isFinite(expiresMs) || expiresMs <= Date.now()) {
+          socket.socket.close(4410, "Tunnel session has expired");
+          return;
+        }
+      } catch (error) {
+        if (error instanceof StoreError) {
+          socket.socket.close(4000 + error.statusCode, error.message);
+        } else {
+          socket.socket.close(4000, "Internal error");
+        }
+        return;
+      }
+
+      relay.registerPlayer(params.sessionId, params.groupId, socket.socket);
+    },
+  );
+
+  app.post("/v1/groups/:groupId/player-sessions", async (request, reply) => {
+    const params = parseParams(playerSessionParamsSchema, request, reply);
+    const body = parseBody(playerSessionCreateSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+
+    return handleStoreCall(reply, () => {
+      const session = store.createPlayerSession({
+        groupId: params.groupId,
+        displayName: body.displayName,
+      });
+      return { ...session };
+    });
   });
 
   app.post("/v1/groups", async (request, reply) => {
@@ -563,13 +938,85 @@ export async function registerRoutes(
     );
   });
 
+  app.post("/v1/groups/:groupId/invites", async (request, reply) => {
+    const params = parseParams(joinGroupParamsSchema, request, reply);
+    const body = parseBody(createInviteSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () =>
+      store.createInvite({
+        groupId: params.groupId,
+        accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        expiresInSeconds: body.expiresInSeconds,
+        oneTime: body.oneTime,
+      }),
+    );
+  });
+
+  app.post("/v1/groups/:groupId/invites/list", async (request, reply) => {
+    const params = parseParams(joinGroupParamsSchema, request, reply);
+    const body = parseBody(listInviteSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () =>
+      store.listInvites({
+        groupId: params.groupId,
+        accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+      }),
+    );
+  });
+
+  app.post("/v1/groups/:groupId/invites/revoke", async (request, reply) => {
+    const params = parseParams(joinGroupParamsSchema, request, reply);
+    const body = parseBody(revokeInviteSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () =>
+      store.revokeInvite({
+        groupId: params.groupId,
+        accessKey: body.accessKey,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        inviteId: body.inviteId,
+      }),
+    );
+  });
+
+  app.post("/v1/invites/join", async (request, reply) => {
+    const body = parseBody(joinInviteSchema, request, reply);
+    if (!body) {
+      return reply;
+    }
+    if (!allowInviteJoinAttempt(request.ip, body.inviteCode)) {
+      return reply.code(429).send({
+        error: "Too Many Requests",
+        message: "Invite join failed. Please try again later.",
+      });
+    }
+    return handleStoreCall(reply, () => store.joinWithInvite(body));
+  });
+
   app.post("/v1/hosts/register", async (request, reply) => {
     const body = parseBody(registerHostSchema, request, reply);
     if (!body) {
       return reply;
     }
+    const accessKey = body.accessKey;
+    if (!accessKey) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        message: "Group access key is required",
+      });
+    }
 
-    return handleStoreCall(reply, () => store.registerHost(body));
+    return handleStoreCall(reply, () => store.registerHost({ ...body, accessKey }));
   });
 
   app.post("/v1/hosts/heartbeat", async (request, reply) => {
@@ -579,6 +1026,112 @@ export async function registerRoutes(
     }
 
     return handleStoreCall(reply, () => store.updateHeartbeat(body));
+  });
+
+  app.get("/v1/groups/:groupId/members", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const auth = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!auth.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "host_auth_required",
+        message: "Host authentication headers are required",
+        issues: auth.error.issues,
+      });
+    }
+    return handleStoreCall(reply, () => {
+      store.verifyHost({ groupId: params.groupId, ...auth.data });
+      const state = store.getGroupState(params.groupId);
+      const hostByMember = new Map(state.hosts.map((host) => [host.memberId, host]));
+      const currentHostID = state.currentHostId ?? null;
+      const members = state.members.map((member) => {
+        const host = hostByMember.get(member.memberId);
+        const isCurrentHost = currentHostID !== null && host?.hostId === currentHostID;
+        return {
+          memberId: member.memberId,
+          displayName: member.displayName,
+          role: member.role,
+          hostId: host?.hostId ?? "",
+          deviceName: host?.deviceName ?? "",
+          platform: host?.platform ?? "",
+          status: host?.status ?? "",
+          isLocal: host?.hostId === auth.data.hostId,
+          isCurrentHost,
+          lastHeartbeatAt: host?.lastHeartbeatAt ?? null,
+          leaseValid: isCurrentHost,
+          leaseRemaining: 0,
+          createdAt: member.createdAt,
+        };
+      });
+      return {
+        groupId: state.groupId,
+        groupName: state.name,
+        currentHostId: currentHostID,
+        members,
+      };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/whoami", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const auth = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!auth.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "host_auth_required",
+        message: "Host authentication headers are required",
+        issues: auth.error.issues,
+      });
+    }
+    return handleStoreCall(reply, () => store.whoami({ groupId: params.groupId, ...auth.data }));
+  });
+
+  app.get("/v1/groups/:groupId/lease/status", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const auth = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!auth.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        code: "host_auth_required",
+        message: "Host authentication headers are required",
+        issues: auth.error.issues,
+      });
+    }
+    return handleStoreCall(reply, () => store.getHostLeaseStatus({ groupId: params.groupId, ...auth.data }));
+  });
+
+  app.post("/v1/groups/:groupId/lease/ensure-active", async (request, reply) => {
+    const params = parseParams(groupStateParamsSchema, request, reply);
+    const body = parseBody(leaseEnsureSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    if (params.groupId !== body.groupId) {
+      return reply.code(400).send({
+        error: "Bad Request",
+        code: "group_mismatch",
+        message: "Request groupId must match route groupId",
+      });
+    }
+    return handleStoreCall(reply, () => store.ensureActiveLease(body));
   });
 
   app.post("/v1/groups/:groupId/election/run", async (request, reply) => {
@@ -680,7 +1233,12 @@ export async function registerRoutes(
       return reply;
     }
 
-    return handleStoreCall(reply, () => store.getGroupState(params.groupId));
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestGroupAccess(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      return store.getGroupState(params.groupId);
+    });
   });
 
   app.get("/v1/groups/:groupId/artifacts", async (request, reply) => {
@@ -763,6 +1321,277 @@ export async function registerRoutes(
       });
     });
   });
+
+  app.post("/v1/groups/:groupId/world-backups/plan", async (request, reply) => {
+    const params = parseParams(worldGroupParamsSchema, request, reply);
+    const body = parseBody(worldBackupPlanSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, async () => {
+      store.authorizeWorldSnapshotPublish({
+        groupId: params.groupId,
+        sourceHostId: body.hostId,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        hostGeneration: body.hostGeneration,
+        parentSnapshotId: body.parentSnapshotId,
+      });
+      return handleStorageCall(reply, async () => {
+        const missingObjects = [];
+        let existingCount = 0;
+        for (const object of dedupePlanObjects(body.objects)) {
+          const exists = await storage.objectExists({ groupId: params.groupId, sha256: object.sha256 });
+          if (exists) {
+            existingCount++;
+          } else {
+            missingObjects.push(object);
+          }
+        }
+        return {
+          ok: true,
+          missingObjects,
+          existingCount,
+        };
+      });
+    });
+  });
+
+  app.put("/v1/groups/:groupId/world-objects/:sha256", async (request, reply) => {
+    const params = parseParams(worldObjectParamsSchema, request, reply);
+    const authResult = hostAuthHeaderSchema.safeParse({
+      hostId: request.headers["x-acbh-host-id"],
+      hostToken: request.headers["x-acbh-host-token"],
+    });
+    if (!params) {
+      return reply;
+    }
+    if (!authResult.success) {
+      return reply.code(401).send({
+        error: "Unauthorized",
+        message: "Host authentication headers are required",
+        issues: authResult.error.issues,
+      });
+    }
+    const bodyStream = request.body;
+    if (!(bodyStream instanceof Readable)) {
+      return reply.code(400).send({
+        error: "Bad Request",
+        message: "Request body must be application/octet-stream",
+      });
+    }
+    const declaredLength = parseContentLength(request.headers["content-length"]);
+    if (declaredLength !== null && declaredLength > maxObjectBytes) {
+      bodyStream.resume();
+      return reply.code(413).send({
+        error: "Payload Too Large",
+        message: `Object upload exceeds configured limit of ${maxObjectBytes} bytes`,
+      });
+    }
+    return handleStoreCall(reply, () => {
+      store.verifyHost({ groupId: params.groupId, ...authResult.data });
+      return handleStorageCall(reply, async () => {
+        const exists = await storage.objectExists({ groupId: params.groupId, sha256: params.sha256 });
+        if (exists) {
+          bodyStream.resume();
+          const existing = await storage.createObjectReadStream({ groupId: params.groupId, sha256: params.sha256 });
+          existing.stream.destroy();
+          return { ok: true, sha256: params.sha256, exists: true, size: existing.size };
+        }
+        const saved = await storage.saveObjectFromStream({
+          groupId: params.groupId,
+          sha256: params.sha256,
+          stream: bodyStream,
+          maxBytes: maxObjectBytes,
+        });
+        return { ok: true, sha256: params.sha256, exists: false, size: saved.size };
+      });
+    });
+  });
+
+  app.post("/v1/groups/:groupId/world-backups/commit", { bodyLimit: manifestUploadBodyLimitBytes * 8 }, async (request, reply) => {
+    const params = parseParams(worldGroupParamsSchema, request, reply);
+    const body = parseBody(worldBackupCommitSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    const manifest = body.manifest as WorldSnapshotManifest;
+    if (manifest.groupId !== params.groupId) {
+      return reply.code(400).send({ error: "Bad Request", message: "manifest groupId must match route groupId" });
+    }
+    if (manifest.sourceHostId !== body.hostId || manifest.hostGeneration !== body.hostGeneration) {
+      return reply.code(400).send({ error: "Bad Request", message: "manifest source host and generation must match request" });
+    }
+    const manifestValidation = validateWorldSnapshotRequest(manifest);
+    if (manifestValidation) {
+      return reply.code(400).send({ error: "Bad Request", message: manifestValidation });
+    }
+
+    return handleStoreCall(reply, async () => {
+      const publishAuth = {
+        groupId: params.groupId,
+        sourceHostId: manifest.sourceHostId,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        hostGeneration: body.hostGeneration,
+        parentSnapshotId: manifest.parentSnapshotId,
+      };
+      store.authorizeWorldSnapshotPublish(publishAuth);
+      return handleStorageCall(reply, async () => {
+        for (const file of manifest.files) {
+          const sha = file.objectId.slice("sha256:".length);
+          const exists = await storage.objectExists({ groupId: params.groupId, sha256: sha });
+          if (!exists) {
+            return reply.code(400).send({
+              error: "Bad Request",
+              code: "missing_world_object",
+              message: `Missing world object ${sha} for ${file.path}`,
+            });
+          }
+        }
+        await storage.saveWorldSnapshotManifest({
+          groupId: params.groupId,
+          snapshotId: manifest.snapshotId,
+          manifest,
+          beforeCommit: () => store.authorizeWorldSnapshotPublish(publishAuth),
+        });
+        const recorded = store.recordArtifact({
+          groupId: params.groupId,
+          artifactKind: "world-snapshot",
+          artifactId: manifest.snapshotId,
+          parentArtifactId: manifest.parentSnapshotId ?? null,
+          serverPackVersion: null,
+          creatorHostId: manifest.sourceHostId,
+          createdAt: manifest.createdAt,
+          status: "available",
+          manifestSha256: sha256(Buffer.from(JSON.stringify(manifest), "utf8")),
+          manifestObjectPath: `groups/${params.groupId}/world-backups/${manifest.snapshotId}/manifest.json`,
+          fileCount: manifest.fileCount,
+          totalBytes: manifest.logicalSize,
+          consistent: manifest.consistent,
+          pinned: false,
+          sourceHostId: manifest.sourceHostId,
+          hostGeneration: manifest.hostGeneration,
+          uploadedSize: manifest.uploadedSize,
+          changedFileCount: manifest.changedFileCount,
+          deletedFileCount: manifest.deletedFileCount,
+        });
+        return { ok: true, snapshotId: recorded.artifactId, status: recorded.status };
+      });
+    });
+  });
+
+  app.get("/v1/groups/:groupId/world-backups/latest", async (request, reply) => {
+    const params = parseParams(worldGroupParamsSchema, request, reply);
+    const query = parseQuery(worldLatestQuerySchema, request, reply);
+    if (!params || !query) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      const latest = store.getLatestArtifact(params.groupId, "world-snapshot");
+      if (query.consistentOnly && latest.consistent === false) {
+        return reply.code(409).send({
+          error: "Conflict",
+          code: "inconsistent_world_snapshot",
+          message: "Latest world snapshot is marked inconsistent",
+        });
+      }
+      return handleStorageCall(reply, async () => ({
+        metadata: worldMetadata(latest),
+        manifest: await storage.readWorldSnapshotManifest({ groupId: params.groupId, snapshotId: latest.artifactId }),
+      }));
+    });
+  });
+
+  app.get("/v1/groups/:groupId/world-backups", async (request, reply) => {
+    const params = parseParams(worldGroupParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      return {
+        snapshots: store.listArtifacts(params.groupId, "world-snapshot").map(worldMetadata),
+      };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/world-backups/:snapshotId", async (request, reply) => {
+    const params = parseParams(worldSnapshotParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      const metadata = store.getArtifact(params.groupId, "world-snapshot", params.snapshotId);
+      return handleStorageCall(reply, async () => ({
+        metadata: worldMetadata(metadata),
+        manifest: await storage.readWorldSnapshotManifest({ groupId: params.groupId, snapshotId: params.snapshotId }),
+      }));
+    });
+  });
+
+  app.delete("/v1/groups/:groupId/world-backups/:snapshotId", async (request, reply) => {
+    const params = parseParams(worldSnapshotParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    const hostId = singleHeader(request.headers["x-acbh-host-id"]);
+    const hostToken = singleHeader(request.headers["x-acbh-host-token"]);
+    if (!hostId || !hostToken) {
+      return reply.code(401).send({ error: "Unauthorized", message: "Host authentication headers are required" });
+    }
+    return handleStoreCall(reply, () => {
+      const deleted = store.deleteWorldSnapshot({ groupId: params.groupId, snapshotId: params.snapshotId, hostId, hostToken });
+      return handleStorageCall(reply, async () => {
+        await storage.deleteWorldSnapshotManifest({ groupId: params.groupId, snapshotId: params.snapshotId });
+        return { ok: true, snapshotId: deleted.artifactId };
+      });
+    });
+  });
+
+  app.post("/v1/groups/:groupId/world-backups/:snapshotId/pin", async (request, reply) => {
+    const params = parseParams(worldSnapshotParamsSchema, request, reply);
+    const body = parseBody(worldBackupPinSchema, request, reply);
+    if (!params || !body) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      const pinned = store.pinWorldSnapshot({
+        groupId: params.groupId,
+        snapshotId: params.snapshotId,
+        hostId: body.hostId,
+        hostToken: body.hostToken,
+        pinned: body.pinned,
+      });
+      return { ok: true, snapshotId: pinned.artifactId, pinned: pinned.pinned === true };
+    });
+  });
+
+  app.get("/v1/groups/:groupId/world-objects/:sha256", async (request, reply) => {
+    const params = parseParams(worldObjectParamsSchema, request, reply);
+    if (!params) {
+      return reply;
+    }
+    return handleStoreCall(reply, () => {
+      if (!verifyRequestHost(store, params.groupId, request, reply)) {
+        return reply;
+      }
+      return handleStorageCall(reply, async () => {
+        const object = await storage.createObjectReadStream({ groupId: params.groupId, sha256: params.sha256 });
+        reply.type("application/octet-stream");
+        reply.header("content-length", object.size);
+        return reply.send(object.stream);
+      });
+    });
+  });
 }
 
 function parseBody<T extends z.ZodTypeAny>(
@@ -803,6 +1632,21 @@ function parseParams<T extends z.ZodTypeAny>(
   return result.data;
 }
 
+function parseWSParams<T extends z.ZodTypeAny>(
+  schema: T,
+  request: FastifyRequest,
+  closeFn: (code: number, reason: string) => void,
+): z.infer<T> | null {
+  const result = schema.safeParse(request.params);
+
+  if (!result.success) {
+    closeFn(4400, "Invalid route parameters");
+    return null;
+  }
+
+  return result.data;
+}
+
 function parseQuery<T extends z.ZodTypeAny>(
   schema: T,
   request: FastifyRequest,
@@ -822,19 +1666,54 @@ function parseQuery<T extends z.ZodTypeAny>(
   return result.data;
 }
 
-function handleStoreCall<T>(reply: FastifyReply, call: () => T): T | FastifyReply {
+function handleStoreCall<T>(reply: FastifyReply, call: () => T | Promise<T>): T | Promise<T | FastifyReply> | FastifyReply {
   try {
-    return call();
+    const result = call();
+    if (result instanceof Promise) {
+      return result.catch((error: unknown) => {
+        if (error instanceof StoreError) {
+          return reply.code(error.statusCode).send({
+            error: statusText(error.statusCode),
+            message: error.message,
+            ...(error.code ? { code: error.code } : {}),
+          });
+        }
+        throw error;
+      });
+    }
+    return result;
   } catch (error) {
     if (error instanceof StoreError) {
       return reply.code(error.statusCode).send({
         error: statusText(error.statusCode),
         message: error.message,
+        ...(error.code ? { code: error.code } : {}),
       });
     }
 
     throw error;
   }
+}
+
+function allowInviteJoinAttempt(ip: string, inviteCode: string): boolean {
+  const now = Date.now();
+  const codeHash = createHash("sha256").update(inviteCode, "utf8").digest("hex").slice(0, 16);
+  const keys = [`ip:${ip}`, `invite:${codeHash}`];
+  for (const key of keys) {
+    const current = inviteJoinRateLimits.get(key);
+    if (current && current.resetAt > now && current.count >= 10) {
+      return false;
+    }
+  }
+  for (const key of keys) {
+    const current = inviteJoinRateLimits.get(key);
+    if (!current || current.resetAt <= now) {
+      inviteJoinRateLimits.set(key, { count: 1, resetAt: now + 60_000 });
+    } else {
+      current.count += 1;
+    }
+  }
+  return true;
 }
 
 async function handleStorageCall<T>(
@@ -844,6 +1723,12 @@ async function handleStorageCall<T>(
   try {
     return await call();
   } catch (error) {
+    if (error instanceof StoreError) {
+      return reply.code(error.statusCode).send({
+        error: statusText(error.statusCode),
+        message: error.message,
+      });
+    }
     if (error instanceof StorageError) {
       const statusCode =
         error instanceof StorageObjectTooLargeError
@@ -909,6 +1794,8 @@ function parsePort(value: string | undefined, fallback: number): number {
 
 function statusText(statusCode: number): string {
   switch (statusCode) {
+    case 400:
+      return "Bad Request";
     case 401:
       return "Unauthorized";
     case 403:
@@ -934,6 +1821,58 @@ function decodeBase64(value: string, reply: FastifyReply): Buffer | null {
   }
 
   return Buffer.from(value, "base64");
+}
+
+function bootstrapPackageDir(): string {
+  return process.env.ACBH_BOOTSTRAP_PACKAGE_DIR ?? path.join(process.cwd(), "packages");
+}
+
+async function describeBootstrapPackage(
+  definition: (typeof bootstrapPackageDefinitions)[number],
+  origin: string,
+): Promise<{
+  id: string;
+  version: string;
+  filename: string;
+  size: number;
+  sha256: string;
+  signature: string;
+  requiredFor: readonly string[];
+  available: boolean;
+  url: string | null;
+}> {
+  const filePath = path.join(bootstrapPackageDir(), definition.filename);
+  try {
+    const [info, data] = await Promise.all([stat(filePath), readFile(filePath)]);
+    if (!info.isFile()) {
+      throw new Error("not a file");
+    }
+    return {
+      ...definition,
+      size: info.size,
+      sha256: createHash("sha256").update(data).digest("hex"),
+      signature: await readBootstrapSignature(filePath),
+      available: true,
+      url: `${origin}/v1/bootstrap/packages/${definition.filename}`,
+    };
+  } catch {
+    return {
+      ...definition,
+      size: 0,
+      sha256: "",
+      signature: "",
+      available: false,
+      url: null,
+    };
+  }
+}
+
+async function readBootstrapSignature(filePath: string): Promise<string> {
+  try {
+    return (await readFile(`${filePath}.sig`, "utf8")).trim();
+  } catch {
+    return "unsigned-local-package";
+  }
 }
 
 function isStrictBase64(value: string): boolean {
@@ -972,6 +1911,67 @@ function verifyRequestHost(
   return true;
 }
 
+function verifyRequestPlayer(
+  store: InMemoryCoordinatorStore,
+  groupId: string,
+  playerId: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): boolean {
+  const headerPlayerId = singleHeader(request.headers["x-acbh-player-id"]);
+  const playerToken = singleHeader(request.headers["x-acbh-player-token"]);
+  if (!headerPlayerId || !playerToken) {
+    reply.code(401).send({
+      error: "Unauthorized",
+      message: "Player authentication headers are required",
+    });
+    return false;
+  }
+  if (headerPlayerId !== playerId) {
+    reply.code(403).send({
+      error: "Forbidden",
+      message: "Player credential does not match this session",
+    });
+    return false;
+  }
+  store.verifyPlayerToken(groupId, playerId, playerToken);
+  return true;
+}
+
+function verifyRequestGroupAccess(
+  store: InMemoryCoordinatorStore,
+  groupId: string,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): boolean {
+  const hostId = singleHeader(request.headers["x-acbh-host-id"]);
+  const hostToken = singleHeader(request.headers["x-acbh-host-token"]);
+
+  if (hostId !== undefined || hostToken !== undefined) {
+    if (!hostId || !hostToken) {
+      reply.code(401).send({
+        error: "Unauthorized",
+        message: "Complete host authentication headers are required",
+      });
+      return false;
+    }
+    store.verifyHost({ groupId, hostId, hostToken });
+    return true;
+  }
+
+  const accessKey = singleHeader(request.headers["x-acbh-access-key"]);
+  if (!accessKey) {
+    reply.code(401).send({
+      error: "Unauthorized",
+      message: "Group access key or host authentication is required",
+    });
+    return false;
+  }
+
+  store.verifyGroupAccessKey(groupId, accessKey);
+  return true;
+}
+
 function sha256(content: Uint8Array): string {
   return createHash("sha256").update(content).digest("hex");
 }
@@ -991,4 +1991,103 @@ function totalManifestBytes(manifest: { files?: Array<{ deleted?: boolean; size?
 
 function manifestStorageKey(groupId: string, artifactKind: ArtifactKind, artifactId: string): string {
   return `groups/${groupId}/${artifactKind}/${artifactId}/manifest.json`;
+}
+
+function dedupePlanObjects(
+  objects: Array<{ sha256: string; size: number; path?: string }>,
+): Array<{ sha256: string; size: number; path?: string }> {
+  const bySha = new Map<string, { sha256: string; size: number; path?: string }>();
+  for (const object of objects) {
+    const existing = bySha.get(object.sha256);
+    if (existing && existing.size !== object.size) {
+      throw new StoreError(400, `world object ${object.sha256} has conflicting sizes`);
+    }
+    if (!existing) {
+      bySha.set(object.sha256, object);
+    }
+  }
+  return [...bySha.values()].sort((a, b) => a.sha256.localeCompare(b.sha256));
+}
+
+function validateWorldSnapshotRequest(manifest: WorldSnapshotManifest): string | null {
+  if (manifest.fileCount !== manifest.files.length) {
+    return "fileCount must match files length";
+  }
+  const deletedPaths = manifest.deletedPaths ?? [];
+  if (manifest.deletedFileCount !== deletedPaths.length) {
+    return "deletedFileCount must match deletedPaths length";
+  }
+  let lastPath = "";
+  let logicalSize = 0;
+  for (const file of manifest.files) {
+    if (file.path <= lastPath) {
+      return "files must be sorted by path with no duplicates";
+    }
+    lastPath = file.path;
+    if (file.objectId !== `sha256:${file.sha256}`) {
+      return "file objectId must match sha256";
+    }
+    try {
+      validateManifestPathForRequest(file.path);
+    } catch (error) {
+      return error instanceof Error ? error.message : "invalid manifest file path";
+    }
+    logicalSize += file.size;
+  }
+  if (logicalSize !== manifest.logicalSize) {
+    return "logicalSize must match files total size";
+  }
+  let lastDeleted = "";
+  for (const deletedPath of deletedPaths) {
+    if (deletedPath <= lastDeleted) {
+      return "deletedPaths must be sorted by path with no duplicates";
+    }
+    lastDeleted = deletedPath;
+    try {
+      validateManifestPathForRequest(deletedPath);
+    } catch (error) {
+      return error instanceof Error ? error.message : "invalid deleted path";
+    }
+  }
+  return null;
+}
+
+function validateManifestPathForRequest(value: string): void {
+  if (value.length === 0 || value.includes("\\") || path.posix.isAbsolute(value)) {
+    throw new Error("manifest path must be a relative POSIX path");
+  }
+  const normalized = path.posix.normalize(value);
+  if (normalized !== value || normalized === "." || normalized.startsWith("../") || normalized.includes("/../")) {
+    throw new Error("manifest path must be normalized and must not traverse directories");
+  }
+}
+
+function worldMetadata(artifact: ArtifactMetadata): {
+  snapshotId: string;
+  groupId: string;
+  sourceHostId: string;
+  hostGeneration: number;
+  createdAt: string;
+  consistent: boolean;
+  pinned: boolean;
+  logicalSize: number;
+  uploadedSize: number;
+  fileCount: number;
+  changedFileCount: number;
+  deletedFileCount: number;
+} {
+  return {
+    snapshotId: artifact.artifactId,
+    groupId: artifact.groupId,
+    sourceHostId: artifact.sourceHostId ?? artifact.creatorHostId,
+    hostGeneration: artifact.hostGeneration ?? 0,
+    createdAt: artifact.createdAt,
+    consistent: artifact.consistent !== false,
+    pinned: artifact.pinned === true,
+    logicalSize: artifact.totalBytes,
+    uploadedSize: artifact.uploadedSize ?? 0,
+    fileCount: artifact.fileCount,
+    changedFileCount: artifact.changedFileCount ?? 0,
+    deletedFileCount: artifact.deletedFileCount ?? 0,
+  };
 }
