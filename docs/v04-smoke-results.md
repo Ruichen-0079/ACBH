@@ -71,14 +71,28 @@ that PID or directory.
 - No private-key content or path and no player IP is present in monitor output
   or this report.
 
-## Unattended durability run
+## Completed 16-hour durability threshold
 
-The smoke prerequisites for starting the 24-hour run are met. Windows and VPS
-monitors now record JSONL every 60 seconds, rotate at 20 MiB, and retain five
-files. See [v0.4-durability-monitoring.md](v0.4-durability-monitoring.md) for
-start, status, stop, and collection commands.
+The unattended run was intentionally ended and accepted as a 16-hour
+durability threshold:
 
-The durability run has started but has **not completed**. This report does not
-claim that the 24-hour test passed. The recommended sequence is to merge and
-release `v0.4.0-rc1` after PR review, then require a successful 24-hour report
-before the final `v0.4.0` release.
+- Windows: 16.52 continuous hours, 980 samples;
+- VPS: 16.56 continuous hours, 992 samples;
+- sampling gaps longer than 90 seconds: 0 on both monitors;
+- Agent, Minecraft, Relay, and Coordinator non-healthy samples: 0;
+- frps non-active samples: 0;
+- public 25575 probe failures: 0;
+- protected local 25565 listener failures or PID changes: 0;
+- maximum isolated test Java count: 1;
+- maximum managed frpc count: 1.
+
+Windows Agent resource peaks were about 59.4 MiB working set, 20 threads, and
+259 handles. VPS peaks were about 73.4 MiB for Coordinator and 31.2 MiB for
+frps. The Windows process and VPS systemd monitor were stopped after final
+summary collection. Minecraft, managed frpc, Coordinator, frps, and the
+authorized UFW rules remain running.
+
+This result passes the agreed **16-hour durability threshold**. It does not
+claim that a 24-hour run was completed. The recommended sequence is to merge
+and release `v0.4.0-rc1` after PR review, with any later final-release endurance
+requirement recorded separately.
