@@ -58,6 +58,11 @@ jobs:
         working-directory: agent
         run: go test ./...
 
+      - name: Race-test bounded operation history
+        if: runner.os == 'Linux'
+        working-directory: agent
+        run: go test -race ./internal/hobbyagent -run TestOperationHistory -count=1
+
       - name: Vet Agent
         working-directory: agent
         run: go vet ./...

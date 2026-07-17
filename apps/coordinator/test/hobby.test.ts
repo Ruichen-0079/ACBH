@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildApp } from "../src/app.js";
+import { buildApp, serializeCoordinatorRequest } from "../src/app.js";
 
 const accessToken = "hobby-test-secret";
 
@@ -18,6 +18,27 @@ function heartbeat(protocolVersion = 1) {
 	public_endpoint: "vps.example.test:25575",
   };
 }
+
+test("Coordinator request logs omit source addresses and ports", () => {
+  const serialized = serializeCoordinatorRequest({
+    method: "POST",
+    url: "/v1/heartbeat",
+    hostname: "coordinator.example.test",
+    remoteAddress: "203.0.113.42",
+    remotePort: 43123,
+  } as Parameters<typeof serializeCoordinatorRequest>[0] & {
+    remoteAddress: string;
+    remotePort: number;
+  });
+
+  assert.deepEqual(serialized, {
+    method: "POST",
+    url: "/v1/heartbeat",
+    hostname: "coordinator.example.test",
+  });
+  assert.equal("remoteAddress" in serialized, false);
+  assert.equal("remotePort" in serialized, false);
+});
 
 test("Hobby info exposes FRP control values without player relay routes", async (t) => {
   const app = await buildApp({ logger: false, hobbyAccessToken: accessToken });
@@ -53,6 +74,7 @@ test("Hobby heartbeat authenticates and upserts a node", async (t) => {
     url: "/v1/heartbeat",
     headers: { authorization: `Bearer ${accessToken}` },
     payload: heartbeat(),
+    remoteAddress: "203.0.113.42:43123",
   });
   assert.equal(accepted.statusCode, 200);
   assert.equal(accepted.json().state, "ONLINE");
@@ -68,6 +90,9 @@ test("Hobby heartbeat authenticates and upserts a node", async (t) => {
 	assert.equal(nodes.json().nodes[0].minecraft_local_port, 25566);
 	assert.equal(nodes.json().nodes[0].public_minecraft_port, 25575);
 	assert.equal(nodes.json().nodes[0].public_endpoint, "vps.example.test:25575");
+  assert.equal("remote_address" in nodes.json().nodes[0], false);
+  assert.equal(nodes.body.includes("203.0.113.42"), false);
+  assert.equal(nodes.body.includes("43123"), false);
   assert.equal(nodes.body.includes(accessToken), false);
 });
 

@@ -148,6 +148,10 @@ func (c *fakeCoordinator) latestHeartbeat() Heartbeat {
 }
 
 func newTestRuntime(t *testing.T, minecraft *fakeMinecraft, relay *fakeRelay, coordinator *fakeCoordinator) *Runtime {
+	return newTestRuntimeWithOperationLimit(t, minecraft, relay, coordinator, 0)
+}
+
+func newTestRuntimeWithOperationLimit(t *testing.T, minecraft *fakeMinecraft, relay *fakeRelay, coordinator *fakeCoordinator, operationLimit int) *Runtime {
 	t.Helper()
 	directory := t.TempDir()
 	store := FileStore{
@@ -170,6 +174,7 @@ func newTestRuntime(t *testing.T, minecraft *fakeMinecraft, relay *fakeRelay, co
 		},
 		NodeID:               "test-node",
 		AutoRestartMinecraft: true, MaxMinecraftRestarts: 3, MinecraftRestartDelay: time.Millisecond,
+		OperationHistoryLimit: operationLimit,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -403,6 +408,142 @@ func TestResumeRestoresPersistedDesiredState(t *testing.T) {
 	}
 	stop := runtime.Stop()
 	waitOperation(t, runtime, stop.ID, "SUCCEEDED")
+}
+
+func TestOperationHistoryDefaultsToBoundedCapacityAndPreservesNewestOrder(t *testing.T) {
+	runtime := newTestRuntime(t,
+		&fakeMinecraft{state: componentstate.Stopped},
+		&fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}},
+		defaultCoordinator(),
+	)
+	if runtime.operationLimit != DefaultOperationHistoryLimit {
+		t.Fatalf("operation limit = %d, want %d", runtime.operationLimit, DefaultOperationHistoryLimit)
+	}
+
+	const writes = 20_000
+	generated := make([]string, 0, writes)
+	for index := 0; index < writes; index++ {
+		runtime.mu.Lock()
+		operation := runtime.newOperationLocked("stress")
+		runtime.activeID, runtime.activeKind = "", ""
+		runtime.mu.Unlock()
+		generated = append(generated, operation.ID)
+	}
+
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	if len(runtime.operations) != DefaultOperationHistoryLimit || len(runtime.operationOrder) != DefaultOperationHistoryLimit {
+		t.Fatalf("operation history is not bounded: map=%d order=%d limit=%d", len(runtime.operations), len(runtime.operationOrder), runtime.operationLimit)
+	}
+	if cap(runtime.operationOrder) != DefaultOperationHistoryLimit {
+		t.Fatalf("operation order capacity grew to %d", cap(runtime.operationOrder))
+	}
+	retained := generated[len(generated)-DefaultOperationHistoryLimit:]
+	for index, id := range retained {
+		if runtime.operationOrder[index] != id {
+			t.Fatalf("retained order[%d] = %s, want %s", index, runtime.operationOrder[index], id)
+		}
+		if _, ok := runtime.operations[id]; !ok {
+			t.Fatalf("newest operation %s missing from lookup map", id)
+		}
+	}
+	if _, ok := runtime.operations[generated[0]]; ok {
+		t.Fatal("oldest operation was not evicted")
+	}
+}
+
+func TestOperationHistoryLimitOneEvictsAndDoesNotResurrect(t *testing.T) {
+	runtime := newTestRuntimeWithOperationLimit(t,
+		&fakeMinecraft{state: componentstate.Stopped},
+		&fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}},
+		defaultCoordinator(),
+		1,
+	)
+	runtime.mu.Lock()
+	first := runtime.newOperationLocked("first")
+	second := runtime.newOperationLocked("second")
+	runtime.mu.Unlock()
+
+	if _, ok := runtime.Operation(first.ID); ok {
+		t.Fatal("capacity-one history retained the oldest operation")
+	}
+	if operation, ok := runtime.Operation(second.ID); !ok || operation.Kind != "second" {
+		t.Fatalf("newest operation missing: %+v, %v", operation, ok)
+	}
+
+	// Late callbacks from an evicted asynchronous operation must not insert it
+	// back into the bounded history.
+	runtime.setCurrentStep(first.ID, "late step")
+	runtime.succeed(first.ID, "late success")
+	runtime.fail(first.ID, errors.New("late failure"))
+	if _, ok := runtime.Operation(first.ID); ok {
+		t.Fatal("late callback resurrected an evicted operation")
+	}
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	if len(runtime.operations) != 1 || len(runtime.operationOrder) != 1 || runtime.operationOrder[0] != second.ID {
+		t.Fatalf("capacity-one history changed after late callback: map=%d order=%v", len(runtime.operations), runtime.operationOrder)
+	}
+}
+
+func TestOperationHistoryRejectsNegativeLimit(t *testing.T) {
+	_, err := NewRuntime(RuntimeOptions{
+		Minecraft: &fakeMinecraft{}, Relay: &fakeRelay{}, Coordinator: defaultCoordinator(),
+		OperationHistoryLimit: -1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "operation history limit") {
+		t.Fatalf("negative operation history limit error = %v", err)
+	}
+}
+
+func TestOperationHistoryConcurrentWritersAndReadersRemainBounded(t *testing.T) {
+	const (
+		limit           = 32
+		writerCount     = 8
+		writesPerWriter = 1_000
+	)
+	runtime := newTestRuntimeWithOperationLimit(t,
+		&fakeMinecraft{state: componentstate.Stopped},
+		&fakeRelay{status: frprelay.Status{Snapshot: componentstate.NewSnapshot(componentstate.Offline, time.Now(), "idle", "idle")}},
+		defaultCoordinator(),
+		limit,
+	)
+
+	var waitGroup sync.WaitGroup
+	for writer := 0; writer < writerCount; writer++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			for index := 0; index < writesPerWriter; index++ {
+				runtime.mu.Lock()
+				operation := runtime.newOperationLocked("concurrent")
+				runtime.activeID, runtime.activeKind = "", ""
+				runtime.mu.Unlock()
+				_, _ = runtime.Operation(operation.ID)
+			}
+		}()
+	}
+	for reader := 0; reader < writerCount; reader++ {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			for index := 0; index < writesPerWriter; index++ {
+				_, _ = runtime.Operation("missing-operation")
+			}
+		}()
+	}
+	waitGroup.Wait()
+
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	if len(runtime.operations) != limit || len(runtime.operationOrder) != limit {
+		t.Fatalf("concurrent history is not bounded: map=%d order=%d", len(runtime.operations), len(runtime.operationOrder))
+	}
+	for _, id := range runtime.operationOrder {
+		if _, ok := runtime.operations[id]; !ok {
+			t.Fatalf("ordered operation %s missing after concurrent writes", id)
+		}
+	}
 }
 
 func waitOperation(t *testing.T, runtime *Runtime, id, expected string) Operation {
