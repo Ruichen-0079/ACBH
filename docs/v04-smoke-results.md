@@ -20,7 +20,7 @@ allowed same-port mapping. ACBH did not read or modify `server.properties`.
 - `go test ./...`: pass
 - `go vet ./...`: pass
 - Coordinator build: pass
-- Coordinator full tests: 51/51 pass
+- Coordinator full tests after PR integration: 155/155 pass
 - Embedded single-page UI: inspected in a real local browser
 - Legacy source audit: no WebSocket player relay, Desktop runtime state writer,
   or `remote-public` state machine in the v0.4 Agent path
@@ -96,3 +96,42 @@ This result passes the agreed **16-hour durability threshold**. It does not
 claim that a 24-hour run was completed. The recommended sequence is to merge
 and release `v0.4.0-rc1` after PR review, with any later final-release endurance
 requirement recorded separately.
+
+## PR #68 integration candidate smoke
+
+The final runtime candidate `9669774642f244afe98f53a674cb54c2bcea37b2`
+merged `origin/main` into the relay-first branch without selecting whole-file
+`ours` or `theirs` resolutions. The candidate retained FRP as the Hobby player
+data plane, kept Coordinator HTTP as the control plane, and did not connect the
+Hobby entry path to the legacy WebSocket/playerproxy, Desktop runtime, or
+`remote-public` state machines.
+
+The candidate was deployed only to the isolated test Agent and Coordinator.
+The existing `frpc`/`frps` version, ports, token, VPS services, UFW rules, and
+protected local 25565 server were unchanged. Results were:
+
+- Coordinator restart: the Relay remained ONLINE and every observed public
+  25575 availability probe succeeded; Coordinator recovered without restarting
+  Minecraft or `frpc`.
+- Exact managed-frpc termination: PID 57200 was replaced by PID 40876 in about
+  six seconds; the observed managed-frpc count never exceeded one.
+- Duplicate Stop and Start calls returned the same operation IDs, completed
+  successfully, and returned to one test Java and one managed `frpc`.
+- Minecraft client validation after candidate deployment: player
+  `Ruichen_0079` completed a world join at `2026-07-17 15:52:10 +08:00`, left,
+  completed a reconnect/world join at `15:52:20`, and left normally. The user
+  confirmed successful entry and reconnect. No player IP is retained.
+- Thirty-minute post-fault window: 31 samples over 30.45 minutes, zero
+  non-healthy Agent/Minecraft/Relay/Coordinator samples, zero public 25575
+  probe failures, zero protected-25565 failures or PID changes, maximum one
+  test Java, and maximum one managed `frpc`.
+- Candidate Agent resource peaks in that window: about 56.3 MiB working set,
+  18 threads, and 248 handles.
+- The protected local 25565 listener remained PID 29556 throughout.
+
+GitHub Actions run
+[`29563142494`](https://github.com/Ruichen-0079/ACBH/actions/runs/29563142494)
+passed the Linux and Windows Agent/Coordinator matrix. The repository Agent,
+Coordinator, and VPS-script checks on PR #68 also passed. The isolated test
+environment remains running; this short smoke does not replace or extend the
+accepted 16-hour durability result and does not claim a 24-hour run.
