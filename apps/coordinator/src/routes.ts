@@ -382,7 +382,7 @@ export async function registerRoutes(
       v1NonGoal: "hot-migration",
       persistence: "none",
       protocol_version: 1,
-      server_version: "0.4.0-hobby",
+      server_version: "0.4.0-rc1",
       frp_server_port: parsePort(process.env.ACBH_FRP_SERVER_PORT, 7000),
       public_minecraft_port: parsePort(process.env.ACBH_PUBLIC_MINECRAFT_PORT, 25565),
       heartbeat_interval_seconds: 10,
@@ -425,7 +425,7 @@ export async function registerRoutes(
     state: "ONLINE",
     protocol_version: 1,
     node_count: hobbyNodes.size,
-    server_version: "0.4.0-hobby",
+    server_version: "0.4.0-rc1",
   }));
 
   app.get("/v1/nodes", async (request, reply) => {

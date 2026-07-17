@@ -78,7 +78,7 @@ func runHobbyServe(parent context.Context, command *cobra.Command, options hobby
 	runtimeService, err := hobbyagent.NewRuntime(hobbyagent.RuntimeOptions{
 		Store: store, Minecraft: minecraft, Relay: relay,
 		Coordinator: hobbyagent.CoordinatorClient{}, FRPCPath: options.frpcPath,
-		RuntimeDir: filepath.Join(runtimeDir, "relay"), AgentVersion: "0.4.0-hobby",
+		RuntimeDir: filepath.Join(runtimeDir, "relay"), AgentVersion: "0.4.0-rc1",
 		Logger: logWriter, AutoRestartMinecraft: options.autoRestartMinecraft,
 		MaxMinecraftRestarts: options.maxMinecraftRestarts,
 	})
