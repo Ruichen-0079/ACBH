@@ -306,7 +306,10 @@ func (m *Manager) probe(ctx context.Context, config Config, connectedAt *time.Ti
 	m.status.LocalReachable = localErr == nil
 	m.status.PublicReachable = publicErr == nil
 	m.status.LastProbeAt = timePointer(now)
-	if m.status.FRPSConnected && localErr == nil && publicErr == nil {
+	// The relay data plane is healthy when frpc is authenticated to frps and
+	// the public listener is reachable. The user-owned local Minecraft server
+	// may be offline independently; that state must not stop or degrade frpc.
+	if m.status.FRPSConnected && publicErr == nil {
 		m.status.ConnectedSince = cloneTimePointer(connectedAt)
 		m.status.LastOKAt = timePointer(now)
 		m.status.ObservedAt = timePointer(now)
@@ -315,9 +318,7 @@ func (m *Manager) probe(ctx context.Context, config Config, connectedAt *time.Ti
 	}
 	reason := "frps_not_connected"
 	technical := "frpc has not reported a successful frps connection"
-	if localErr != nil {
-		reason, technical = "local_port_unreachable", localErr.Error()
-	} else if publicErr != nil {
+	if publicErr != nil {
 		reason, technical = "public_probe_failed", publicErr.Error()
 	}
 	state := componentstate.Connecting

@@ -73,15 +73,8 @@ func (c Config) Public() PublicConfig {
 	}
 }
 
-type ImportedServer struct {
-	ServerDir string `json:"server_dir"`
-	JavaPath  string `json:"java_path"`
-	JarPath   string `json:"jar_path"`
-}
-
 type FileStore struct {
 	ConfigPath  string
-	ImportPath  string
 	DesiredPath string
 }
 
@@ -108,7 +101,7 @@ func (s FileStore) desiredPath() string {
 	if strings.TrimSpace(s.DesiredPath) != "" {
 		return s.DesiredPath
 	}
-	return s.ImportPath + ".desired"
+	return s.ConfigPath + ".desired"
 }
 
 func (s FileStore) LoadConfig() (Config, error) {
@@ -129,21 +122,6 @@ func (s FileStore) SaveConfig(value Config) error {
 		return err
 	}
 	return atomicWriteJSON(s.ConfigPath, value)
-}
-
-func (s FileStore) LoadImportedServer() (ImportedServer, error) {
-	var value ImportedServer
-	if err := readJSON(s.ImportPath, &value); err != nil {
-		return ImportedServer{}, err
-	}
-	return value, nil
-}
-
-func (s FileStore) SaveImportedServer(value ImportedServer) error {
-	if strings.TrimSpace(value.ServerDir) == "" {
-		return errors.New("server_dir is required")
-	}
-	return atomicWriteJSON(s.ImportPath, value)
 }
 
 func readJSON(path string, value any) error {

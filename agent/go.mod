@@ -1,9 +1,10 @@
 module github.com/Ruichen-0079/ACBH/agent
 
-go 1.22
+go 1.24.0
 
 require (
 	github.com/spf13/cobra v1.8.1
+	golang.org/x/sys v0.36.0
 	nhooyr.io/websocket v1.8.17
 )
 

@@ -69,6 +69,15 @@ func (p recordingProber) Probe(_ context.Context, address string) error {
 	return nil
 }
 
+type localOfflineProber struct{ localAddress string }
+
+func (p localOfflineProber) Probe(_ context.Context, address string) error {
+	if address == p.localAddress {
+		return errors.New("local Minecraft is offline")
+	}
+	return nil
+}
+
 type switchableProber struct {
 	mu         sync.RWMutex
 	publicAddr string
@@ -306,7 +315,7 @@ func TestGeneratedConfigAndProbesUseConfiguredPorts(t *testing.T) {
 	}
 }
 
-func TestOnlineRequiresConnectionAndBothProbes(t *testing.T) {
+func TestOnlineRequiresConnectionAndPublicProbe(t *testing.T) {
 	process := newBlockingProcess(301)
 	launcher := &fakeLauncher{start: func(int, LaunchRequest) (Process, error) { return process, nil }}
 	manager := NewManager(Dependencies{Launcher: launcher, Prober: fakeProber{}, Inspector: fakeInspector(false)})
@@ -318,6 +327,29 @@ func TestOnlineRequiresConnectionAndBothProbes(t *testing.T) {
 	status := manager.Status()
 	if !status.FRPSConnected || !status.LocalReachable || !status.PublicReachable || status.LastOKAt == nil {
 		t.Fatalf("incomplete online evidence: %+v", status)
+	}
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLocalServerOfflineDoesNotDegradeConnectedRelay(t *testing.T) {
+	config := testConfig(t)
+	process := newBlockingProcess(305)
+	launcher := &fakeLauncher{start: func(int, LaunchRequest) (Process, error) { return process, nil }}
+	manager := NewManager(Dependencies{
+		Launcher:  launcher,
+		Prober:    localOfflineProber{localAddress: config.LocalAddress()},
+		Inspector: fakeInspector(false),
+	})
+	if err := manager.Start(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	process.lines <- OutputLine{Stream: "stdout", Line: "login to server success", Time: time.Now().UTC()}
+	waitFor(t, time.Second, func() bool { return manager.Status().State == componentstate.Online })
+	status := manager.Status()
+	if status.LocalReachable || !status.PublicReachable || !status.FRPSConnected {
+		t.Fatalf("unexpected independent local/relay status: %+v", status)
 	}
 	if err := manager.Stop(context.Background()); err != nil {
 		t.Fatal(err)

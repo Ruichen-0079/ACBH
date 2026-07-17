@@ -3,71 +3,110 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ACBH</title>
+  <title>ACBH 公网中转</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
   <main class="shell">
-    <header><h1>ACBH</h1><span class="edition">Hobby Edition</span></header>
+    <header>
+      <div><h1>ACBH</h1><p>让你手动运行的 Minecraft 服务器稳定连接公网。</p></div>
+      <span class="edition">Hobby v0.4</span>
+    </header>
 
-    <section id="offline" class="card hero">
-      <div class="orb muted"></div>
-      <h2>当前没有托管服务器</h2>
-      <p>导入 Minecraft 服务端并连接你的 VPS。</p>
-      <button id="start" class="primary">开始托管</button>
-    </section>
-
-    <section id="online" class="card hidden">
-      <div class="headline"><span class="dot good"></span><h2>公网服务器在线</h2></div>
-      <p class="label">玩家地址</p>
-      <div class="endpoint"><strong id="endpoint">—</strong><button id="copy-address" class="ghost">复制</button></div>
-      <div class="components">
-        <div><span>本地服务器</span><b id="local-endpoint">127.0.0.1:25565</b></div>
-        <div><span>服务器状态</span><b id="minecraft-state">● 正常</b></div>
-        <div><span>公网中转</span><b id="relay-state">● 正常</b></div>
-        <div><span>已持续运行</span><b id="uptime">—</b></div>
+    <section class="card config-card" aria-labelledby="config-title">
+      <div class="section-title">
+        <div><span class="eyebrow">连接设置</span><h2 id="config-title">三项配置，即可开始</h2></div>
+        <span id="token-state" class="token-state">Token 未配置</span>
       </div>
-      <button id="stop" class="danger">停止托管</button>
+      <form id="connection-form">
+        <label>公网 IP / 域名
+          <input id="public-host" autocomplete="url" required placeholder="例如：vps.example.com">
+        </label>
+        <label>Access Token
+          <input id="access-token" type="password" autocomplete="new-password" placeholder="保存后不会显示原文">
+          <small>这里是 ACBH Access Token，不是 PEM、SSH 密码或 VPS 私钥。</small>
+        </label>
+        <label>自定义端口
+          <input id="custom-port" type="number" inputmode="numeric" min="1024" max="65535" step="1" value="25565" required>
+          <small>同时用于本地 127.0.0.1 和 VPS 公网入口。</small>
+        </label>
+        <div class="actions">
+          <button id="save-start" class="primary" type="submit">保存并启动</button>
+          <button id="stop-relay" class="secondary" type="button">停止中转</button>
+          <button id="copy-address" class="ghost" type="button">复制公网地址</button>
+        </div>
+      </form>
+      <p id="action-message" class="message" role="status" aria-live="polite"></p>
     </section>
 
-    <section id="progress" class="card hidden">
-      <div class="spinner"></div>
-      <h2 id="step">正在准备</h2>
-      <p id="progress-message">请稍候，浏览器可以安全关闭。</p>
+    <section class="card status-card" aria-labelledby="status-title">
+      <div class="section-title">
+        <div><span class="eyebrow">实时状态</span><h2 id="status-title">中转概况</h2></div>
+        <span id="overall-pill" class="pill neutral">未启动</span>
+      </div>
+      <div class="status-list">
+        <div><span class="status-label">本地服务器</span><strong id="local-state">检测中</strong></div>
+        <div><span class="status-label">公网中转</span><strong id="relay-state">离线</strong></div>
+        <div><span class="status-label">Agent</span><strong id="agent-state">正常</strong></div>
+      </div>
+      <div class="address-box">
+        <span>公网地址</span>
+        <strong id="public-address">—</strong>
+      </div>
+      <p id="short-error" class="error hidden"></p>
     </section>
 
-    <footer>
-      <button id="open-settings" class="link">设置</button>
-      <button id="open-diagnostics" class="link">诊断</button>
-    </footer>
+    <details id="details" class="card details-card">
+      <summary>查看详情</summary>
+      <div class="details-content">
+        <div class="detail-grid">
+          <div><span>Agent</span><strong id="detail-agent">—</strong></div>
+          <div><span>Local Probe</span><strong id="detail-local">—</strong></div>
+          <div><span>FRP</span><strong id="detail-relay">—</strong></div>
+          <div><span>Coordinator</span><strong id="detail-coordinator">—</strong></div>
+          <div><span>本地目标</span><strong id="detail-local-endpoint">—</strong></div>
+          <div><span>公网地址</span><strong id="detail-public-endpoint">—</strong></div>
+          <div><span>Agent 版本</span><strong id="agent-version">—</strong></div>
+          <div><span>frpc 版本</span><strong id="frpc-version">—</strong></div>
+        </div>
+
+        <section class="detail-section">
+          <h3>最后错误</h3>
+          <p id="last-error" class="technical">暂无错误</p>
+        </section>
+
+        <section class="detail-section">
+          <h3>最近状态变化</h3>
+          <ol id="state-events" class="event-list"><li>暂无状态变化</li></ol>
+        </section>
+
+        <section class="detail-section">
+          <div class="log-heading">
+            <h3>近期结构化日志</h3>
+            <div class="log-controls">
+              <label>筛选
+                <select id="log-filter">
+                  <option value="all">全部</option>
+                  <option value="local_probe">Local Probe</option>
+                  <option value="relay">FRP</option>
+                  <option value="coordinator">Coordinator</option>
+                </select>
+              </label>
+              <label class="pause"><input id="pause-logs" type="checkbox"> 暂停滚动</label>
+            </div>
+          </div>
+          <pre id="logs">暂无日志</pre>
+          <div class="detail-actions">
+            <button id="copy-logs" type="button" class="secondary">复制脱敏日志</button>
+            <button id="open-log-dir" type="button" class="secondary">打开日志目录</button>
+            <button id="export-diagnostics" type="button" class="secondary">导出脱敏诊断包</button>
+          </div>
+        </section>
+      </div>
+    </details>
+
+    <footer>关闭此页面不会停止 Agent 或公网中转。</footer>
   </main>
-
-  <dialog id="settings-dialog">
-    <form id="settings-form" method="dialog">
-      <div class="dialog-title"><h2>设置</h2><button id="close-settings" type="button" class="close" aria-label="关闭">×</button></div>
-      <label>VPS / Coordinator 地址<input id="coordinator-host" required placeholder="vps.example.com"></label>
-      <label>Coordinator 端口<input id="coordinator-port" required type="number" min="1" max="65535" value="6121"></label>
-      <label>Access Token<input id="access-token" type="password" placeholder="已保存的 Token 不会显示"></label>
-      <label>本地 MC 端口<input id="minecraft-local-port" required type="number" min="1024" max="65535" step="1" value="25565"></label>
-      <label>VPS 公网端口<input id="public-minecraft-port" required type="number" min="1024" max="65535" step="1" value="25565"></label>
-      <p class="hint">玩家通过 VPS 公网端口连接，中转到本地 MC 端口。</p>
-      <button id="save-settings" value="default" class="primary">保存设置</button>
-      <hr>
-      <label>Minecraft 服务端目录<input id="server-dir" placeholder="C:\minecraft-server 或 /srv/minecraft"></label>
-      <button id="import-server" value="default" class="secondary">导入服务端</button>
-      <p id="settings-result" class="message"></p>
-    </form>
-  </dialog>
-
-  <dialog id="diagnostics-dialog">
-    <div class="dialog-title"><h2>诊断</h2><button id="close-diagnostics" class="close" aria-label="关闭">×</button></div>
-    <div class="diagnostic-actions">
-      <button id="copy-diagnostics" class="secondary">复制诊断信息</button>
-      <button id="download-diagnostics" class="secondary">下载 JSON</button>
-    </div>
-    <pre id="diagnostics">正在读取…</pre>
-  </dialog>
-
   <script src="/app.js" defer></script>
 </body>
 </html>

@@ -5,52 +5,54 @@ package frprelay
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/windows"
 )
 
-type windowsProcessIdentity struct {
-	Executable  string `json:"executable"`
-	CreatedUTC  string `json:"created_utc"`
-	CommandLine string `json:"command_line"`
-}
+const stillActive = 259
 
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	output, err := exec.Command(
-		"tasklist", "/FI", fmt.Sprintf("PID eq %d", pid), "/FO", "CSV", "/NH",
-	).Output()
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	line := strings.TrimSpace(string(output))
-	if line == "" || strings.HasPrefix(strings.ToUpper(line), "INFO:") {
+	defer windows.CloseHandle(process)
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(process, &exitCode); err != nil {
 		return false
 	}
-	return strings.Contains(line, ",\""+strconv.Itoa(pid)+"\",")
+	return exitCode == stillActive
 }
 
 func processFingerprint(pid int) (string, error) {
 	if pid <= 0 {
 		return "", fmt.Errorf("invalid PID %d", pid)
 	}
-	script := fmt.Sprintf(`$p=Get-CimInstance Win32_Process -Filter 'ProcessId=%d'; if($null -eq $p){exit 3}; [pscustomobject]@{executable=$p.ExecutablePath;created_utc=$p.CreationDate.ToUniversalTime().ToString('o');command_line=$p.CommandLine}|ConvertTo-Json -Compress`, pid)
-	output, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script).Output()
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	if err != nil {
-		return "", fmt.Errorf("inspect process %d identity: %w", pid, err)
+		return "", fmt.Errorf("open process %d identity: %w", pid, err)
 	}
-	var identity windowsProcessIdentity
-	if err := json.Unmarshal(output, &identity); err != nil {
-		return "", fmt.Errorf("parse process %d identity: %w", pid, err)
+	defer windows.CloseHandle(process)
+
+	image := make([]uint16, 32768)
+	size := uint32(len(image))
+	if err := windows.QueryFullProcessImageName(process, 0, &image[0], &size); err != nil {
+		return "", fmt.Errorf("read process %d executable: %w", pid, err)
 	}
-	if identity.Executable == "" || identity.CreatedUTC == "" {
+	executable := windows.UTF16ToString(image[:size])
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
+		return "", fmt.Errorf("read process %d creation time: %w", pid, err)
+	}
+	if strings.TrimSpace(executable) == "" || created.Nanoseconds() <= 0 {
 		return "", fmt.Errorf("process %d identity is incomplete", pid)
 	}
-	sum := sha256.Sum256([]byte(strings.ToLower(identity.Executable) + "\x00" + identity.CreatedUTC + "\x00" + identity.CommandLine))
+	sum := sha256.Sum256([]byte(strings.ToLower(executable) + "\x00" + strconv.FormatInt(created.Nanoseconds(), 10)))
 	return hex.EncodeToString(sum[:]), nil
 }

@@ -1,0 +1,25 @@
+ACBH v0.4 Windows distribution third-party notices
+===================================================
+
+The Windows Agent and launcher are statically built with the Go standard
+library and the modules listed below. Their complete license texts are shipped
+in the distribution's licenses directory.
+
+Go standard library (BSD-3-Clause)
+github.com/spf13/cobra v1.8.1 (Apache-2.0)
+github.com/spf13/pflag v1.0.5 (BSD-3-Clause)
+github.com/inconshreveable/mousetrap v1.1.0 (Apache-2.0)
+nhooyr.io/websocket v1.8.17 (ISC)
+golang.org/x/sys v0.36.0 (BSD-3-Clause)
+
+frp (frpc.exe)
+---------------
+Project: https://github.com/fatedier/frp
+Pinned version: v0.70.0
+Copyright: frp contributors
+License: Apache License 2.0
+
+The complete frp license text is included at licenses/frp-Apache-2.0.txt.
+
+ACBH does not bundle Node.js, npm, a Java runtime, Minecraft, server.jar,
+worlds, mods, plug-ins, or server files in the v0.4 Windows package.

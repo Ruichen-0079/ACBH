@@ -115,7 +115,7 @@ func NewStore(now time.Time, capacity int) *Store {
 	}
 	return &Store{
 		components: Components{
-			Minecraft:   NewSnapshot(Stopped, now, "not_started", "Minecraft 未启动"),
+			Minecraft:   NewSnapshot(Unknown, now, "not_checked", "尚未探测本地服务器"),
 			Relay:       NewSnapshot(Offline, now, "not_started", "公网中转未启动"),
 			Coordinator: NewSnapshot(Unknown, now, "not_checked", "尚未连接 Coordinator"),
 		},
@@ -176,7 +176,7 @@ func (s *Store) Events(limit int) []Event {
 
 func (s *Store) component(name string) *Snapshot {
 	switch name {
-	case "minecraft":
+	case "minecraft", "local_probe":
 		return &s.components.Minecraft
 	case "relay":
 		return &s.components.Relay
