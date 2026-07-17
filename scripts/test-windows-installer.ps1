@@ -64,6 +64,10 @@ if ($userRules.Count -ne 1 -or
     $userRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None) {
     throw "ProgramData root grants ordinary users write or inherited access to protected files"
 }
+$configSentinel = Join-Path $dataRoot "preserve-user-config.test"
+$logSentinel = Join-Path $dataRoot "logs\preserve-user-log.test"
+Set-Content -LiteralPath $configSentinel -Value "configuration must survive uninstall" -Encoding UTF8
+Set-Content -LiteralPath $logSentinel -Value "logs must survive uninstall" -Encoding UTF8
 $protocolCommand = (Get-ItemProperty -LiteralPath "Registry::HKEY_CLASSES_ROOT\acbh\shell\open\command")."(default)"
 if ($protocolCommand -notmatch 'acbh-launcher\.exe' -or $protocolCommand -notmatch '%1') {
     throw "Installed log-directory URI handler is missing"
@@ -93,8 +97,9 @@ while ((Get-Service -Name ACBHAgent -ErrorAction SilentlyContinue) -and [DateTim
     Start-Sleep -Milliseconds 250
 }
 if (Get-Service -Name ACBHAgent -ErrorAction SilentlyContinue) { throw "Uninstall did not remove the Agent service" }
-if (-not (Test-Path -LiteralPath (Join-Path $env:ProgramData "ACBH"))) {
-    throw "Uninstall unexpectedly removed user configuration and logs"
+if ((Get-Content -Raw -LiteralPath $configSentinel).Trim() -ne "configuration must survive uninstall" -or
+    (Get-Content -Raw -LiteralPath $logSentinel).Trim() -ne "logs must survive uninstall") {
+    throw "Uninstall changed or removed user configuration and logs"
 }
 
 $javaAfter = @(Get-CimInstance Win32_Process -Filter "Name = 'java.exe'" | ForEach-Object {

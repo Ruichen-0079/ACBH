@@ -37,8 +37,8 @@ UninstallDisplayIcon={app}\acbh-launcher.exe
 SetupLogging=yes
 
 [Dirs]
-Name: "{commonappdata}\ACBH"; Permissions: system-full admins-full
-Name: "{commonappdata}\ACBH\logs"; Permissions: system-full admins-full users-readexec
+Name: "{commonappdata}\ACBH"; Permissions: system-full admins-full; Flags: uninsneveruninstall
+Name: "{commonappdata}\ACBH\logs"; Permissions: system-full admins-full users-readexec; Flags: uninsneveruninstall
 
 [Files]
 Source: "{#SourceDir}\acbh-agent.exe"; DestDir: "{app}"; Flags: ignoreversion
