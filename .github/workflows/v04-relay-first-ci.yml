@@ -6,6 +6,7 @@ on:
     branches:
       - rewrite/v0.4-relay-first-clean
       - integration/v0.4-pr68
+      - packaging/v0.4-windows-installer-ui
 
 permissions:
   contents: read
@@ -58,6 +59,13 @@ jobs:
         working-directory: agent
         run: go test ./...
 
+      - name: Check Go formatting
+        working-directory: agent
+        shell: bash
+        run: |
+          gofmt -l . | tee gofmt-files.txt
+          test ! -s gofmt-files.txt
+
       - name: Race-test bounded operation history
         if: runner.os == 'Linux'
         working-directory: agent
@@ -66,3 +74,43 @@ jobs:
       - name: Vet Agent
         working-directory: agent
         run: go vet ./...
+
+      - name: Check patch whitespace
+        run: git diff --check HEAD
+
+  windows-package:
+    name: Build Windows installer
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build portable ZIP and Setup EXE
+        shell: pwsh
+        run: ./scripts/build-windows-installer.ps1 -Version "0.4.0-ci.${{ github.run_number }}"
+
+      - name: Verify Windows package
+        shell: pwsh
+        run: ./scripts/verify-windows-installer.ps1 -OutputDirectory ./dist/windows -Version "0.4.0-ci.${{ github.run_number }}"
+
+      - name: Test install, upgrade, and uninstall
+        shell: pwsh
+        run: ./scripts/test-windows-installer.ps1 -SetupPath "./dist/windows/ACBH-0.4.0-ci.${{ github.run_number }}-windows-x64-setup.exe"
+
+      - name: Upload package validation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: acbh-windows-package-${{ github.run_number }}
+          path: dist/windows/*
+          if-no-files-found: error
